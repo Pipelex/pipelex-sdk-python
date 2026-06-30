@@ -126,6 +126,10 @@ The wire models are snake_case Pydantic v2. Response models are extension-open (
 - **Storage** — `resolve_storage_url(uri)` → presigned URL; `upload(UploadInput)` → the stored file handle.
 - **Run records** — `list_runs(method_id)` → `list[PipelineRun]` (the catalog-style list, distinct from the lifecycle status/result routes); `update_run(run_id, UpdateRunInput)` (admin/manual status patch, empty 2xx body).
 
+## Health probe
+
+`health()` → `GET {origin}/health`. The one route served at the **origin**, NOT under the `/v1` prefix — the origin is derived from the base URL (`_origin_of`, exposed as `self.origin_url`), so a base URL of `https://api.pipelex.com/v1/...` still probes `https://api.pipelex.com/health`. It is **out-of-protocol**: the MTHDS Protocol defines no health route, and `/health` is neither a protocol nor a product surface. It rides `_request_json` (the plainer regime), so a non-2xx raises `PipelineRequestError` rather than the product `ApiResponseError` — liveness needs no `code` taxonomy. Transport failures still map to `ApiUnreachableError`. (Decision #5 revisits whether to bring `health` under `ApiResponseError` at the Checkpoint 5 parity gate.)
+
 ## Out of scope for v0.1
 
 - `/v1/build/*` helpers (the TS clients carry them; recorded as a conscious deferral).

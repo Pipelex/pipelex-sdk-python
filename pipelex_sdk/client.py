@@ -728,6 +728,18 @@ class PipelexAPIClient(MthdsAPIClient):
         body = update_input.model_dump(mode="json", exclude_none=True)
         await self._request_product("PUT", f"{_RUNS}/{quote(run_id, safe='')}", body=body)
 
+    # ── Health ─────────────────────────────────────────────────────────────
+    #
+    # The origin-level liveness probe. `/health` is served at the origin, NOT under the
+    # `/v1` prefix, and is out-of-protocol — the MTHDS Protocol defines no health route.
+    # It rides `_request_json`, the plainer regime: a non-2xx raises `PipelineRequestError`,
+    # not the product `ApiResponseError`, since liveness needs no `code` taxonomy.
+
+    async def health(self) -> dict[str, Any]:
+        """Origin-level liveness probe — `GET {origin}/health` (NOT under the `/v1` prefix)."""
+        result = await self._request_json("GET", f"{self.origin_url}/health")
+        return cast("dict[str, Any]", result)
+
 
 # ── Module helpers ──────────────────────────────────────────────────────
 
