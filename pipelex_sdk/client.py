@@ -257,7 +257,6 @@ class PipelexAPIClient(MthdsAPIClient):
             code=parsed.code,
         )
 
-    @override
     def _raise_if_lifecycle_unavailable(self, response: httpx.Response, url: str) -> None:
         """Translate a "route absent" 404 (a bare pipelex-api with no platform block) into a clear
         `RunLifecycleUnavailableError`. The platform's own 404s (run not found / cross-org) carry a
@@ -427,16 +426,12 @@ class PipelexAPIClient(MthdsAPIClient):
 
     # ── Hosted extension: durable run lifecycle (NOT part of the protocol) ──
     #
-    # These four methods are OWNED by this SDK: they return this package's own `runs`
-    # types (a Pipelex-branded surface), which are nominally distinct from the same-shaped
-    # types still in `mthds` during the transition. While the base `MthdsAPIClient` also
-    # declares them (until HANDOFF Phase 6 strips them), they read as incompatible overrides
-    # to the type-checker — hence `# type: ignore[override]`. Phase 6 deletes the base copies,
-    # after which the suppressions become unnecessary (harmless) and the `@override` markers
-    # should be removed alongside the base methods.
+    # These four methods are OWNED by this SDK and return this package's own `runs`
+    # types (a Pipelex-branded surface). The protocol base `MthdsAPIClient` is
+    # protocol-only — it declares no run lifecycle — so these are plain methods, not
+    # overrides (no `@override`, no override suppressions).
 
-    @override
-    async def get_run_status(self, run_id: str) -> RunRead:  # type: ignore[override]
+    async def get_run_status(self, run_id: str) -> RunRead:
         """Fetch a run's status by bare id — `GET /v1/runs/{run_id}/status`.
 
         Self-healing: a finished-but-unrecorded run resolves to its true terminal status on read.
@@ -458,8 +453,7 @@ class PipelexAPIClient(MthdsAPIClient):
             run = run.model_copy(update={"retry_after_seconds": retry_after})
         return run
 
-    @override
-    async def get_run_result(self, run_id: str) -> RunResultState:  # type: ignore[override]
+    async def get_run_result(self, run_id: str) -> RunResultState:
         """Single-shot result lookup — `GET /v1/runs/{run_id}/results`.
 
         Maps the platform's poll semantics to a discriminated union:
@@ -496,8 +490,7 @@ class PipelexAPIClient(MthdsAPIClient):
         result = RunResults.model_validate(response.json())
         return RunResultCompleted(pipeline_run_id=run_id, result=result)
 
-    @override
-    async def wait_for_result(self, run_id: str, options: WaitForResultOptions | None = None) -> RunResults:  # type: ignore[override]
+    async def wait_for_result(self, run_id: str, options: WaitForResultOptions | None = None) -> RunResults:
         """Poll a run to a terminal state and return its result.
 
         Resolves on `COMPLETED`, raises `RunFailedError` on any other terminal status, and raises
@@ -554,8 +547,7 @@ class PipelexAPIClient(MthdsAPIClient):
                 self._lifecycle_available = not (isinstance(implementation, str) and implementation == _BARE_RUNNER_IMPLEMENTATION)
         return self._lifecycle_available
 
-    @override
-    async def start_and_wait(  # type: ignore[override]
+    async def start_and_wait(
         self,
         pipe_code: str | None = None,
         mthds_contents: list[str] | None = None,
