@@ -22,6 +22,7 @@ It is the **hosted superset**: the five normative MTHDS Protocol routes (inherit
 - Use Make targets: `make install`, `make agent-check`, `make agent-test`, `make check`.
 - Always run `make agent-check` and `make agent-test` before considering a change done or pushing.
 - Test-first where practical. `pytest-mock` only (never `unittest.mock`). One `TestClass` per test module. No `__init__.py` in test directories.
+- **Test-only lint/type exemptions are config-scoped, not per-line.** When tests legitimately touch internals, exempt the rule **once** for the whole `tests/` tree — ruff `[tool.ruff.lint.per-file-ignores]` `"tests/**"` (e.g. `SLF001`, `PLC2701`) and pyright `[[tool.pyright.executionEnvironments]]` `root = "tests"` (e.g. `reportPrivateUsage = "none"`). Do **not** sprinkle inline `# noqa`/`# pyright: ignore` on each line. Source under `pipelex_sdk/` always stays under the full strict ruleset.
 - Document every iteration: update `docs/` and `CHANGELOG.md` alongside code.
 - No hardcoded counts in code/docs/commits. Pre-1.0 breaking changes → minor version bump.
 
