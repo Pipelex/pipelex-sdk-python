@@ -12,6 +12,12 @@ All notable changes to `pipelex-sdk` are documented here. The format follows [Ke
 
 - `CHANGELOG.md` version headers now use the workspace-wide `## [vX.Y.Z]` convention (matching `mthds-python` / `pipelex-sdk-js`), which the changelog/publish workflows key off.
 
+### Fixed
+
+- `PipelexAPIClient` now honors an explicit `api_token=""` as a request for anonymous access even when `PIPELEX_API_KEY` (or an mthds credential) is configured. Credential resolution tests `is not None` rather than truthiness, so the first *present* layer wins, restoring the documented "empty string = anonymous" contract and matching the JS SDK's `??` precedence chain.
+- `guard-branches.yml` workflow-protection job now checks out the PR head (`ref: pull_request.head.sha`) instead of the base branch, so its `git diff` actually detects fork edits to `.github/workflows/*`; its author-association gate is now a maintainer allow-list, so external authors reported as `FIRST_TIME_CONTRIBUTOR` / `FIRST_TIMER` / `NONE` (not only `CONTRIBUTOR`) are covered.
+- `tests-check.yml` no longer grants `id-token: write` to the test matrix job, which runs untrusted PR code and never uses OIDC (least privilege).
+
 ## [v0.1.0] - 2026-06-30
 
 The initial public surface of `pipelex-sdk` — the Python counterpart of `@pipelex/sdk`, built by inheritance on the `mthds` protocol base. Surface-complete against the TypeScript SDK (see `docs/architecture.md` → "Parity with `@pipelex/sdk`"); the `/v1/build/*` helpers and the WorkOS org-switch are consciously out of scope for this release.

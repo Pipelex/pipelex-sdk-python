@@ -159,10 +159,18 @@ class PipelexAPIClient(MthdsAPIClient):
         credentials = load_credentials()
 
         # Pipelex-primary, mthds fallback. `credentials` already layers env (MTHDS_*) >
-        # file (~/.mthds/config) > default, so this `or` chain gives the full precedence:
-        # explicit arg > PIPELEX_* env > MTHDS_* env > file > default. Empty string ("")
-        # means anonymous — the token is optional.
-        self.api_token: str = api_token or os.environ.get(_PIPELEX_API_KEY_ENV) or credentials["api_key"]
+        # file (~/.mthds/config) > default, so this ladder gives the full precedence:
+        # explicit arg > PIPELEX_* env > MTHDS_* env > file > default. The token is optional
+        # and an empty string ("") means anonymous — so the first layer that is *present*
+        # wins even when it is empty. We test `is not None` (not truthiness) to honor an
+        # explicit `api_token=""` / `PIPELEX_API_KEY=""`, matching the JS SDK's `??` chain.
+        self.api_token: str
+        if api_token is not None:
+            self.api_token = api_token
+        elif (pipelex_env_token := os.environ.get(_PIPELEX_API_KEY_ENV)) is not None:
+            self.api_token = pipelex_env_token
+        else:
+            self.api_token = credentials["api_key"]
 
         resolved_base_url = api_base_url or os.environ.get(_PIPELEX_API_URL_ENV) or credentials["api_url"] or DEFAULT_API_BASE_URL
         normalized_base_url = resolved_base_url.rstrip("/")

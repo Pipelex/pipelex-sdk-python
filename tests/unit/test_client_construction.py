@@ -49,6 +49,21 @@ class TestClientConstruction:
         assert client.api_token == "arg-token"
         assert client.api_base_url == "https://arg.example.com"
 
+    def test_explicit_empty_token_forces_anonymous_over_env(self, mocker: MockerFixture) -> None:
+        """An explicit `api_token=""` means anonymous and must win over a configured env token."""
+        mocker.patch.dict(os.environ, {"PIPELEX_API_KEY": "pk-env"}, clear=True)
+        client = PipelexAPIClient(api_token="")
+        assert client.api_token == ""
+
+    def test_explicit_empty_token_forces_anonymous_over_credentials(self, mocker: MockerFixture) -> None:
+        """An explicit `api_token=""` must win over an mthds credential token too."""
+        mocker.patch(
+            "pipelex_sdk.client.load_credentials",
+            return_value={"api_key": "mthds-key", "api_url": "https://mthds.example.com", "runner": "api", "telemetry": "0"},
+        )
+        client = PipelexAPIClient(api_token="")
+        assert client.api_token == ""
+
     def test_strips_trailing_slash(self) -> None:
         client = PipelexAPIClient(api_base_url="https://api.pipelex.com/")
         assert client.api_base_url == "https://api.pipelex.com"
