@@ -14,10 +14,13 @@ error-body parser. Lifecycle and product methods land in Phases 2-4.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from typing import Any, NamedTuple, NoReturn, cast
-from urllib.parse import urlparse
+import re
+import time
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
+from urllib.parse import quote, urlparse
 
 import httpx
 from mthds.config.credentials import load_credentials
@@ -28,13 +31,40 @@ from pydantic import TypeAdapter, ValidationError
 from pydantic_core import to_json
 from typing_extensions import override
 
-from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError
+from pipelex_sdk.errors import (
+    ApiResponseError,
+    ApiUnreachableError,
+    RunFailedError,
+    RunLifecycleUnavailableError,
+    RunTimeoutError,
+)
+from pipelex_sdk.runs import (
+    PollInfo,
+    RunRead,
+    RunResultCompleted,
+    RunResultFailed,
+    RunResultRunning,
+    RunResults,
+    RunStatus,
+    WaitForResultOptions,
+)
+
+if TYPE_CHECKING:
+    from mthds.protocol.models import RunResultStart
+    from mthds.protocol.pipe_output import VariableMultiplicity
+    from mthds.protocol.pipeline_inputs import PipelineInputs
+    from mthds.protocol.stuff import StuffType
+    from mthds.protocol.working_memory import WorkingMemoryAbstract
+    from mthds.runners.api.models import DictRunResultExecute
+
+    from pipelex_sdk.runs import RunResultState
 
 # The client composes every endpoint from one origin (PIPELEX_API_URL): `{base}/v1/{endpoint}`.
 # The same paths are served by the Pipelex Hosted API (api.pipelex.com) and by a bare
 # OSS pipelex-api runner (localhost:8081) — the protocol surface is identical; only the
 # hosted extensions (e.g. run polling) differ, detectable via GET /v1/version.
 _API_PREFIX = "v1"
+_RUNS = "runs"
 
 #: Hosted default — the client composes every endpoint as `{base}/v1/{endpoint}`.
 DEFAULT_API_BASE_URL = "https://api.pipelex.com"
@@ -45,6 +75,12 @@ _DEFAULT_DEGRADED_RETRY_SECONDS = 5  # matches the platform's `_DEGRADE_RETRY_AF
 
 _PIPELEX_API_KEY_ENV = "PIPELEX_API_KEY"
 _PIPELEX_API_URL_ENV = "PIPELEX_API_URL"
+
+# `VersionInfo.implementation` of the bare open-source runner (no run store). Anything
+# else — the hosted implementation first — is assumed to serve the durable run-lifecycle
+# extension; a wrong guess still fails with a clear `RunLifecycleUnavailableError` on the
+# first poll (or self-heals through `start_and_wait`'s blocking-execute fallback).
+_BARE_RUNNER_IMPLEMENTATION = "pipelex-api"
 
 
 class PipelexAPIClient(MthdsAPIClient):
@@ -92,6 +128,8 @@ class PipelexAPIClient(MthdsAPIClient):
         #: Origin root derived from the base URL — `/health` lives here, not under `/v1`.
         self.origin_url: str = _origin_of(normalized_base_url)
         self.client: httpx.AsyncClient | None = None
+        #: Cached `/v1/version` handshake outcome — whether the durable lifecycle is served.
+        self._lifecycle_available: bool | None = None
 
     @override
     def start_client(self) -> PipelexAPIClient:
@@ -167,8 +205,360 @@ class PipelexAPIClient(MthdsAPIClient):
             code=parsed.code,
         )
 
+    @override
+    def _raise_if_lifecycle_unavailable(self, response: httpx.Response, url: str) -> None:
+        """Translate a "route absent" 404 (a bare pipelex-api with no platform block) into a clear
+        `RunLifecycleUnavailableError`. The platform's own 404s (run not found / cross-org) carry a
+        structured problem+json envelope (a `code` field) and are left for normal handling.
+        """
+        if response.status_code != 404:
+            return
+        if _is_missing_route_404(response):
+            msg = (
+                f"The durable run lifecycle is not available: {url} returned 404. Run polling is a "
+                f"hosted-API extension (/{_API_PREFIX}/{_RUNS}/*), not part of the MTHDS Protocol; "
+                "PIPELEX_API_URL points at a bare runner that does not serve it."
+            )
+            raise RunLifecycleUnavailableError(msg, api_url=self.api_base_url)
+
+    # ── Protocol surface: `start` override (bare-runner 404 → typed error) ──
+
+    @override
+    async def start(
+        self,
+        pipe_code: str | None = None,
+        mthds_contents: list[str] | None = None,
+        inputs: PipelineInputs | WorkingMemoryAbstract[StuffType] | None = None,
+        output_name: str | None = None,
+        output_multiplicity: VariableMultiplicity | None = None,
+        dynamic_output_concept_ref: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> RunResultStart:
+        """Start a method asynchronously — `POST /v1/start` (202: `pipeline_run_id` only).
+
+        Identical to the inherited protocol `start`, except a bare-runner missing-route 404
+        (no run store) is translated into a clear `RunLifecycleUnavailableError` instead of a
+        raw `httpx.HTTPStatusError` — matching the JS SDK and letting `start_and_wait` self-heal
+        to the blocking-execute fallback. The platform's structured 404s (run not found) keep
+        their normal `httpx.HTTPStatusError` behavior.
+        """
+        try:
+            return await super().start(
+                pipe_code=pipe_code,
+                mthds_contents=mthds_contents,
+                inputs=inputs,
+                output_name=output_name,
+                output_multiplicity=output_multiplicity,
+                dynamic_output_concept_ref=dynamic_output_concept_ref,
+                extra=extra,
+            )
+        except httpx.HTTPStatusError as exc:
+            self._raise_if_lifecycle_unavailable(exc.response, str(exc.request.url))
+            raise
+
+    # ── Hosted extension: durable run lifecycle (NOT part of the protocol) ──
+    #
+    # These four methods are OWNED by this SDK: they return this package's own `runs`
+    # types (a Pipelex-branded surface), which are nominally distinct from the same-shaped
+    # types still in `mthds` during the transition. While the base `MthdsAPIClient` also
+    # declares them (until HANDOFF Phase 6 strips them), they read as incompatible overrides
+    # to the type-checker — hence `# type: ignore[override]`. Phase 6 deletes the base copies,
+    # after which the suppressions become unnecessary (harmless) and the `@override` markers
+    # should be removed alongside the base methods.
+
+    @override
+    async def get_run_status(self, run_id: str) -> RunRead:  # type: ignore[override]
+        """Fetch a run's status by bare id — `GET /v1/runs/{run_id}/status`.
+
+        Self-healing: a finished-but-unrecorded run resolves to its true terminal status on read.
+        `degraded=True` means Temporal was unreachable and `status` is the last-known value;
+        `retry_after_seconds` carries the server's `Retry-After` hint when present.
+
+        Raises:
+            RunLifecycleUnavailableError: If the lifecycle routes are absent (a bare runner).
+            ApiUnreachableError: If the host cannot be reached (DNS / connect / TLS / timeout).
+            httpx.HTTPStatusError: For a genuine run-not-found 404 or any other non-2xx response.
+        """
+        url = self._url(f"{_RUNS}/{quote(run_id, safe='')}/status")
+        response = await self._send_or_unreachable("GET", url, content=None, request_timeout=_POLL_REQUEST_TIMEOUT_SECONDS)
+        self._raise_if_lifecycle_unavailable(response, url)
+        response.raise_for_status()
+        run = RunRead.model_validate(response.json())
+        retry_after = _parse_retry_after(response.headers)
+        if retry_after is not None:
+            run = run.model_copy(update={"retry_after_seconds": retry_after})
+        return run
+
+    @override
+    async def get_run_result(self, run_id: str) -> RunResultState:  # type: ignore[override]
+        """Single-shot result lookup — `GET /v1/runs/{run_id}/results`.
+
+        Maps the platform's poll semantics to a discriminated union:
+        - HTTP 202 → `running` (in-flight, with the `Retry-After` hint)
+        - HTTP 503 → `running` (DynamoDB/Temporal degraded — retry, never fail a poller)
+        - HTTP 200 → `completed` (with the result artifacts)
+        - HTTP 409 → `failed` (terminal non-`COMPLETED`)
+
+        Raises:
+            RunLifecycleUnavailableError: If the lifecycle routes are absent (a bare runner).
+            ApiUnreachableError: If the host cannot be reached (DNS / connect / TLS / timeout).
+            httpx.HTTPStatusError: For a genuine run-not-found 404 or any other non-2xx response.
+        """
+        url = self._url(f"{_RUNS}/{quote(run_id, safe='')}/results")
+        response = await self._send_or_unreachable("GET", url, content=None, request_timeout=_POLL_REQUEST_TIMEOUT_SECONDS)
+        status_code = response.status_code
+
+        if status_code in {202, 503}:
+            retry_after = _parse_retry_after(response.headers)
+            return RunResultRunning(
+                pipeline_run_id=run_id,
+                retry_after_seconds=retry_after if retry_after is not None else _DEFAULT_DEGRADED_RETRY_SECONDS,
+            )
+        if status_code == 409:
+            message = _parse_error_message(response) or "Run finished without a result."
+            return RunResultFailed(
+                pipeline_run_id=run_id,
+                status=_extract_run_status_from_message(message),
+                message=message,
+            )
+
+        self._raise_if_lifecycle_unavailable(response, url)
+        response.raise_for_status()
+        result = RunResults.model_validate(response.json())
+        return RunResultCompleted(pipeline_run_id=run_id, result=result)
+
+    @override
+    async def wait_for_result(self, run_id: str, options: WaitForResultOptions | None = None) -> RunResults:  # type: ignore[override]
+        """Poll a run to a terminal state and return its result.
+
+        Resolves on `COMPLETED`, raises `RunFailedError` on any other terminal status, and raises
+        `RunTimeoutError` if `timeout_seconds` elapses first (the run keeps executing server-side —
+        resume later by `run_id`). Honors the server's `Retry-After`. Async-native: cancelling the
+        awaiting task raises `asyncio.CancelledError` out of this loop, leaving the run resumable.
+        """
+        opts = options or WaitForResultOptions()
+        started_at = time.monotonic()
+        attempt = 0
+
+        while True:
+            elapsed = time.monotonic() - started_at
+            remaining = opts.timeout_seconds - elapsed
+            if remaining <= 0:
+                raise RunTimeoutError(_timeout_message(run_id, opts.timeout_seconds), run_id=run_id, timeout_seconds=opts.timeout_seconds)
+
+            try:
+                state = await asyncio.wait_for(self.get_run_result(run_id), timeout=remaining)
+            except asyncio.TimeoutError as exc:  # noqa: UP041 — on Python 3.10 asyncio.TimeoutError is its own class, distinct from builtin TimeoutError.
+                raise RunTimeoutError(_timeout_message(run_id, opts.timeout_seconds), run_id=run_id, timeout_seconds=opts.timeout_seconds) from exc
+
+            if isinstance(state, RunResultCompleted):
+                return state.result
+            if isinstance(state, RunResultFailed):
+                msg = state.message
+                raise RunFailedError(msg, run_id=run_id, status=state.status)
+
+            # state is RunResultRunning — decide whether to keep waiting.
+            attempt += 1
+            elapsed = time.monotonic() - started_at
+            if elapsed >= opts.timeout_seconds:
+                raise RunTimeoutError(_timeout_message(run_id, opts.timeout_seconds), run_id=run_id, timeout_seconds=opts.timeout_seconds)
+            if opts.on_poll is not None:
+                opts.on_poll(PollInfo(attempt=attempt, elapsed_seconds=elapsed))
+
+            retry_seconds = state.retry_after_seconds if state.retry_after_seconds is not None else 0
+            wait_seconds = min(max(opts.interval_seconds, retry_seconds), opts.timeout_seconds - elapsed)
+            await asyncio.sleep(wait_seconds)
+
+    async def _supports_run_lifecycle(self) -> bool:
+        """Whether the configured server serves the durable run lifecycle, decided via the
+        `GET /v1/version` handshake and cached for the client's lifetime. A bare `pipelex-api`
+        runner has no run store; anything else is assumed hosted. When the handshake itself fails,
+        assume hosted (the SDK default) and let the start call surface the real error.
+        """
+        if self._lifecycle_available is None:
+            try:
+                info = await self.version()
+            except (httpx.HTTPError, ValidationError):
+                self._lifecycle_available = True
+            else:
+                implementation = (info.model_extra or {}).get("implementation")
+                self._lifecycle_available = not (isinstance(implementation, str) and implementation == _BARE_RUNNER_IMPLEMENTATION)
+        return self._lifecycle_available
+
+    @override
+    async def start_and_wait(  # type: ignore[override]
+        self,
+        pipe_code: str | None = None,
+        mthds_contents: list[str] | None = None,
+        inputs: PipelineInputs | WorkingMemoryAbstract[StuffType] | None = None,
+        output_name: str | None = None,
+        output_multiplicity: VariableMultiplicity | None = None,
+        dynamic_output_concept_ref: str | None = None,
+        extra: dict[str, Any] | None = None,
+        wait_options: WaitForResultOptions | None = None,
+    ) -> RunResults:
+        """Start a run and wait for its result — the whole lifecycle in one call, self-healing
+        across hosted and bare runners.
+
+        - **Hosted** (per the `/v1/version` handshake): durable `start` + poll, the path that
+          survives the gateway's ~30s synchronous ceiling and client disconnects.
+        - **Bare runner** (no run store): the blocking `POST /v1/execute`, which has no gateway
+          cap off-platform and returns the native `pipe_output`.
+
+        A runner can look hosted yet lack the durable routes (`implementation` is an extension
+        field a compliant bare runner may omit). Such a runner raises `RunLifecycleUnavailableError`
+        from `start`, BEFORE any run is created, so the blocking fallback cannot double-run; the
+        negative is cached so later calls skip the durable attempt.
+
+        Raises:
+            RunFailedError: If the run reaches a terminal status other than COMPLETED.
+            RunTimeoutError: If the poll budget elapses (the run keeps executing — resume by id).
+        """
+        if await self._supports_run_lifecycle():
+            try:
+                started = await self.start(
+                    pipe_code=pipe_code,
+                    mthds_contents=mthds_contents,
+                    inputs=inputs,
+                    output_name=output_name,
+                    output_multiplicity=output_multiplicity,
+                    dynamic_output_concept_ref=dynamic_output_concept_ref,
+                    extra=extra,
+                )
+            except RunLifecycleUnavailableError:
+                self._lifecycle_available = False
+                return await self._execute_blocking(
+                    pipe_code=pipe_code,
+                    mthds_contents=mthds_contents,
+                    inputs=inputs,
+                    output_name=output_name,
+                    output_multiplicity=output_multiplicity,
+                    dynamic_output_concept_ref=dynamic_output_concept_ref,
+                    extra=extra,
+                )
+            return await self.wait_for_result(started.pipeline_run_id, options=wait_options)
+
+        return await self._execute_blocking(
+            pipe_code=pipe_code,
+            mthds_contents=mthds_contents,
+            inputs=inputs,
+            output_name=output_name,
+            output_multiplicity=output_multiplicity,
+            dynamic_output_concept_ref=dynamic_output_concept_ref,
+            extra=extra,
+        )
+
+    async def _execute_blocking(
+        self,
+        *,
+        pipe_code: str | None,
+        mthds_contents: list[str] | None,
+        inputs: PipelineInputs | WorkingMemoryAbstract[StuffType] | None,
+        output_name: str | None,
+        output_multiplicity: VariableMultiplicity | None,
+        dynamic_output_concept_ref: str | None,
+        extra: dict[str, Any] | None,
+    ) -> RunResults:
+        """Blocking `POST /v1/execute` adapted onto `RunResults` — the bare-runner path.
+
+        Forwards every protocol field PLUS the `extra` extension passthrough: an extension-only
+        call (`{extra}` with no pipe_code/bundle) or a vendor selector riding `extra` must survive
+        this path, not just the durable one.
+        """
+        result = await self.execute(
+            pipe_code=pipe_code,
+            mthds_contents=mthds_contents,
+            inputs=inputs,
+            output_name=output_name,
+            output_multiplicity=output_multiplicity,
+            dynamic_output_concept_ref=dynamic_output_concept_ref,
+            extra=extra,
+        )
+        return _map_run_result_to_run_results(result)
+
 
 # ── Module helpers ──────────────────────────────────────────────────────
+
+
+_KNOWN_RUN_STATUS_NAMES: frozenset[str] = frozenset(RunStatus.__members__)
+
+
+def _timeout_message(run_id: str, timeout_seconds: float) -> str:
+    """The shared `RunTimeoutError` message — the run survives and is resumable by id."""
+    return f"Run {run_id} did not reach a terminal state within {timeout_seconds}s; it is still executing server-side and can be resumed by id."
+
+
+def _is_missing_route_404(response: httpx.Response) -> bool:
+    """Whether a 404 is an unmatched-route 404 (no platform deployed) rather than the platform's
+    structured run-not-found 404. The platform wraps its 404s in RFC 7807 problem+json with a stable
+    `code`; a bare runner returns Starlette's default `{"detail": "Not Found"}` (no `code`).
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return True
+    if not isinstance(body, dict):
+        return True
+    return "code" not in body
+
+
+def _parse_retry_after(headers: httpx.Headers) -> int | None:
+    """Parse the `Retry-After` header (integer-seconds form, which the platform uses)."""
+    raw = headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        seconds = int(raw)
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _parse_error_message(response: httpx.Response) -> str | None:
+    """Extract a human message from an error body — handles the platform's problem+json (`detail`
+    string) and the runner's `{"detail": {"message": ...}}` / `{"message": ...}` shapes.
+    """
+    try:
+        raw = response.json()
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    body = cast("dict[str, Any]", raw)
+    detail = body.get("detail")
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, dict):
+        message = cast("dict[str, Any]", detail).get("message")
+        if isinstance(message, str):
+            return message
+    top_message = body.get("message")
+    return top_message if isinstance(top_message, str) else None
+
+
+def _extract_run_status_from_message(message: str) -> RunStatus:
+    """Pull the status word out of a 409 detail ("Run finished with status FAILED; ..."), defaulting
+    to FAILED if the shape ever changes.
+    """
+    match = re.search(r"status\s+([A-Z_]+)", message)
+    if match and match.group(1) in _KNOWN_RUN_STATUS_NAMES:
+        return RunStatus(match.group(1))
+    return RunStatus.FAILED
+
+
+def _map_run_result_to_run_results(response: DictRunResultExecute) -> RunResults:
+    """Map the protocol's blocking `POST /v1/execute` response onto the lifecycle's `RunResults`.
+
+    The bare-runner path returns `pipe_output` (native runner shape); `main_stuff` and `graph_spec`
+    are hosted-durable artifacts and stay `None` here. Consumers read `main_stuff or pipe_output`
+    (the documented hosted/bare output-shape difference).
+    """
+    return RunResults(
+        pipeline_run_id=response.pipeline_run_id,
+        main_stuff=None,
+        graph_spec=None,
+        pipe_output=response.pipe_output.model_dump(),
+    )
 
 
 def _is_valid_base_url(value: str) -> bool:

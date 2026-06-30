@@ -65,6 +65,41 @@ Two regimes, ported faithfully from the TS SDK (decision #5 — not unified yet)
 - **`health` / `_request_json`** raise the plainer `PipelineRequestError` on a non-2xx response (decision #5 revisits whether to bring this under `ApiResponseError` at Checkpoint 5).
 - **Inherited protocol routes** (`execute` / `start` / `validate` / `models` / `version`) keep the base `mthds` `raise_for_status()` → `httpx.HTTPStatusError` behavior.
 
+## Run lifecycle (hosted extension)
+
+The durable run lifecycle (`pipelex_sdk/runs.py` + the client's lifecycle methods) is a **hosted-API extension, not part of the MTHDS Protocol**. Long method runs outlive the hosted gateway's ~30s synchronous cap, so a caller submits a run (`POST /v1/start`), then polls a self-healing endpoint by bare `pipeline_run_id` until it reaches a terminal state. All state lives behind the id (DynamoDB + Temporal on the platform), so a caller can drop the poll loop and resume later with just the id. A bare runner has no run store and `404`s these routes, which the client translates into a clear `RunLifecycleUnavailableError`.
+
+### Owned types (brand boundary)
+
+`pipelex_sdk/runs.py` **owns** the lifecycle models — they are a Pipelex-branded surface, mirroring `pipelex-sdk-js/src/runs.ts`. They are not imported from `mthds`. During the transition the same shapes still exist in `mthds-python`; that duplication is deliberate (so this SDK is correct regardless of `mthds-python`'s state) and is removed from `mthds-python` later. While the base `MthdsAPIClient` still declares the same lifecycle methods, the client's overrides return this package's own types and so read as incompatible overrides to the type-checker — they carry a narrow `# type: ignore[override]`, which becomes unnecessary (harmless) once the base copies are stripped.
+
+- `RunStatus` — the hosted status enum, with `is_terminal` / `is_success` predicates (exhaustive `match`).
+- `RunRead` — a run record read through the self-healing status path (adds `degraded` + `retry_after_seconds`).
+- `RunResults` — result artifacts. Hosted runs carry `main_stuff` (+ `graph_spec`); the bare-runner blocking fallback carries `pipe_output` (the runner's native execute response). Consumers read `main_stuff or pipe_output` (the documented hosted/bare output-shape difference). Extension-open, so any other server artifact is preserved.
+- `RunResultState` — the single-shot result outcome, a union discriminated on `state` (`running` / `completed` / `failed`).
+- `WaitForResultOptions` / `PollInfo` — poll-loop tuning and progress info. Async-native cancellation is via `asyncio.CancelledError` (cancel the awaiting task), so there is no `signal` field.
+
+### Polling surface
+
+- **`get_run_status(run_id)`** — `GET /v1/runs/{id}/status` → `RunRead`. Lifts the `Retry-After` header onto `retry_after_seconds`.
+- **`get_run_result(run_id)`** — `GET /v1/runs/{id}/results`, mapping the platform's poll semantics to the `RunResultState` union: `202`/`503` → `running` (in-flight / degraded — never fail a poller), `200` → `completed`, `409` → `failed` (terminal status parsed from the message).
+- **`wait_for_result(run_id, options)`** — polls `get_run_result` to a terminal state, honoring `Retry-After` and the deadline. Resolves on `COMPLETED`; raises `RunFailedError` on any other terminal status and `RunTimeoutError` if the budget elapses (the run keeps executing server-side — resume later by id).
+
+These poll GETs go through `_send_or_unreachable`, so a transport failure surfaces as `ApiUnreachableError` (consistent with the product layer), while a missing-route `404` surfaces as `RunLifecycleUnavailableError` and any other non-2xx as `httpx.HTTPStatusError`.
+
+### `start_and_wait` — hosted ↔ bare self-healing
+
+`start_and_wait` runs the whole lifecycle in one call and self-heals across runner kinds (the one place this SDK intentionally exceeds `mthds-python`, whose `start_and_wait` raises on a bare runner):
+
+- A cached `GET /v1/version` handshake (`_supports_run_lifecycle`) classifies the runner. `VersionInfo.implementation == "pipelex-api"` ⇒ a bare runner (no run store); anything else ⇒ assumed hosted. The outcome is cached for the client's lifetime; a failed handshake assumes hosted and lets `start` surface the real error.
+- **Hosted:** durable `start` (202 ack) → `wait_for_result` (poll to terminal).
+- **Bare runner:** the blocking `POST /v1/execute` (`_execute_blocking`), which has no gateway cap off-platform and returns the native `pipe_output`, mapped onto `RunResults` (`main_stuff = None`).
+- **Self-heal:** a runner can look hosted yet lack the durable routes (`implementation` is an optional extension a compliant bare runner may omit). The client's `start` override translates a bare-runner missing-route `404` into `RunLifecycleUnavailableError` — raised **before any run is created** — so `start_and_wait` falls back to the blocking path without risking a double-run, and caches the negative so later calls skip the durable attempt.
+
+### Run/lifecycle errors
+
+`RunFailedError`, `RunTimeoutError`, and `RunLifecycleUnavailableError` are owned in `pipelex_sdk/errors.py`. `RunStillRunningError` — the protocol `execute()` 202-degrade error — stays owned by `mthds` and is re-exported from `pipelex_sdk/errors.py` so consumers have a single import home for all run/lifecycle errors.
+
 ## Out of scope for v0.1
 
 - `/v1/build/*` helpers (the TS clients carry them; recorded as a conscious deferral).
