@@ -100,6 +100,32 @@ These poll GETs go through `_send_or_unreachable`, so a transport failure surfac
 
 `RunFailedError`, `RunTimeoutError`, and `RunLifecycleUnavailableError` are owned in `pipelex_sdk/errors.py`. `RunStillRunningError` — the protocol `execute()` 202-degrade error — stays owned by `mthds` and is re-exported from `pipelex_sdk/errors.py` so consumers have a single import home for all run/lifecycle errors.
 
+## `validate` override (Pipelex-API presentation + sources)
+
+The protocol `validate` is **overridden** (not inherited) to add the two Pipelex-API extensions the bare protocol route doesn't carry, while keeping the inherited protocol error regime (a no-verdict non-2xx surfaces as `httpx.HTTPStatusError`, not `ApiResponseError` — the verdict itself is always a 200 discriminated on `is_valid`):
+
+- **Markdown render is always injected.** `validate(...)` adds `"markdown"` to the `render` list (de-duplicated, caller tokens first) so both a valid `PipelexValidationReport` and a produced `PipelexInvalidReport` carry `rendered_markdown`. Unknown render tokens are server-side lenient-ignored.
+- **`mthds_sources`** is a named parameter (parallel to `mthds_contents`) threaded onto each diagnostic's `source`; sent only when provided.
+- **`validate_files(files, …)`** takes `MthdsFile(content, uri?)` records. When any file carries a URI, every content gets a parallel source label — the named file's URI, or a deterministic `inline://file-N.mthds` for an unnamed sibling — so the server never sees a length-mismatched `mthds_sources`.
+
+The override delegates the wire call to the inherited base `validate` (passing `render` / `mthds_sources` through the protocol's `extra` extension passthrough), so the body-building and transport stay shared; only the Pipelex presentation/sources concerns live here. The validation models (`PipelexValidationResult` = `PipelexValidationReport | PipelexInvalidReport`, with `rendered_markdown`) are reused from `mthds` for now (the brand-layering follow-up #9 — they would eventually migrate here to fully mirror the JS boundary).
+
+## Pipelex product surface (hosted management routes)
+
+The hosted catalog/account routes the webapp drives (`pipelex_sdk/product_models.py` + the client's product methods). Every route rides the same `{base}/v1/*` surface, `Authorization: Bearer`, org-from-JWT contract as the protocol routes, and goes through `_request_product`, which maps a non-2xx `problem+json` to a typed `ApiResponseError` — **consumers branch on `.code`, never the HTTP status**.
+
+The wire models are snake_case Pydantic v2. Response models are extension-open (`extra="allow"`) so a newly-added server field is preserved, not rejected; input models name exactly what each route accepts. `PipelineRun.status` reuses the run-lifecycle `RunStatus`; `OrgRole`, `PipeStatus`, and the onboarding fields are `StrEnum`s.
+
+- **User profile** — `get_me()` → `UserProfile` (`GET /v1/me`).
+- **Methods catalog** — `list_methods()` / `get_method(id)` / `create_method(MethodWriteInput)` / `update_method(id, MethodWriteInput)` (a rename is a changed `name`) / `delete_method(id)`. The id is path-encoded; an absent `input_data` is dropped from the write body.
+- **Organizations** — `list_memberships()` → `MembershipsResponse` (memberships + active-org feature flags); `create_organization(name)` / `rename_organization(org_id, name)` → `Membership`. Organization *switch* is out of scope (a WorkOS session op, not a `/v1` route).
+- **Billing** — `get_subscription()`, `list_plans()`, `list_invoices()`, `create_checkout(plan)`. `change_plan(plan)` and `get_billing_portal()` surface a **409 `conflict`** (`ApiResponseError.code`) when there is no subscription yet — start one via `create_checkout` first.
+- **Pipelex API keys** — `list_pipelex_api_keys()`; `create_pipelex_api_key(label)` and `rotate_pipelex_api_key(id)` return the plaintext `api_key` **once**; `revoke_pipelex_api_key(id)`. Creation surfaces a **409 `pipelex_api_key_limit_reached`** when the per-account limit is hit. Rotation sends no body.
+- **Gateway (LLM inference) key** — `create_gateway_api_key(promo_code)` **always sends a JSON body** (even with `promo_code=None` → `{"promo_code": null}`); the server 422s an empty body. `get_gateway_api_key()` → status (`gateway_api_key` is `None` until provisioned).
+- **Onboarding** — `submit_onboarding(OnboardingSubmission)` (`POST /v1/onboarding/submit`, empty 2xx body); absent optional fields are dropped.
+- **Storage** — `resolve_storage_url(uri)` → presigned URL; `upload(UploadInput)` → the stored file handle.
+- **Run records** — `list_runs(method_id)` → `list[PipelineRun]` (the catalog-style list, distinct from the lifecycle status/result routes); `update_run(run_id, UpdateRunInput)` (admin/manual status patch, empty 2xx body).
+
 ## Out of scope for v0.1
 
 - `/v1/build/*` helpers (the TS clients carry them; recorded as a conscious deferral).

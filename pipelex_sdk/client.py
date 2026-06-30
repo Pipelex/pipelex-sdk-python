@@ -7,9 +7,11 @@ Pipelex branding (env resolution, optional token, host-only base-URL validation)
 the richer transport/error layer the product and lifecycle phases build on, and —
 in later phases — the durable run lifecycle, the product surface, and `health`.
 
-This module currently holds Phase 1: construction, the transport extension helpers
-(`_request_product`, `_request_json`, `_send_or_unreachable`), and the `problem+json`
-error-body parser. Lifecycle and product methods land in Phases 2-4.
+This module holds construction, the transport extension helpers (`_request_product`,
+`_request_json`, `_send_or_unreachable`), the `problem+json` error-body parser, the
+durable run lifecycle, the `validate` override (markdown-render injection +
+`validate_files`), and the Pipelex product surface (methods, organizations, billing,
+API keys, onboarding, storage, run records). `health` lands in Phase 4.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from mthds.config.credentials import load_credentials
 from mthds.protocol.exceptions import PipelineRequestError
 from mthds.runners.api.client import MthdsAPIClient
 from mthds.runners.api.models import ValidationErrorItem
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import to_json
 from typing_extensions import override
 
@@ -37,6 +39,25 @@ from pipelex_sdk.errors import (
     RunFailedError,
     RunLifecycleUnavailableError,
     RunTimeoutError,
+)
+from pipelex_sdk.product_models import (
+    BillingPortalResponse,
+    ChangePlanResponse,
+    CheckoutResponse,
+    GatewayApiKey,
+    GatewayApiKeyStatus,
+    InvoiceView,
+    Membership,
+    MembershipsResponse,
+    MethodData,
+    PipelexApiKeyCreated,
+    PipelexApiKeyList,
+    PipelineRun,
+    PlanView,
+    ResolvedStorageUrl,
+    SubscriptionResponse,
+    UploadedFile,
+    UserProfile,
 )
 from pipelex_sdk.runs import (
     PollInfo,
@@ -55,8 +76,14 @@ if TYPE_CHECKING:
     from mthds.protocol.pipeline_inputs import PipelineInputs
     from mthds.protocol.stuff import StuffType
     from mthds.protocol.working_memory import WorkingMemoryAbstract
-    from mthds.runners.api.models import DictRunResultExecute
+    from mthds.runners.api.models import DictRunResultExecute, PipelexValidationResult
 
+    from pipelex_sdk.product_models import (
+        MethodWriteInput,
+        OnboardingSubmission,
+        UpdateRunInput,
+        UploadInput,
+    )
     from pipelex_sdk.runs import RunResultState
 
 # The client composes every endpoint from one origin (PIPELEX_API_URL): `{base}/v1/{endpoint}`.
@@ -81,6 +108,24 @@ _PIPELEX_API_URL_ENV = "PIPELEX_API_URL"
 # extension; a wrong guess still fails with a clear `RunLifecycleUnavailableError` on the
 # first poll (or self-heals through `start_and_wait`'s blocking-execute fallback).
 _BARE_RUNNER_IMPLEMENTATION = "pipelex-api"
+
+# `validate` always asks the Pipelex API for the Markdown view so both a valid result and a
+# produced validation-error verdict carry `rendered_markdown`; callers may add more tokens.
+_VALIDATE_MARKDOWN_RENDER_FORMAT = "markdown"
+
+
+class MthdsFile(BaseModel):
+    """One MTHDS file submitted to `validate_files` — content plus an optional provenance URI.
+
+    The URI is threaded into validation diagnostics so cross-file errors name the owning
+    file; an absent URI yields `source: null` for that content (unless any sibling file
+    carries one, in which case a deterministic `inline://` label is synthesized).
+    """
+
+    #: File contents to validate.
+    content: str
+    #: Optional provenance URI threaded into validation diagnostics.
+    uri: str | None = None
 
 
 class PipelexAPIClient(MthdsAPIClient):
@@ -255,6 +300,76 @@ class PipelexAPIClient(MthdsAPIClient):
         except httpx.HTTPStatusError as exc:
             self._raise_if_lifecycle_unavailable(exc.response, str(exc.request.url))
             raise
+
+    @override
+    async def validate(  # type: ignore[override]
+        self,
+        mthds_contents: list[str],
+        allow_signatures: bool = False,
+        mthds_sources: list[str] | None = None,
+        render: list[str] | None = None,
+    ) -> PipelexValidationResult:
+        """Parse, validate, and dry-run an MTHDS bundle — `POST /v1/validate`.
+
+        `/validate` is 200-diagnostic: a produced verdict — valid or invalid — rides a 200
+        body discriminated on `is_valid`, returned verbatim as the `PipelexValidationResult`
+        union (an invalid bundle is NOT raised; the caller match/cases `is_valid`). A non-2xx
+        means no verdict could be produced (request shape, auth, server fault) and surfaces as
+        `httpx.HTTPStatusError` (the inherited protocol error regime).
+
+        This override differs from the inherited protocol `validate` in two Pipelex-API ways:
+        it always injects `render: ["markdown"]` (so both valid and invalid verdicts carry
+        `rendered_markdown`), and it accepts `mthds_sources` as a named parameter.
+
+        Args:
+            mthds_contents: MTHDS contents to load (always a list, even for one file).
+            allow_signatures: Tolerate unimplemented pipe signatures (strict by default).
+            mthds_sources: Optional per-content source names, parallel to `mthds_contents`,
+                threaded onto each diagnostic's `source` (an unnamed content yields
+                `source: null`). The server 422s a length mismatch.
+            render: Optional Pipelex-API presentation hints; `"markdown"` is always added.
+                Unknown tokens are server-side lenient-ignored (never a 422).
+
+        Returns:
+            The 200-diagnostic union: `PipelexValidationReport` (`is_valid: true`) or
+            `PipelexInvalidReport` (`is_valid: false`, with `validation_errors`), each
+            carrying `rendered_markdown`.
+        """
+        extra: dict[str, Any] = {"render": _with_validate_markdown_render(render)}
+        if mthds_sources is not None:
+            extra["mthds_sources"] = mthds_sources
+        return await super().validate(mthds_contents, allow_signatures, extra=extra)
+
+    async def validate_files(
+        self,
+        files: list[MthdsFile],
+        allow_signatures: bool = False,
+        render: list[str] | None = None,
+    ) -> PipelexValidationResult:
+        """Validate paired MTHDS files while preserving URI attribution for diagnostics.
+
+        Decomposes the files into the low-level `validate(...)` payload. When any file carries
+        a URI, every content gets a parallel source label (a deterministic `inline://` label
+        for the ones without), so the server never sees a length-mismatched `mthds_sources`.
+
+        Raises:
+            PipelineRequestError: If `files` is empty.
+        """
+        if not files:
+            msg = "At least one MTHDS file must be provided to validate_files()."
+            raise PipelineRequestError(msg)
+
+        mthds_contents = [mthds_file.content for mthds_file in files]
+        has_any_uri = any(mthds_file.uri is not None for mthds_file in files)
+        mthds_sources: list[str] | None
+        if has_any_uri:
+            mthds_sources = [
+                mthds_file.uri if mthds_file.uri is not None else f"inline://file-{index + 1}.mthds" for index, mthds_file in enumerate(files)
+            ]
+        else:
+            mthds_sources = None
+
+        return await self.validate(mthds_contents, allow_signatures, mthds_sources, render)
 
     # ── Hosted extension: durable run lifecycle (NOT part of the protocol) ──
     #
@@ -476,11 +591,158 @@ class PipelexAPIClient(MthdsAPIClient):
         )
         return _map_run_result_to_run_results(result)
 
+    # ── Pipelex product surface (hosted management routes) ─────────────────
+    #
+    # The hosted catalog/account routes the webapp drives. Every one rides the same
+    # `{base}/v1/*` surface, `Authorization: Bearer`, org-from-JWT contract as the protocol
+    # routes, and goes through `_request_product`, which maps a non-2xx `problem+json` to a
+    # typed `ApiResponseError` — branch on `.code`, never the HTTP status.
+
+    async def get_me(self) -> UserProfile:
+        """The authenticated user's profile — `GET /v1/me`."""
+        return UserProfile.model_validate(await self._request_product("GET", "me"))
+
+    async def list_methods(self) -> list[MethodData]:
+        """List the caller's saved methods — `GET /v1/methods`."""
+        result = await self._request_product("GET", "methods")
+        return [MethodData.model_validate(item) for item in result]
+
+    async def get_method(self, method_id: str) -> MethodData:
+        """Fetch one method by id — `GET /v1/methods/{id}`."""
+        return MethodData.model_validate(await self._request_product("GET", f"methods/{quote(method_id, safe='')}"))
+
+    async def create_method(self, write_input: MethodWriteInput) -> MethodData:
+        """Create a method — `POST /v1/methods`."""
+        body = write_input.model_dump(mode="json", exclude_none=True)
+        return MethodData.model_validate(await self._request_product("POST", "methods", body=body))
+
+    async def update_method(self, method_id: str, write_input: MethodWriteInput) -> MethodData:
+        """Replace a method (a rename is a changed `name`) — `PUT /v1/methods/{id}`."""
+        body = write_input.model_dump(mode="json", exclude_none=True)
+        return MethodData.model_validate(await self._request_product("PUT", f"methods/{quote(method_id, safe='')}", body=body))
+
+    async def delete_method(self, method_id: str) -> None:
+        """Delete a method — `DELETE /v1/methods/{id}` (empty body)."""
+        await self._request_product("DELETE", f"methods/{quote(method_id, safe='')}")
+
+    async def list_memberships(self) -> MembershipsResponse:
+        """The caller's org memberships + active-org feature flags — `GET /v1/organizations/memberships`."""
+        return MembershipsResponse.model_validate(await self._request_product("GET", "organizations/memberships"))
+
+    async def create_organization(self, name: str) -> Membership:
+        """Create an organization — `POST /v1/organizations`."""
+        return Membership.model_validate(await self._request_product("POST", "organizations", body={"name": name}))
+
+    async def rename_organization(self, org_id: str, name: str) -> Membership:
+        """Rename an organization — `PATCH /v1/organizations/{org_id}`."""
+        return Membership.model_validate(await self._request_product("PATCH", f"organizations/{quote(org_id, safe='')}", body={"name": name}))
+
+    async def get_subscription(self) -> SubscriptionResponse:
+        """The active org's subscription state — `GET /v1/billing/subscription`."""
+        return SubscriptionResponse.model_validate(await self._request_product("GET", "billing/subscription"))
+
+    async def list_plans(self) -> list[PlanView]:
+        """Available plans (with `is_current`) — `GET /v1/billing/plans`."""
+        result = await self._request_product("GET", "billing/plans")
+        return [PlanView.model_validate(item) for item in result]
+
+    async def list_invoices(self) -> list[InvoiceView]:
+        """Past invoices — `GET /v1/billing/invoices`."""
+        result = await self._request_product("GET", "billing/invoices")
+        return [InvoiceView.model_validate(item) for item in result]
+
+    async def create_checkout(self, plan: str) -> CheckoutResponse:
+        """Open a Stripe checkout for a plan — `POST /v1/billing/checkout`."""
+        return CheckoutResponse.model_validate(await self._request_product("POST", "billing/checkout", body={"plan": plan}))
+
+    async def change_plan(self, plan: str) -> ChangePlanResponse:
+        """Switch the existing subscription's plan — `POST /v1/billing/change-plan`.
+
+        A 409 `conflict` (`ApiResponseError.code`) means there is no subscription to change —
+        start one via `create_checkout` first.
+        """
+        return ChangePlanResponse.model_validate(await self._request_product("POST", "billing/change-plan", body={"plan": plan}))
+
+    async def get_billing_portal(self) -> BillingPortalResponse:
+        """A Stripe billing-portal session URL — `GET /v1/billing/portal`.
+
+        A 409 `conflict` (`ApiResponseError.code`) means there is no subscription yet.
+        """
+        return BillingPortalResponse.model_validate(await self._request_product("GET", "billing/portal"))
+
+    async def list_pipelex_api_keys(self) -> PipelexApiKeyList:
+        """List the caller's Pipelex API keys — `GET /v1/pipelex-api-keys`."""
+        return PipelexApiKeyList.model_validate(await self._request_product("GET", "pipelex-api-keys"))
+
+    async def create_pipelex_api_key(self, label: str) -> PipelexApiKeyCreated:
+        """Mint a Pipelex API key — `POST /v1/pipelex-api-keys`.
+
+        The plaintext `api_key` is returned ONCE. A 409 `pipelex_api_key_limit_reached`
+        (`ApiResponseError.code`) means the per-account key limit is hit.
+        """
+        return PipelexApiKeyCreated.model_validate(await self._request_product("POST", "pipelex-api-keys", body={"label": label}))
+
+    async def revoke_pipelex_api_key(self, key_id: str) -> None:
+        """Revoke a Pipelex API key — `DELETE /v1/pipelex-api-keys/{id}` (empty body)."""
+        await self._request_product("DELETE", f"pipelex-api-keys/{quote(key_id, safe='')}")
+
+    async def rotate_pipelex_api_key(self, key_id: str) -> PipelexApiKeyCreated:
+        """Rotate a Pipelex API key — `POST /v1/pipelex-api-keys/{id}/rotate` (no body).
+
+        Returns the new plaintext `api_key` once; the old key stops working.
+        """
+        return PipelexApiKeyCreated.model_validate(await self._request_product("POST", f"pipelex-api-keys/{quote(key_id, safe='')}/rotate"))
+
+    async def create_gateway_api_key(self, promo_code: str | None) -> GatewayApiKey:
+        """Provision the gateway (LLM inference) API key — `POST /v1/gateway-api-key`.
+
+        The JSON body is ALWAYS sent (even with `promo_code=None`) — the server 422s an empty body.
+        """
+        return GatewayApiKey.model_validate(await self._request_product("POST", "gateway-api-key", body={"promo_code": promo_code}))
+
+    async def get_gateway_api_key(self) -> GatewayApiKeyStatus:
+        """The gateway key status (`None` until provisioned) — `GET /v1/gateway-api-key`."""
+        return GatewayApiKeyStatus.model_validate(await self._request_product("GET", "gateway-api-key"))
+
+    async def submit_onboarding(self, submission: OnboardingSubmission) -> None:
+        """Submit the onboarding questionnaire — `POST /v1/onboarding/submit` (empty body)."""
+        body = submission.model_dump(mode="json", exclude_none=True)
+        await self._request_product("POST", "onboarding/submit", body=body)
+
+    async def resolve_storage_url(self, uri: str) -> ResolvedStorageUrl:
+        """Resolve a storage URI to a presigned URL — `POST /v1/resolve-storage-url`."""
+        return ResolvedStorageUrl.model_validate(await self._request_product("POST", "resolve-storage-url", body={"uri": uri}))
+
+    async def upload(self, upload_input: UploadInput) -> UploadedFile:
+        """Upload a base64 file — `POST /v1/upload`."""
+        body = upload_input.model_dump(mode="json", exclude_none=True)
+        return UploadedFile.model_validate(await self._request_product("POST", "upload", body=body))
+
+    async def list_runs(self, method_id: str) -> list[PipelineRun]:
+        """List a method's runs — `GET /v1/runs?method_id={methodId}`."""
+        result = await self._request_product("GET", f"{_RUNS}?method_id={quote(method_id, safe='')}")
+        return [PipelineRun.model_validate(item) for item in result]
+
+    async def update_run(self, run_id: str, update_input: UpdateRunInput) -> None:
+        """Patch a run's status (admin/manual) — `PUT /v1/runs/{id}` (empty body)."""
+        body = update_input.model_dump(mode="json", exclude_none=True)
+        await self._request_product("PUT", f"{_RUNS}/{quote(run_id, safe='')}", body=body)
+
 
 # ── Module helpers ──────────────────────────────────────────────────────
 
 
 _KNOWN_RUN_STATUS_NAMES: frozenset[str] = frozenset(RunStatus.__members__)
+
+
+def _with_validate_markdown_render(render: list[str] | None) -> list[str]:
+    """Ensure `"markdown"` rides the `/validate` render list, preserving order and de-duplicating.
+
+    Mirrors the JS `withValidateMarkdownRender` (a `Set`): the caller's tokens come first, then
+    `"markdown"` if not already present, so both valid results and produced validation-error
+    verdicts carry `rendered_markdown`.
+    """
+    return list(dict.fromkeys([*(render or []), _VALIDATE_MARKDOWN_RENDER_FORMAT]))
 
 
 def _timeout_message(run_id: str, timeout_seconds: float) -> str:
