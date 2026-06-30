@@ -44,13 +44,26 @@ A token is **optional** (anonymous access is allowed; protocol routes work again
 - **No barrel** — package `__init__.py` files stay empty; consumers import via full paths (`from pipelex_sdk.client import PipelexAPIClient`). The public import paths are documented in the README.
 - **Wire format** — snake_case JSON fields on Pydantic v2 models.
 
+## Transport layer
+
+The client inherits `mthds`'s `_send` (one raw HTTP request, no status interpretation) and `_url` (`{base}/v1/{endpoint}`), and layers three helpers on top (`pipelex_sdk/client.py`):
+
+- **`_send_or_unreachable`** — wraps `_send`, mapping httpx transport failures to `ApiUnreachableError` (a `httpx.TimeoutException` → `code="ABORT_TIMEOUT"`; any other `httpx.TransportError` → `code=<exception class name>`). Non-2xx interpretation stays with the caller.
+- **`_request_product`** — the product-route path. Serializes the body with `pydantic_core.to_json` (supporting PUT/PATCH/DELETE as well as GET/POST), uses the management-call timeout, maps a non-2xx response to `ApiResponseError`, and is **empty-body tolerant** (a 2xx with no body — DELETE / onboarding / update — returns `None`).
+- **`_request_json`** — the plainer path for `health` (and, if ever added, the build extensions). Takes an absolute URL, raises `PipelineRequestError` on a non-2xx response. Transport failures still map to `ApiUnreachableError`.
+
+`start_client` is overridden so the `Authorization` header is sent only when a token is configured — anonymous access (empty token) omits it.
+
+The `problem+json` / `HTTPException` error body is parsed by `_parse_error_body` into `(error_type, server_message, validation_errors, code)`, handling both `{"detail": {...}}` and `{"detail": "..."}` shapes plus top-level `error_type` / `message` / `code`, and falling through to empty on a non-JSON or non-object body. `validation_errors` is parsed leniently (best-effort error-path enrichment; only reachable via the out-of-scope build-route 422s).
+
 ## Error regimes
 
-(To be detailed in Phase 1.) Two regimes, ported from the TS SDK:
+Two regimes, ported faithfully from the TS SDK (decision #5 — not unified yet):
 
-- **Product routes** raise a typed `ApiResponseError` carrying the RFC 9457 `.code` discriminant — consumers branch on `err.code` (e.g. `"conflict"`, `"pipelex_api_key_limit_reached"`), never on the HTTP status.
-- **Transport failures** (DNS/connect/TLS/timeout) raise `ApiUnreachableError`.
-- **Inherited protocol routes** keep the base `mthds` `raise_for_status()` → `httpx.HTTPStatusError` behavior.
+- **Product routes** raise a typed `ApiResponseError` (subclass of `PipelineRequestError`) carrying the RFC 9457 `code` discriminant — consumers branch on `err.code` (e.g. `"conflict"`, `"pipelex_api_key_limit_reached"`), never on the HTTP status. It also carries `status`, `status_text`, `response_body`, `error_type`, `server_message`, and `validation_errors`.
+- **Transport failures** (DNS/connect/TLS/timeout) raise `ApiUnreachableError` (subclass of `PipelineRequestError`) with `api_url` and `code`.
+- **`health` / `_request_json`** raise the plainer `PipelineRequestError` on a non-2xx response (decision #5 revisits whether to bring this under `ApiResponseError` at Checkpoint 5).
+- **Inherited protocol routes** (`execute` / `start` / `validate` / `models` / `version`) keep the base `mthds` `raise_for_status()` → `httpx.HTTPStatusError` behavior.
 
 ## Out of scope for v0.1
 

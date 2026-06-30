@@ -168,6 +168,13 @@ strictParameterNoneValue = true
 strictSetInference = true
 typeCheckingMode = "strict"
 
+# Unit tests legitimately probe internal transport/error helpers (e.g.
+# _request_product, _request_json, _parse_error_body) before the public surface
+# wraps them — allow private access in the test tree only.
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportPrivateUsage = "none"
+
 [tool.ruff]
 exclude = [
   ".cursor",
@@ -314,7 +321,9 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = [
-  "INP001", # Allow test files to not have __init__.py in their directories (avoids namespace collisions)
+  "INP001",  # Allow test files to not have __init__.py in their directories (avoids namespace collisions)
+  "SLF001",  # Unit tests legitimately probe private transport/error helpers (e.g. _request_product, _request_json)
+  "PLC2701", # Unit tests legitimately import private module helpers under test (e.g. _parse_error_body)
 ]
 "examples/**/*.py" = [
   "INP001", # Runnable demo scripts, not an importable package
