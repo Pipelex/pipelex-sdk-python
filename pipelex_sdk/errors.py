@@ -10,6 +10,8 @@ protocol base. Both derive from the protocol base `PipelineRequestError`
 - `ApiResponseError` — a non-2xx response from the API, carrying the parsed
   problem-details and, for the product routes, the stable RFC 9457 `code` discriminant
   a consumer branches on (decoupled from the HTTP status).
+- `PipelineExecuteTimeoutError` — a blocking `execute()` killed by the hosted gateway's
+  ~30s synchronous-request ceiling; points the caller at the durable start+poll path.
 
 The run-lifecycle errors (`RunFailedError`, `RunTimeoutError`,
 `RunLifecycleUnavailableError`) are owned here (ported from `mthds-python` in
@@ -85,6 +87,21 @@ class ApiResponseError(PipelineRequestError):
         self.server_message = server_message
         self.validation_errors = validation_errors
         self.code = code
+
+
+class PipelineExecuteTimeoutError(PipelineRequestError):
+    """Raised when a blocking `execute()` (`POST /v1/execute`) is killed by the hosted
+    gateway's ~30s synchronous-request ceiling.
+
+    The blocking path cannot run methods longer than ~30s behind the hosted gateway — use
+    the durable run lifecycle (`start` + `wait_for_result`, or `start_and_wait`) instead,
+    which survives long runs and client disconnects. `elapsed_seconds` is how long the
+    request ran before the gateway cut it off.
+    """
+
+    def __init__(self, message: str, elapsed_seconds: float) -> None:
+        super().__init__(message)
+        self.elapsed_seconds = elapsed_seconds
 
 
 class RunFailedError(PipelineRequestError):

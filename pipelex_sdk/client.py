@@ -1,17 +1,18 @@
 """`PipelexAPIClient` — the Python client for the Pipelex hosted API.
 
 Built by inheritance on `mthds`'s protocol base (`MthdsAPIClient`): the protocol
-routes (`execute` / `start` / `validate` / `models` / `version`), the transport
-(`_send`, `_url`), and the request-body builders are reused; this client adds the
-Pipelex branding (env resolution, optional token, host-only base-URL validation),
-the richer transport/error layer the product and lifecycle phases build on, and —
-in later phases — the durable run lifecycle, the product surface, and `health`.
+routes (`models` / `version` reused as-is; `execute` / `start` / `validate` overridden),
+the transport (`_send`, `_url`), and the request-body builders are reused; this client
+adds the Pipelex branding (env resolution, optional token, host-only base-URL
+validation), the richer transport/error layer, the durable run lifecycle, the product
+surface, and `health`.
 
 This module holds construction, the transport extension helpers (`_request_product`,
 `_request_json`, `_send_or_unreachable`), the `problem+json` error-body parser, the
-durable run lifecycle, the `validate` override (markdown-render injection +
-`validate_files`), and the Pipelex product surface (methods, organizations, billing,
-API keys, onboarding, storage, run records). `health` lands in Phase 4.
+`execute` override (hosted gateway-timeout translation), the durable run lifecycle, the
+`validate` override (markdown-render injection + `validate_files`), the Pipelex product
+surface (methods, organizations, billing, API keys, onboarding, storage, run records),
+and the origin-level `health` probe.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import asyncio
 import json
 import os
 import re
-import time
+from time import monotonic
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 from urllib.parse import quote, urlparse
 
@@ -36,6 +37,7 @@ from typing_extensions import override
 from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
+    PipelineExecuteTimeoutError,
     RunFailedError,
     RunLifecycleUnavailableError,
     RunTimeoutError,
@@ -99,6 +101,11 @@ DEFAULT_API_BASE_URL = "https://api.pipelex.com"
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 1200.0  # 20 min — matches the runner's blocking-execute ceiling.
 _POLL_REQUEST_TIMEOUT_SECONDS = 30.0  # single status/result/product GETs; the hosted gateway caps responses at ~30s.
 _DEFAULT_DEGRADED_RETRY_SECONDS = 5  # matches the platform's `_DEGRADE_RETRY_AFTER_SECONDS`.
+
+# The hosted gateway caps synchronous requests at ~30s. A blocking-`execute` failure at/after
+# this elapsed threshold is the gateway cut-off, not a transient outage — the threshold guards
+# against mislabeling a fast 503 (runner genuinely down) as a timeout.
+_GATEWAY_TIMEOUT_THRESHOLD_SECONDS = 28.0
 
 _PIPELEX_API_KEY_ENV = "PIPELEX_API_KEY"
 _PIPELEX_API_URL_ENV = "PIPELEX_API_URL"
@@ -265,6 +272,53 @@ class PipelexAPIClient(MthdsAPIClient):
                 "PIPELEX_API_URL points at a bare runner that does not serve it."
             )
             raise RunLifecycleUnavailableError(msg, api_url=self.api_base_url)
+
+    # ── Protocol surface: `execute` override (gateway-timeout translation) ──
+
+    @override
+    async def execute(
+        self,
+        pipe_code: str | None = None,
+        mthds_contents: list[str] | None = None,
+        inputs: PipelineInputs | WorkingMemoryAbstract[StuffType] | None = None,
+        output_name: str | None = None,
+        output_multiplicity: VariableMultiplicity | None = None,
+        dynamic_output_concept_ref: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> DictRunResultExecute:
+        """Execute a method synchronously and wait for its completion — `POST /v1/execute`.
+
+        Identical to the inherited protocol `execute`, except a failure consistent with the
+        hosted gateway's ~30s synchronous ceiling — a gateway `503`/`504`, or a client-side
+        request timeout, after at least ~28s have elapsed — is translated into a clear
+        `PipelineExecuteTimeoutError` pointing at the durable start+poll path, matching the JS
+        SDK. The protocol's optional 202 async-degrade still raises `RunStillRunningError`
+        (from the inherited `execute`), and every other non-2xx keeps the inherited
+        `httpx.HTTPStatusError` regime (consistent with the other inherited protocol routes).
+
+        Raises:
+            PipelineExecuteTimeoutError: The blocking request hit the hosted gateway's ~30s
+                synchronous ceiling — use `start_and_wait` (or `start` + `wait_for_result`).
+            RunStillRunningError: The server answered 202 (the protocol's optional async
+                degrade) — the run continues server-side; resume by `pipeline_run_id`.
+            httpx.HTTPStatusError: Any other non-2xx response (the inherited regime).
+        """
+        started_at = monotonic()
+        try:
+            return await super().execute(
+                pipe_code=pipe_code,
+                mthds_contents=mthds_contents,
+                inputs=inputs,
+                output_name=output_name,
+                output_multiplicity=output_multiplicity,
+                dynamic_output_concept_ref=dynamic_output_concept_ref,
+                extra=extra,
+            )
+        except (httpx.HTTPStatusError, httpx.TimeoutException) as exc:
+            elapsed_seconds = monotonic() - started_at
+            if _is_gateway_timeout(exc, elapsed_seconds):
+                raise PipelineExecuteTimeoutError(_execute_timeout_message(elapsed_seconds), elapsed_seconds=elapsed_seconds) from exc
+            raise
 
     # ── Protocol surface: `start` override (bare-runner 404 → typed error) ──
 
@@ -452,11 +506,11 @@ class PipelexAPIClient(MthdsAPIClient):
         awaiting task raises `asyncio.CancelledError` out of this loop, leaving the run resumable.
         """
         opts = options or WaitForResultOptions()
-        started_at = time.monotonic()
+        started_at = monotonic()
         attempt = 0
 
         while True:
-            elapsed = time.monotonic() - started_at
+            elapsed = monotonic() - started_at
             remaining = opts.timeout_seconds - elapsed
             if remaining <= 0:
                 raise RunTimeoutError(_timeout_message(run_id, opts.timeout_seconds), run_id=run_id, timeout_seconds=opts.timeout_seconds)
@@ -474,7 +528,7 @@ class PipelexAPIClient(MthdsAPIClient):
 
             # state is RunResultRunning — decide whether to keep waiting.
             attempt += 1
-            elapsed = time.monotonic() - started_at
+            elapsed = monotonic() - started_at
             if elapsed >= opts.timeout_seconds:
                 raise RunTimeoutError(_timeout_message(run_id, opts.timeout_seconds), run_id=run_id, timeout_seconds=opts.timeout_seconds)
             if opts.on_poll is not None:
@@ -760,6 +814,30 @@ def _with_validate_markdown_render(render: list[str] | None) -> list[str]:
 def _timeout_message(run_id: str, timeout_seconds: float) -> str:
     """The shared `RunTimeoutError` message — the run survives and is resumable by id."""
     return f"Run {run_id} did not reach a terminal state within {timeout_seconds}s; it is still executing server-side and can be resumed by id."
+
+
+def _is_gateway_timeout(exc: httpx.HTTPStatusError | httpx.TimeoutException, elapsed_seconds: float) -> bool:
+    """Whether a failed blocking `execute` is the hosted gateway's ~30s synchronous cut-off.
+
+    The elapsed threshold guards against mislabeling a fast `503` (the runner genuinely down)
+    as a timeout: a gateway `503`/`504`, or a client-side request timeout, only counts once the
+    request has run at least ~28s. Mirrors the JS `isGatewayTimeout`.
+    """
+    if elapsed_seconds < _GATEWAY_TIMEOUT_THRESHOLD_SECONDS:
+        return False
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    return exc.response.status_code in {503, 504}
+
+
+def _execute_timeout_message(elapsed_seconds: float) -> str:
+    """The `PipelineExecuteTimeoutError` message — point the caller at the durable start+poll path."""
+    seconds = round(elapsed_seconds)
+    return (
+        f"The Pipelex Hosted API times out synchronous requests after ~30s — this run took {seconds}s. "
+        "The blocking execute path can't run methods longer than 30s behind the gateway. "
+        "Start the run and poll for its result instead: `start()` then `wait_for_result(run_id)` (or `start_and_wait`)."
+    )
 
 
 def _is_missing_route_404(response: httpx.Response) -> bool:

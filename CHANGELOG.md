@@ -4,6 +4,10 @@ All notable changes to `pipelex-sdk` are documented here. The format follows [Ke
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-30
+
+The initial public surface of `pipelex-sdk` — the Python counterpart of `@pipelex/sdk`, built by inheritance on the `mthds` protocol base. Surface-complete against the TypeScript SDK (see `docs/architecture.md` → "Parity with `@pipelex/sdk`"); the `/v1/build/*` helpers and the WorkOS org-switch are consciously out of scope for this release.
+
 ### Added
 
 - Initial repository scaffold: packaging (`pyproject.toml`), tooling (`Makefile`, ruff/pyright/mypy/pylint config mirroring `mthds-python`), and the empty `pipelex_sdk` package.
@@ -16,3 +20,5 @@ All notable changes to `pipelex-sdk` are documented here. The format follows [Ke
 - Pipelex product surface (`pipelex_sdk/product_models.py` + client methods): the hosted management routes — user profile (`get_me`), methods catalog CRUD (`list_methods` / `get_method` / `create_method` / `update_method` / `delete_method`), organizations (`list_memberships` / `create_organization` / `rename_organization`), billing (`get_subscription` / `list_plans` / `list_invoices` / `create_checkout` / `change_plan` / `get_billing_portal`), Pipelex API keys (`list_pipelex_api_keys` / `create_pipelex_api_key` / `revoke_pipelex_api_key` / `rotate_pipelex_api_key`), the gateway inference key (`create_gateway_api_key` / `get_gateway_api_key`), onboarding (`submit_onboarding`), storage (`resolve_storage_url` / `upload`), and run records (`list_runs` / `update_run`). Documented `409`-conflict behaviors surface through `ApiResponseError.code` (`change_plan` / `get_billing_portal` ⇒ `conflict`; `create_pipelex_api_key` ⇒ `pipelex_api_key_limit_reached`).
 - `validate` override + `validate_files`: the Pipelex-API `/v1/validate` surface — always injects `render: ["markdown"]` (so valid and invalid verdicts both carry `rendered_markdown`), accepts a parallel `mthds_sources` array, and `validate_files` synthesizes deterministic `inline://` source labels when any file carries a URI.
 - `health()`: the origin-level liveness probe — `GET {origin}/health`, served at the origin (NOT under the `/v1` prefix) and out-of-protocol. Rides the plainer `_request_json` regime (`PipelineRequestError` on a non-2xx, `ApiUnreachableError` on transport failure), not the product `ApiResponseError`.
+- `execute` override + `PipelineExecuteTimeoutError`: a blocking `POST /v1/execute` killed by the hosted gateway's ~30s synchronous ceiling (a `503`/`504`, or a client-side request timeout, observed at/after ~28s) is translated into a clear `PipelineExecuteTimeoutError` pointing at the durable start+poll path — closing a JS-parity gap (the inherited base `execute` does not do this). Every other non-2xx keeps the inherited `httpx.HTTPStatusError` regime, and the protocol's 202 async-degrade still raises `RunStillRunningError`.
+- `__version__` (`pipelex_sdk.version`), derived from the installed distribution metadata so it cannot drift from the `pyproject.toml` source of truth, with a test asserting the two match.
