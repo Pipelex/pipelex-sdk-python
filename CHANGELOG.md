@@ -4,7 +4,15 @@ All notable changes to `pipelex-sdk` are documented here. The format follows [Ke
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-06-30
+### Added
+
+- GitHub Actions CI/CD mirroring `mthds-python`, adapted to the `Pipelex` org and the `pipelex-sdk` PyPI distribution: PR gates (`lint-check`, `tests-check`, `package-check`, `changelog-check`, `version-check`, `guard-branches`, `cla`) across the full Python matrix, plus `publish.yml` (build → PyPI Trusted Publishing → signed GitHub Release) on push to `main`. Root `CLA.md` and `docs/ci-cd.md` added alongside.
+
+### Changed
+
+- `CHANGELOG.md` version headers now use the workspace-wide `## [vX.Y.Z]` convention (matching `mthds-python` / `pipelex-sdk-js`), which the changelog/publish workflows key off.
+
+## [v0.1.0] - 2026-06-30
 
 The initial public surface of `pipelex-sdk` — the Python counterpart of `@pipelex/sdk`, built by inheritance on the `mthds` protocol base. Surface-complete against the TypeScript SDK (see `docs/architecture.md` → "Parity with `@pipelex/sdk`"); the `/v1/build/*` helpers and the WorkOS org-switch are consciously out of scope for this release.
 
