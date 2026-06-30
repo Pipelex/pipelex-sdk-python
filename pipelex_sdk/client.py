@@ -29,7 +29,6 @@ import httpx
 from mthds.config.credentials import load_credentials
 from mthds.protocol.exceptions import PipelineRequestError
 from mthds.runners.api.client import MthdsAPIClient
-from mthds.runners.api.models import ValidationErrorItem
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import to_json
 from typing_extensions import override
@@ -71,6 +70,7 @@ from pipelex_sdk.runs import (
     RunStatus,
     WaitForResultOptions,
 )
+from pipelex_sdk.validation_models import PipelexValidationResultAdapter, ValidationErrorItem
 
 if TYPE_CHECKING:
     from mthds.protocol.models import RunResultStart
@@ -78,7 +78,7 @@ if TYPE_CHECKING:
     from mthds.protocol.pipeline_inputs import PipelineInputs
     from mthds.protocol.stuff import StuffType
     from mthds.protocol.working_memory import WorkingMemoryAbstract
-    from mthds.runners.api.models import DictRunResultExecute, PipelexValidationResult
+    from mthds.runners.api.models import DictRunResultExecute
 
     from pipelex_sdk.product_models import (
         MethodWriteInput,
@@ -87,6 +87,7 @@ if TYPE_CHECKING:
         UploadInput,
     )
     from pipelex_sdk.runs import RunResultState
+    from pipelex_sdk.validation_models import PipelexValidationResult
 
 # The client composes every endpoint from one origin (PIPELEX_API_URL): `{base}/v1/{endpoint}`.
 # The same paths are served by the Pipelex Hosted API (api.pipelex.com) and by a bare
@@ -391,7 +392,11 @@ class PipelexAPIClient(MthdsAPIClient):
         extra: dict[str, Any] = {"render": _with_validate_markdown_render(render)}
         if mthds_sources is not None:
             extra["mthds_sources"] = mthds_sources
-        return await super().validate(mthds_contents, allow_signatures, extra=extra)
+        # Reuse the inherited transport seam (`_post_validate`) for body-building + the wire call,
+        # then parse the 200-diagnostic body into this SDK's Pipelex-branded narrowing. The base's
+        # own `validate` parses the same body into the neutral `mthds` `ValidationResult`.
+        response = await self._post_validate(mthds_contents, allow_signatures, extra)
+        return PipelexValidationResultAdapter.validate_python(response.json())
 
     async def validate_files(
         self,

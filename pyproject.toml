@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "mthds>=0.6.0",
+  "mthds>=0.7.0",
   "pydantic>=2.10.6,<3.0.0",
   "backports.strenum>=1.3.0 ; python_version < '3.11'",
   "typing-extensions>=4.0.0",
@@ -49,7 +49,8 @@ Changelog = "https://github.com/Pipelex/pipelex-sdk-python/blob/main/CHANGELOG.m
 
 # For local development, resolve `mthds` from the sibling workspace checkout.
 # uv ignores [tool.uv.sources] when building/publishing the wheel, so the
-# published package depends on `mthds>=0.6.0` from PyPI (the protocol-only base).
+# published package depends on `mthds>=0.7.0` from PyPI (the protocol-only base,
+# whose `/validate` returns the neutral verdict union this SDK narrows).
 [tool.uv.sources]
 mthds = { path = "../mthds-python", editable = true }
 

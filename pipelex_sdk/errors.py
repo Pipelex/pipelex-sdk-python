@@ -31,9 +31,8 @@ from mthds.protocol.exceptions import PipelineRequestError
 from mthds.runners.api.exceptions import RunStillRunningError as RunStillRunningError  # noqa: PLC0414
 
 if TYPE_CHECKING:
-    from mthds.runners.api.models import ValidationErrorItem
-
     from pipelex_sdk.runs import RunStatus
+    from pipelex_sdk.validation_models import ValidationErrorItem
 
 
 class ApiUnreachableError(PipelineRequestError):

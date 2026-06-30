@@ -7,10 +7,10 @@ from typing import cast
 import httpx
 import pytest
 from mthds.protocol.exceptions import PipelineRequestError
-from mthds.runners.api.models import PipelexInvalidReport, PipelexValidationReport
 from pytest_mock import MockerFixture, MockType
 
 from pipelex_sdk.client import MthdsFile, PipelexAPIClient
+from pipelex_sdk.validation_models import PipelexInvalidReport, PipelexValidationReport
 
 _BASE_URL = "http://localhost:8081"
 
