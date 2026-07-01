@@ -2,29 +2,14 @@
 
 All notable changes to `pipelex-sdk` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- GitHub Actions CI/CD mirroring `mthds-python`, adapted to the `Pipelex` org and the `pipelex-sdk` PyPI distribution: PR gates (`lint-check`, `tests-check`, `package-check`, `changelog-check`, `version-check`, `guard-branches`, `cla`) across the full Python matrix, plus `publish.yml` (build → PyPI Trusted Publishing → signed GitHub Release) on push to `main`. Root `CLA.md` and `docs/ci-cd.md` added alongside.
-
-### Changed
-
-- `CHANGELOG.md` version headers now use the workspace-wide `## [vX.Y.Z]` convention (matching `mthds-python` / `pipelex-sdk-js`), which the changelog/publish workflows key off.
-
-### Fixed
-
-- `PipelexAPIClient` now honors an explicit `api_token=""` as a request for anonymous access even when `PIPELEX_API_KEY` (or an mthds credential) is configured. Credential resolution tests `is not None` rather than truthiness, so the first *present* layer wins, restoring the documented "empty string = anonymous" contract and matching the JS SDK's `??` precedence chain.
-- `guard-branches.yml` workflow-protection job now checks out the PR head (`ref: pull_request.head.sha`) instead of the base branch, so its `git diff` actually detects fork edits to `.github/workflows/*`; its author-association gate is now a maintainer allow-list, so external authors reported as `FIRST_TIME_CONTRIBUTOR` / `FIRST_TIMER` / `NONE` (not only `CONTRIBUTOR`) are covered.
-- `tests-check.yml` no longer grants `id-token: write` to the test matrix job, which runs untrusted PR code and never uses OIDC (least privilege).
-
-## [v0.1.0] - 2026-06-30
+## [v0.1.0] - 2026-07-01
 
 The initial public surface of `pipelex-sdk` — the Python counterpart of `@pipelex/sdk`, built by inheritance on the `mthds` protocol base. Surface-complete against the TypeScript SDK (see `docs/architecture.md` → "Parity with `@pipelex/sdk`"); the `/v1/build/*` helpers and the WorkOS org-switch are consciously out of scope for this release.
 
 ### Added
 
 - Initial repository scaffold: packaging (`pyproject.toml`), tooling (`Makefile`, ruff/pyright/mypy/pylint config mirroring `mthds-python`), and the empty `pipelex_sdk` package.
+- GitHub Actions CI/CD mirroring `mthds-python`, adapted to the `Pipelex` org and the `pipelex-sdk` PyPI distribution: PR gates (`lint-check`, `tests-check`, `package-check`, `changelog-check`, `version-check`, `guard-branches`, `cla`) across the full Python matrix, plus `publish.yml` (build → PyPI Trusted Publishing → signed GitHub Release) on push to `main`. Root `CLA.md` and `docs/ci-cd.md` added alongside.
 - `PipelexAPIClient` (subclass of `mthds`'s `MthdsAPIClient`): Pipelex-branded construction (resolves `PIPELEX_API_KEY` / `PIPELEX_API_URL`, falling back to the `mthds` resolver; token optional for anonymous access; host-only base-URL validation; origin URL for `health`).
 - Transport extension layer: `_request_product` (typed `ApiResponseError` mapping, empty-body tolerant, PUT/PATCH/DELETE), `_request_json` (plainer error regime), transport-failure mapping to `ApiUnreachableError`, and the `problem+json` error-body parser.
 - Errors: `ApiResponseError` (with the RFC 9457 `code` discriminant) and `ApiUnreachableError`, both deriving from the protocol-base `PipelineRequestError`.
@@ -37,3 +22,14 @@ The initial public surface of `pipelex-sdk` — the Python counterpart of `@pipe
 - `health()`: the origin-level liveness probe — `GET {origin}/health`, served at the origin (NOT under the `/v1` prefix) and out-of-protocol. Rides the plainer `_request_json` regime (`PipelineRequestError` on a non-2xx, `ApiUnreachableError` on transport failure), not the product `ApiResponseError`.
 - `execute` override + `PipelineExecuteTimeoutError`: a blocking `POST /v1/execute` killed by the hosted gateway's ~30s synchronous ceiling (a `503`/`504`, or a client-side request timeout, observed at/after ~28s) is translated into a clear `PipelineExecuteTimeoutError` pointing at the durable start+poll path — closing a JS-parity gap (the inherited base `execute` does not do this). Every other non-2xx keeps the inherited `httpx.HTTPStatusError` regime, and the protocol's 202 async-degrade still raises `RunStillRunningError`.
 - `__version__` (`pipelex_sdk.version`), derived from the installed distribution metadata so it cannot drift from the `pyproject.toml` source of truth, with a test asserting the two match.
+
+### Changed
+
+- Requires `mthds>=0.6.1` (protocol base floor).
+- `CHANGELOG.md` version headers use the workspace-wide `## [vX.Y.Z]` convention (matching `mthds-python` / `pipelex-sdk-js`), which the changelog/publish workflows key off.
+
+### Fixed
+
+- `PipelexAPIClient` honors an explicit `api_token=""` as a request for anonymous access even when `PIPELEX_API_KEY` (or an mthds credential) is configured. Credential resolution tests `is not None` rather than truthiness, so the first *present* layer wins, restoring the documented "empty string = anonymous" contract and matching the JS SDK's `??` precedence chain.
+- `guard-branches.yml` workflow-protection job checks out the PR head (`ref: pull_request.head.sha`) instead of the base branch, so its `git diff` actually detects fork edits to `.github/workflows/*`; its author-association gate is a maintainer allow-list, so external authors reported as `FIRST_TIME_CONTRIBUTOR` / `FIRST_TIMER` / `NONE` (not only `CONTRIBUTOR`) are covered.
+- `tests-check.yml` no longer grants `id-token: write` to the test matrix job, which runs untrusted PR code and never uses OIDC (least privilege).
