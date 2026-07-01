@@ -1,0 +1,100 @@
+name: Guard branch flow
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  # ───────────────────────────────────────────────────────────────
+  # 1) Only release/vX.Y.Z → main
+  # ───────────────────────────────────────────────────────────────
+  gate-main:
+    if: github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify source branch is a Release
+        env:
+          HEAD: ${{ github.event.pull_request.head.ref }}
+        run: |
+          echo "PR → main from $HEAD"
+          if [[ ! "$HEAD" =~ ^release\/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Only release/vX.Y.Z branches may merge into main."
+            exit 1
+          fi
+
+  # ───────────────────────────────────────────────────────────────
+  # 2) Only work-branches → release/vX.Y.Z, pre-release/vX.Y.Z..., or dev
+  # ───────────────────────────────────────────────────────────────
+  gate-release:
+    if: startsWith(github.event.pull_request.base.ref, 'release/v') || startsWith(github.event.pull_request.base.ref, 'pre-release/v') || github.event.pull_request.base.ref == 'dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify source branch uses allowed prefix
+        env:
+          HEAD: ${{ github.event.pull_request.head.ref }}
+        run: |
+          echo "PR → ${{ github.event.pull_request.base.ref }} from $HEAD"
+          if [[ "$HEAD" == "dev" ]]; then
+            exit 0
+          fi
+          if [[ ! "$HEAD" =~ ^(fix|feature|refactor|chore|docs|ci-cd|changelog|codex)\/[A-Za-z0-9._\/\<\>\=\-]+$ ]]; then
+            echo "::error::Branch must start with fix/, feature/, refactor/, chore/, docs/, or ci-cd/."
+            exit 1
+          fi
+
+  # ───────────────────────────────────────────────────────────────
+  # 3) Prevent forks from editing your workflows
+  # ───────────────────────────────────────────────────────────────
+  protect-workflows:
+    runs-on: ubuntu-latest
+    # Least privilege: querying the author's permission and diffing the head only needs read.
+    permissions:
+      contents: read
+    steps:
+      # Trust must hinge on the author's EFFECTIVE repository permission, not author_association.
+      # author_association is a social label: an org MEMBER or a COLLABORATOR can hold read-only
+      # access, so an association allow-list would let a read-only insider's workflow edits slip
+      # past this guard. Resolve the real permission and treat only write/maintain/admin as trusted.
+      - name: Resolve author repository permission
+        id: perm
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const username = context.payload.pull_request.user.login;
+            let data = { permission: 'none', role_name: 'none' };
+            try {
+              ({ data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username,
+              }));
+            } catch (error) {
+              // A 404 means the author is not a resolvable collaborator (deleted/renamed
+              // account, or no access) — treat as untrusted and let the workflow-diff
+              // check run. Re-throw anything else so a transient API failure fails closed.
+              if (error.status !== 404) throw error;
+            }
+            // The legacy `permission` field collapses roles: admin → "admin",
+            // maintain & write → "write", triage & read → "read", none → "none".
+            const trusted = data.permission === 'admin' || data.permission === 'write';
+            core.info(`Author ${username}: permission=${data.permission} role=${data.role_name} trusted=${trusted}`);
+            core.setOutput('trusted', trusted ? 'true' : 'false');
+
+      - name: Checkout code
+        if: steps.perm.outputs.trusted != 'true'
+        uses: actions/checkout@v4
+        with:
+          # In pull_request_target the default checkout is the BASE branch; without this the
+          # diff below would compare base-against-base and never see the fork's changes. We
+          # only fetch/diff/grep here — the untrusted head is never executed — so checking
+          # out the PR head SHA is safe.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Detect workflow changes
+        if: steps.perm.outputs.trusted != 'true'
+        run: |
+          git fetch origin "${{ github.event.pull_request.base.ref }}" --depth=1
+          CHANGED=$(git diff --name-only FETCH_HEAD HEAD | grep -E '^\.github/workflows/.*\.ya?ml$' || true)
+          if [ -n "$CHANGED" ]; then
+            echo "::error::External contributors may not modify workflow files: $CHANGED"
+            exit 1
+          fi
