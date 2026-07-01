@@ -1,7 +1,5 @@
 # Changelog
 
-All notable changes to `pipelex-sdk` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
 ## [v0.1.0] - 2026-07-01
 
 The initial public surface of `pipelex-sdk` — the Python counterpart of `@pipelex/sdk`, built by inheritance on the `mthds` protocol base. Surface-complete against the TypeScript SDK (see `docs/architecture.md` → "Parity with `@pipelex/sdk`"); the `/v1/build/*` helpers and the WorkOS org-switch are consciously out of scope for this release.
