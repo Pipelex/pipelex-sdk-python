@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.1.1] - 2026-07-01
+
+### Fixed
+
+- Ship a PEP 561 `py.typed` marker inside `pipelex_sdk`, so downstream type checkers (pyright/mypy) pick up the package's inline type hints. Without it the wheel's types were invisible to consumers despite the source being fully typed. Matches `mthds`'s `mthds/py.typed`.
+
 ## [v0.1.0] - 2026-07-01
 
 The initial public surface of `pipelex-sdk` — the Python counterpart of `@pipelex/sdk`, built by inheritance on the `mthds` protocol base. Surface-complete against the TypeScript SDK (see `docs/architecture.md` → "Parity with `@pipelex/sdk`"); the `/v1/build/*` helpers and the WorkOS org-switch are consciously out of scope for this release.
