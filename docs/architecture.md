@@ -33,12 +33,14 @@ The Pipelex narrowing of the `/v1/validate` verdict union is one such implementa
 
 ## Credentials & configuration
 
-Resolved at construction time:
+Resolved at construction time, Pipelex-only — the SDK **never** consults the `mthds` resolver (`MTHDS_API_KEY` / `MTHDS_BASE_URL`, `~/.mthds/config`). That config stores a `(base_url, api_key)` credential pair for whatever runner the vendor-neutral `mthds` tooling targets; borrowing the key while ignoring the URL would send a credential configured for another runner to the hosted API (and `mthds`'s base-URL default, a local bare runner on `http://localhost:8081`, would preempt the hosted default). Both chains match the JS SDK exactly:
 
-- `PIPELEX_API_KEY` / `PIPELEX_BASE_URL` first (brand + JS parity);
-- falling back to the `mthds` resolver (`MTHDS_API_KEY` / `MTHDS_BASE_URL`, `~/.mthds/config`) as a secondary source.
+- **API key** — `api_key` argument → `PIPELEX_API_KEY` → anonymous. Presence, not truthiness, decides the argument layer, so an explicit empty string (`api_key=""`) is honored as an anonymous request rather than falling through to a configured env key (mirrors the JS SDK's `??` chain).
+- **Base URL** — `base_url` argument → `PIPELEX_BASE_URL` → the hosted default `https://api.pipelex.com`. Presence semantics at both layers (also the JS `??` chain): an explicit empty string — a `base_url=""` argument or a set-but-empty `PIPELEX_BASE_URL` (e.g. an unfilled CI secret) — reaches the host-only validator and raises `PipelineRequestError` at construction, rather than silently targeting the hosted default with whatever API key is configured.
 
-A token is **optional** (anonymous access is allowed; protocol routes work against anonymous bare runners, product routes return `401`). The default base URL is `https://api.pipelex.com`. The base URL is validated host-only (no path/query/fragment/embedded credentials; http/https only).
+A token is **optional** (anonymous access is allowed; protocol routes work against anonymous bare runners, product routes return `401`). The base URL is validated host-only (no path/query/fragment/embedded credentials; http/https only).
+
+`request_timeout_seconds` (constructor argument, default `1200.0` — 20 min) sets the per-instance blocking-execute ceiling the inherited protocol routes (`execute` / `start` / `validate` / `models` / `version`) read; the SDK's own poll and product GETs use the shorter `_POLL_REQUEST_TIMEOUT_SECONDS` instead.
 
 ## Conventions
 

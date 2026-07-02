@@ -26,7 +26,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 from urllib.parse import quote, urlparse
 
 import httpx
-from mthds.config import load_config
 from mthds.protocol.exceptions import PipelineRequestError
 from mthds.runners.api.client import MthdsAPIClient
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -99,7 +98,6 @@ _RUNS = "runs"
 #: Hosted default — the client composes every endpoint as `{base}/v1/{endpoint}`.
 DEFAULT_API_BASE_URL = "https://api.pipelex.com"
 
-_DEFAULT_REQUEST_TIMEOUT_SECONDS = 1200.0  # 20 min — matches the runner's blocking-execute ceiling.
 _POLL_REQUEST_TIMEOUT_SECONDS = 30.0  # single status/result/product GETs; the hosted gateway caps responses at ~30s.
 _DEFAULT_DEGRADED_RETRY_SECONDS = 5  # matches the platform's `_DEGRADE_RETRY_AFTER_SECONDS`.
 
@@ -148,37 +146,49 @@ class PipelexAPIClient(MthdsAPIClient):
       surface (added in Phase 3), reached through `_request_product` so callers branch
       on the structured `ApiResponseError.code`, not the HTTP status.
 
-    Construction resolves credentials Pipelex-first (`PIPELEX_API_KEY` /
-    `PIPELEX_BASE_URL`), falling back to the `mthds` resolver (`MTHDS_API_KEY` /
-    `MTHDS_BASE_URL`, `~/.mthds/config`). The token is optional — anonymous access works
-    against the protocol routes; product routes return `401`. The base URL is validated
-    host-only (no path/query/fragment/credentials; http/https only).
+    Construction is Pipelex-only — it never reads the `mthds` resolver (`MTHDS_API_KEY` /
+    `MTHDS_BASE_URL`, `~/.mthds/config`), whose values are a credential pair for whatever
+    runner the vendor-neutral `mthds` tooling targets, not for this client. The API key
+    resolves from the `api_key` argument, then `PIPELEX_API_KEY`, then anonymous; the token
+    is optional — anonymous access works against the protocol routes, while product routes
+    return `401`. The base URL resolves from the `base_url` argument, then
+    `PIPELEX_BASE_URL`, then the hosted default (`https://api.pipelex.com`). Both chains
+    match the JS SDK exactly. The base URL is validated host-only (no
+    path/query/fragment/credentials; http/https only). `request_timeout_seconds` sets the
+    per-instance blocking-execute ceiling the inherited protocol routes read (default 20 min).
     """
 
-    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
-        config = load_config()
-
-        # Pipelex-primary, mthds fallback. `config` already layers env (MTHDS_*) >
-        # file (~/.mthds/config) > default, so this ladder gives the full precedence:
-        # explicit arg > PIPELEX_* env > MTHDS_* env > file > default. The key is optional
-        # and an empty string ("") means anonymous — so the first layer that is *present*
-        # wins even when it is empty.
+    def __init__(self, api_key: str | None = None, base_url: str | None = None, request_timeout_seconds: float | None = None) -> None:
+        # Pipelex-only resolution — this SDK never reads the mthds resolver (`MTHDS_*`
+        # env vars, `~/.mthds/config`). That config stores a (base_url, api_key) pair for
+        # whatever runner the vendor-neutral mthds tooling targets; borrowing its key while
+        # ignoring its URL would send a credential configured for another runner to
+        # api.pipelex.com. So the api_key resolves arg > `PIPELEX_API_KEY` > anonymous,
+        # matching the JS SDK's `options.apiKey ?? process.env.PIPELEX_API_KEY`.
         #
-        # DO NOT collapse this into `api_key or os.environ.get(...) or config["api_key"]`.
+        # DO NOT collapse the argument layer into `api_key or os.environ.get(...)`:
         # `or` treats "" as falsy and would fall through, silently discarding an explicit
-        # anonymous request (`api_key=""` / `PIPELEX_API_KEY=""`) and reaching for the next
-        # configured key instead. We test `is not None` (presence, not truthiness) precisely
-        # to honor the empty string, matching the JS SDK's `??` chain. (The `base_url` line
-        # below correctly uses `or`: there an empty value has no special meaning.)
+        # anonymous request (`api_key=""`) and reaching for a configured env key instead.
+        # We test `is not None` (presence, not truthiness) precisely to honor the empty
+        # string, matching the JS SDK's `??` chain. The env layer needs no such care —
+        # its fallthrough target IS anonymous ("").
         self.api_key: str
         if api_key is not None:
             self.api_key = api_key
-        elif (pipelex_env_key := os.environ.get(_PIPELEX_API_KEY_ENV)) is not None:
-            self.api_key = pipelex_env_key
         else:
-            self.api_key = config["api_key"]
+            self.api_key = os.environ.get(_PIPELEX_API_KEY_ENV, "")
 
-        resolved_base_url = base_url or os.environ.get(_PIPELEX_BASE_URL_ENV) or config["base_url"] or DEFAULT_API_BASE_URL
+        # The base_url chain is presence-semantics too (`is not None` at the argument AND
+        # env layers), matching the JS SDK's `??` chain: an explicit empty string — an
+        # `base_url=""` argument or a set-but-empty `PIPELEX_BASE_URL` (e.g. an unfilled CI
+        # secret) — must reach the host-only validator below and fail fast, NOT silently
+        # fall through to the hosted default and send the configured API key there.
+        resolved_base_url: str
+        if base_url is not None:
+            resolved_base_url = base_url
+        else:
+            env_base_url = os.environ.get(_PIPELEX_BASE_URL_ENV)
+            resolved_base_url = env_base_url if env_base_url is not None else DEFAULT_API_BASE_URL
         normalized_base_url = resolved_base_url.rstrip("/")
         # The base URL must be host-only: a path-prefixed value (e.g. `.../v1`) would
         # compose as `/v1/v1/...` and fail with a misleading endpoint error instead of a
@@ -195,9 +205,13 @@ class PipelexAPIClient(MthdsAPIClient):
         #: Origin root derived from the base URL — `/health` lives here, not under `/v1`.
         self.origin_url: str = _origin_of(normalized_base_url)
         #: Per-request timeout the inherited protocol routes (`execute` / `start` / `validate`
-        #: / `models` / `version`) read — the blocking-execute ceiling. The SDK's own poll and
-        #: product GETs pass `_POLL_REQUEST_TIMEOUT_SECONDS` explicitly instead.
-        self.request_timeout_seconds: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS
+        #: / `models` / `version`) read — the blocking-execute ceiling. The default is the
+        #: base's `_DEFAULT_REQUEST_TIMEOUT_SECONDS` ClassVar (20 min, the runner's
+        #: blocking-execute ceiling — part of the documented protected extension surface).
+        #: The SDK's own poll and product GETs pass `_POLL_REQUEST_TIMEOUT_SECONDS` instead.
+        self.request_timeout_seconds: float = (
+            request_timeout_seconds if request_timeout_seconds is not None else self._DEFAULT_REQUEST_TIMEOUT_SECONDS
+        )
         self.client: httpx.AsyncClient | None = None
         #: Cached `/v1/version` handshake outcome — whether the durable lifecycle is served.
         self._lifecycle_available: bool | None = None

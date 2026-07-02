@@ -48,13 +48,6 @@ class _Sent:
 
 
 class TestClientProduct:
-    @pytest.fixture(autouse=True)
-    def _isolate(self, mocker: MockerFixture) -> None:
-        mocker.patch(
-            "pipelex_sdk.client.load_config",
-            return_value={"api_key": "", "base_url": _BASE_URL, "runner": "api"},
-        )
-
     def _client(self) -> PipelexAPIClient:
         return PipelexAPIClient(api_key="test-token", base_url=_BASE_URL)
 

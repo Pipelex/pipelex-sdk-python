@@ -14,7 +14,13 @@ pip install pipelex-sdk
 
 ## Configuration
 
-Credentials resolve, in order: explicit constructor arguments → `PIPELEX_API_KEY` / `PIPELEX_BASE_URL` → `MTHDS_API_KEY` / `MTHDS_BASE_URL` (and `~/.mthds/config`) → defaults. The token is **optional** — anonymous access works against the protocol routes (e.g. a local bare runner); the product routes return `401`. The default base URL is `https://api.pipelex.com`. The base URL is host-only (no path/query/fragment); every endpoint composes as `{base}/v1/{endpoint}`.
+The **API key** resolves, in order: explicit `api_key` argument → `PIPELEX_API_KEY` → anonymous. The token is **optional** — anonymous access works against the protocol routes (e.g. a local bare runner); the product routes return `401`.
+
+The **base URL** resolves, in order: explicit `base_url` argument → `PIPELEX_BASE_URL` → the hosted default `https://api.pipelex.com`. The base URL is host-only (no path/query/fragment); every endpoint composes as `{base}/v1/{endpoint}`.
+
+The SDK never reads the `mthds` resolver (`MTHDS_API_KEY` / `MTHDS_BASE_URL` / `~/.mthds/config`) — those settings configure the vendor-neutral `mthds` tooling and whichever runner it targets, not this Pipelex client.
+
+`request_timeout_seconds` (constructor argument, default 20 min) sets the per-instance blocking-execute ceiling the inherited protocol routes (`execute` / `start` / `validate` / `models` / `version`) use.
 
 The client is **async-only** (httpx `AsyncClient`) and is an async context manager.
 

@@ -9,9 +9,15 @@
 ### Changed
 
 - **BREAKING:** Renamed `PipelexAPIClient` constructor parameters and attributes to match the `mthds` base client and the `@pipelex/sdk` JavaScript counterpart: `api_token` → `api_key` and `api_base_url` → `base_url`. *(Migration: update all instantiations and property reads to the new names.)*
-- **BREAKING:** Renamed API URL environment variables for workspace-wide consistency: `PIPELEX_API_URL` → `PIPELEX_BASE_URL` and the `mthds` fallback `MTHDS_API_URL` → `MTHDS_BASE_URL`. No read aliases are kept for the old names.
-- Bumped the `mthds` dependency from `>=0.6.1` to `>=0.7.0`, and updated config loading to import `load_config` from `mthds.config` (previously `load_credentials` from `mthds.config.credentials`).
-- Updated documentation (`README.md`, `CLAUDE.md`, `docs/architecture.md`) and unit tests to reflect the new client signature, environment variables, and `mthds` configuration.
+- **BREAKING:** Renamed the API URL environment variable for workspace-wide consistency: `PIPELEX_API_URL` → `PIPELEX_BASE_URL`. No read alias is kept for the old name.
+- **BREAKING:** An empty base URL now raises `PipelineRequestError` instead of being treated as unset. Both layers of the `base_url` chain use presence semantics (matching the JS SDK's `??` chain): an explicit `base_url=""` argument or a set-but-empty `PIPELEX_BASE_URL` (e.g. an unfilled CI secret) fails fast at construction rather than silently targeting the hosted default with whatever API key is configured.
+- **BREAKING:** `PipelexAPIClient` no longer reads the `mthds` resolver at all — `MTHDS_API_KEY`, `MTHDS_BASE_URL`, and `~/.mthds/config` are ignored. The mthds config stores a `(base_url, api_key)` credential pair for whatever runner the vendor-neutral `mthds` tooling targets; borrowing its key while ignoring its URL could send a key configured for another runner to `api.pipelex.com`. Resolution is now Pipelex-only, matching the JS SDK exactly: `api_key` argument → `PIPELEX_API_KEY` → anonymous, and `base_url` argument → `PIPELEX_BASE_URL` → the hosted default. *(Migration: set `PIPELEX_API_KEY` / pass `api_key`, and `PIPELEX_BASE_URL` / `base_url`, if you relied on `MTHDS_*` or `~/.mthds/config`.)*
+- Bumped the `mthds` dependency from `>=0.6.1` to `>=0.7.1`.
+- Updated documentation (`README.md`, `CLAUDE.md`, `docs/architecture.md`) and unit tests to reflect the new client signature, environment variables, and credential resolution.
+
+### Fixed
+
+- `PipelexAPIClient()` now targets the hosted API (`https://api.pipelex.com`) when nothing is configured, instead of leaking `mthds`'s local bare-runner default (`http://localhost:8081`) through the now-removed `mthds` resolver fallback.
 
 ## [v0.1.1] - 2026-07-01
 

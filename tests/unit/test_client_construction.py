@@ -8,15 +8,12 @@ from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
 
-_MTHDS_DEFAULT_CREDENTIALS = {"api_key": "", "base_url": "https://api.pipelex.com", "runner": "api"}
-
 
 class TestClientConstruction:
     @pytest.fixture(autouse=True)
     def _isolate_env(self, mocker: MockerFixture) -> None:
-        """Hermetic construction — no real env vars, mthds resolver returns defaults."""
+        """Hermetic construction — no real env vars."""
         mocker.patch.dict(os.environ, {}, clear=True)
-        mocker.patch("pipelex_sdk.client.load_config", return_value=dict(_MTHDS_DEFAULT_CREDENTIALS))
 
     def test_defaults_to_hosted_base_and_anonymous(self) -> None:
         client = PipelexAPIClient()
@@ -24,26 +21,24 @@ class TestClientConstruction:
         assert client.origin_url == "https://api.pipelex.com"
         assert client.api_key == ""
 
-    def test_pipelex_env_takes_precedence_over_mthds(self, mocker: MockerFixture) -> None:
+    def test_reads_pipelex_env_vars(self, mocker: MockerFixture) -> None:
         mocker.patch.dict(os.environ, {"PIPELEX_API_KEY": "pk-live", "PIPELEX_BASE_URL": "http://localhost:8081"}, clear=True)
-        mocker.patch(
-            "pipelex_sdk.client.load_config",
-            return_value={"api_key": "mthds-key", "base_url": "https://mthds.example.com", "runner": "api"},
-        )
         client = PipelexAPIClient()
         assert client.api_key == "pk-live"
         assert client.base_url == "http://localhost:8081"
 
-    def test_falls_back_to_mthds_credentials(self, mocker: MockerFixture) -> None:
-        mocker.patch(
-            "pipelex_sdk.client.load_config",
-            return_value={"api_key": "mthds-key", "base_url": "https://mthds.example.com", "runner": "api"},
-        )
+    def test_mthds_resolver_is_never_consulted(self, mocker: MockerFixture) -> None:
+        """Regression: this SDK is Pipelex-only. `MTHDS_API_KEY` / `MTHDS_BASE_URL` are a
+        credential pair for whatever runner the vendor-neutral mthds tooling targets — an
+        unconfigured client must stay anonymous against the hosted default instead of
+        borrowing a key configured for another runner.
+        """
+        mocker.patch.dict(os.environ, {"MTHDS_API_KEY": "mthds-key", "MTHDS_BASE_URL": "http://localhost:8081"}, clear=True)
         client = PipelexAPIClient()
-        assert client.api_key == "mthds-key"
-        assert client.base_url == "https://mthds.example.com"
+        assert client.api_key == ""
+        assert client.base_url == "https://api.pipelex.com"
 
-    def test_explicit_args_override_env_and_credentials(self, mocker: MockerFixture) -> None:
+    def test_explicit_args_override_env(self, mocker: MockerFixture) -> None:
         mocker.patch.dict(os.environ, {"PIPELEX_API_KEY": "pk-env", "PIPELEX_BASE_URL": "http://env.example.com"}, clear=True)
         client = PipelexAPIClient(api_key="arg-token", base_url="https://arg.example.com")
         assert client.api_key == "arg-token"
@@ -52,15 +47,6 @@ class TestClientConstruction:
     def test_explicit_empty_token_forces_anonymous_over_env(self, mocker: MockerFixture) -> None:
         """An explicit `api_key=""` means anonymous and must win over a configured env token."""
         mocker.patch.dict(os.environ, {"PIPELEX_API_KEY": "pk-env"}, clear=True)
-        client = PipelexAPIClient(api_key="")
-        assert client.api_key == ""
-
-    def test_explicit_empty_token_forces_anonymous_over_credentials(self, mocker: MockerFixture) -> None:
-        """An explicit `api_key=""` must win over an mthds credential token too."""
-        mocker.patch(
-            "pipelex_sdk.client.load_config",
-            return_value={"api_key": "mthds-key", "base_url": "https://mthds.example.com", "runner": "api"},
-        )
         client = PipelexAPIClient(api_key="")
         assert client.api_key == ""
 
@@ -83,8 +69,28 @@ class TestClientConstruction:
             "ftp://api.pipelex.com",  # non-http(s) scheme
             "api.pipelex.com",  # no scheme
             "not a url",  # garbage
+            "",  # explicit empty string — presence semantics: it must fail, not fall through
         ],
     )
     def test_rejects_non_host_only_base_url(self, bad_url: str) -> None:
         with pytest.raises(PipelineRequestError):
             PipelexAPIClient(base_url=bad_url)
+
+    def test_set_but_empty_base_url_env_raises(self, mocker: MockerFixture) -> None:
+        """A set-but-empty `PIPELEX_BASE_URL` (e.g. an unfilled CI secret) must fail fast
+        instead of silently targeting the hosted default with whatever API key is configured.
+        """
+        mocker.patch.dict(os.environ, {"PIPELEX_BASE_URL": "", "PIPELEX_API_KEY": "pk-live"}, clear=True)
+        with pytest.raises(PipelineRequestError):
+            PipelexAPIClient()
+
+    def test_default_request_timeout(self) -> None:
+        """With no override, the blocking-execute ceiling defaults to 20 minutes."""
+        client = PipelexAPIClient()
+        assert client.request_timeout_seconds == 1200.0
+
+    @pytest.mark.parametrize("timeout_seconds", [30.0, 0.0])
+    def test_request_timeout_seconds_override(self, timeout_seconds: float) -> None:
+        """An explicit `request_timeout_seconds` sets the per-instance ceiling — including a falsy `0.0`."""
+        client = PipelexAPIClient(request_timeout_seconds=timeout_seconds)
+        assert client.request_timeout_seconds == timeout_seconds

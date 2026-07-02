@@ -31,13 +31,6 @@ def _response(status_code: int, *, json: object | None = None) -> httpx.Response
 
 
 class TestClientExecute:
-    @pytest.fixture(autouse=True)
-    def _mock_credentials(self, mocker: MockerFixture) -> None:
-        mocker.patch(
-            "pipelex_sdk.client.load_config",
-            return_value={"api_key": "", "base_url": "", "runner": "api"},
-        )
-
     def _client(self) -> PipelexAPIClient:
         return PipelexAPIClient(api_key="test-token", base_url=_BASE_URL)
 
