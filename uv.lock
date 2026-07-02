@@ -250,7 +250,7 @@ wheels = [
 
 [[package]]
 name = "mthds"
-version = "0.6.1"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "backports-strenum", marker = "python_full_version < '3.11'" },
@@ -261,9 +261,9 @@ dependencies = [
     { name = "tomlkit" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a7/33/c274de1115b6cbe8ac3475327a622893070f1ca40d9f2d0172d6fcae62b9/mthds-0.6.1.tar.gz", hash = "sha256:3d6b93306708f0ef8971285cfab4d9a488fca364e5db7e63a7dba2d065070eef", size = 132504, upload-time = "2026-07-01T07:09:50.568Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e6/fe/52bf1818f41b71658f24ee78dfe24730c04c1066e8b434f39fe23823cbb4/mthds-0.7.0.tar.gz", hash = "sha256:35e8c9d5f4b27e86fec02245f72bc2eb9c849790d39a8ffe6dcb001e7fe7d4cb", size = 136385, upload-time = "2026-07-02T20:17:58.875Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ff/52/0538d1bd11067f60f86ad74dc4d36bcad81ff3b549f71b3290aebd3a9aeb/mthds-0.6.1-py3-none-any.whl", hash = "sha256:5cd39d2b6fc5b43c5967162d80178b050748502515eda26916c2b80e8f3f1f42", size = 57705, upload-time = "2026-07-01T07:09:49.256Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/9f/f12c6de8a2ed9938a5914559639921ded8275f42b8c43ac1af35fe7a488f/mthds-0.7.0-py3-none-any.whl", hash = "sha256:4e371b73ba259899f5ba0b460809d00f176ac44ad773073a3ebb6c10ee207866", size = 57898, upload-time = "2026-07-02T20:17:57.525Z" },
 ]
 
 [[package]]
@@ -350,7 +350,7 @@ wheels = [
 
 [[package]]
 name = "pipelex-sdk"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "backports-strenum", marker = "python_full_version < '3.11'" },
@@ -375,7 +375,7 @@ dev = [
 requires-dist = [
     { name = "backports-strenum", marker = "python_full_version < '3.11'", specifier = ">=1.3.0" },
     { name = "httpx", specifier = ">=0.23.0,<1.0.0" },
-    { name = "mthds", specifier = ">=0.6.1" },
+    { name = "mthds", specifier = ">=0.7.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==1.19.1" },
     { name = "pydantic", specifier = ">=2.10.6,<3.0.0" },
     { name = "pylint", marker = "extra == 'dev'", specifier = "==4.0.4" },

@@ -1,5 +1,18 @@
 # Changelog
 
+## [v0.2.0] - 2026-07-02
+
+### Added
+
+- Added a `request_timeout_seconds` constructor parameter to `PipelexAPIClient`, setting a per-instance blocking-execute ceiling for the inherited protocol routes (`execute`, `start`, `validate`, `models`, `version`).
+
+### Changed
+
+- **BREAKING:** Renamed `PipelexAPIClient` constructor parameters and attributes to match the `mthds` base client and the `@pipelex/sdk` JavaScript counterpart: `api_token` → `api_key` and `api_base_url` → `base_url`. *(Migration: update all instantiations and property reads to the new names.)*
+- **BREAKING:** Renamed API URL environment variables for workspace-wide consistency: `PIPELEX_API_URL` → `PIPELEX_BASE_URL` and the `mthds` fallback `MTHDS_API_URL` → `MTHDS_BASE_URL`. No read aliases are kept for the old names.
+- Bumped the `mthds` dependency from `>=0.6.1` to `>=0.7.0`, and updated config loading to import `load_config` from `mthds.config` (previously `load_credentials` from `mthds.config.credentials`).
+- Updated documentation (`README.md`, `CLAUDE.md`, `docs/architecture.md`) and unit tests to reflect the new client signature, environment variables, and `mthds` configuration.
+
 ## [v0.1.1] - 2026-07-01
 
 ### Fixed

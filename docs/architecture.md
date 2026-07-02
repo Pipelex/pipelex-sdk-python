@@ -35,8 +35,8 @@ The Pipelex narrowing of the `/v1/validate` verdict union is one such implementa
 
 Resolved at construction time:
 
-- `PIPELEX_API_KEY` / `PIPELEX_API_URL` first (brand + JS parity);
-- falling back to the `mthds` resolver (`MTHDS_API_KEY` / `MTHDS_API_URL`, `~/.mthds/config`) as a secondary source.
+- `PIPELEX_API_KEY` / `PIPELEX_BASE_URL` first (brand + JS parity);
+- falling back to the `mthds` resolver (`MTHDS_API_KEY` / `MTHDS_BASE_URL`, `~/.mthds/config`) as a secondary source.
 
 A token is **optional** (anonymous access is allowed; protocol routes work against anonymous bare runners, product routes return `401`). The default base URL is `https://api.pipelex.com`. The base URL is validated host-only (no path/query/fragment/embedded credentials; http/https only).
 

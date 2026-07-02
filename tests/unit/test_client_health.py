@@ -27,12 +27,12 @@ class TestClientHealth:
     @pytest.fixture(autouse=True)
     def _isolate(self, mocker: MockerFixture) -> None:
         mocker.patch(
-            "pipelex_sdk.client.load_credentials",
-            return_value={"api_key": "", "api_url": _BASE_URL, "runner": "api", "telemetry": "0"},
+            "pipelex_sdk.client.load_config",
+            return_value={"api_key": "", "base_url": _BASE_URL, "runner": "api"},
         )
 
     def _client(self) -> PipelexAPIClient:
-        return PipelexAPIClient(api_token="t", api_base_url=_BASE_URL)
+        return PipelexAPIClient(api_key="t", base_url=_BASE_URL)
 
     def test_health_hits_origin_level_path_outside_v1(self, mocker: MockerFixture) -> None:
         client = self._client()

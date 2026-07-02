@@ -13,7 +13,7 @@ It is the **hosted superset**: the five normative MTHDS Protocol routes (inherit
 - **One-way dependency: `pipelex-sdk → mthds`.** This package depends on `mthds` and never the reverse.
 - **Inheritance, not re-implementation.** `class PipelexAPIClient(MthdsAPIClient)`. Reuse the base transport (`_send`, `_url`), body-builders, the reusable protocol methods, `runner_type`, and the async context-manager. Add lifecycle/product/health on top. The base's single-underscore transport methods are treated as a documented **protected extension surface** — do not rename or fork them.
 - **Brand boundary (MTHDS vs Pipelex).** MTHDS = the open standard's brand; Pipelex = the runtime/product brand. Protocol routes and their models belong to `mthds` and keep neutral names; Pipelex-specific surfaces (lifecycle, product routes, implementation envelopes) live here. Name by which brand owns the concept.
-- **Credentials.** Resolve `PIPELEX_API_KEY` / `PIPELEX_API_URL` first, then fall back to the `mthds` resolver (`MTHDS_API_KEY` / `MTHDS_API_URL`, `~/.mthds/config`). Token is **optional** (anonymous allowed). Default base URL `https://api.pipelex.com`.
+- **Credentials.** Resolve `PIPELEX_API_KEY` / `PIPELEX_BASE_URL` first, then fall back to the `mthds` resolver (`MTHDS_API_KEY` / `MTHDS_BASE_URL`, `~/.mthds/config`). Token is **optional** (anonymous allowed). Default base URL `https://api.pipelex.com`.
 - **Async-only.** httpx `AsyncClient`, `async def` throughout. No sync facade in v0.1.
 - **No barrel.** `__init__.py` files stay empty — no re-exports, no docstrings. Import via full paths (`from pipelex_sdk.client import PipelexAPIClient`).
 
