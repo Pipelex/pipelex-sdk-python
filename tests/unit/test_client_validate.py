@@ -25,15 +25,8 @@ _INVALID_BODY = {
 
 
 class TestClientValidate:
-    @pytest.fixture(autouse=True)
-    def _isolate(self, mocker: MockerFixture) -> None:
-        mocker.patch(
-            "pipelex_sdk.client.load_credentials",
-            return_value={"api_key": "", "api_url": _BASE_URL, "runner": "api", "telemetry": "0"},
-        )
-
     def _client(self) -> PipelexAPIClient:
-        return PipelexAPIClient(api_token="t", api_base_url=_BASE_URL)
+        return PipelexAPIClient(api_key="t", base_url=_BASE_URL)
 
     def _mock_send(self, mocker: MockerFixture, client: PipelexAPIClient, *, json_body: object) -> MockType:
         response = httpx.Response(200, json=json_body, request=httpx.Request("POST", f"{_BASE_URL}/v1/validate"))

@@ -26,7 +26,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 from urllib.parse import quote, urlparse
 
 import httpx
-from mthds.config.credentials import load_credentials
 from mthds.protocol.exceptions import PipelineRequestError
 from mthds.runners.api.client import MthdsAPIClient
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -89,7 +88,7 @@ if TYPE_CHECKING:
     from pipelex_sdk.runs import RunResultState
     from pipelex_sdk.validation_models import PipelexValidationResult
 
-# The client composes every endpoint from one origin (PIPELEX_API_URL): `{base}/v1/{endpoint}`.
+# The client composes every endpoint from one origin (PIPELEX_BASE_URL): `{base}/v1/{endpoint}`.
 # The same paths are served by the Pipelex Hosted API (api.pipelex.com) and by a bare
 # OSS pipelex-api runner (localhost:8081) — the protocol surface is identical; only the
 # hosted extensions (e.g. run polling) differ, detectable via GET /v1/version.
@@ -99,7 +98,6 @@ _RUNS = "runs"
 #: Hosted default — the client composes every endpoint as `{base}/v1/{endpoint}`.
 DEFAULT_API_BASE_URL = "https://api.pipelex.com"
 
-_DEFAULT_REQUEST_TIMEOUT_SECONDS = 1200.0  # 20 min — matches the runner's blocking-execute ceiling.
 _POLL_REQUEST_TIMEOUT_SECONDS = 30.0  # single status/result/product GETs; the hosted gateway caps responses at ~30s.
 _DEFAULT_DEGRADED_RETRY_SECONDS = 5  # matches the platform's `_DEGRADE_RETRY_AFTER_SECONDS`.
 
@@ -109,7 +107,7 @@ _DEFAULT_DEGRADED_RETRY_SECONDS = 5  # matches the platform's `_DEGRADE_RETRY_AF
 _GATEWAY_TIMEOUT_THRESHOLD_SECONDS = 28.0
 
 _PIPELEX_API_KEY_ENV = "PIPELEX_API_KEY"
-_PIPELEX_API_URL_ENV = "PIPELEX_API_URL"
+_PIPELEX_BASE_URL_ENV = "PIPELEX_BASE_URL"
 
 # `VersionInfo.implementation` of the bare open-source runner (no run store). Anything
 # else — the hosted implementation first — is assumed to serve the durable run-lifecycle
@@ -139,7 +137,7 @@ class MthdsFile(BaseModel):
 class PipelexAPIClient(MthdsAPIClient):
     """Client for the Pipelex hosted API — and any MTHDS-compliant runner.
 
-    One base URL (`PIPELEX_API_URL`); every endpoint is `<base>/v1/<endpoint>`:
+    One base URL (`PIPELEX_BASE_URL`); every endpoint is `<base>/v1/<endpoint>`:
     - **protocol** (`execute` / `start` / `validate` / `models` / `version`) — inherited
       from `MthdsAPIClient`; works against any MTHDS-compliant runner, hosted or bare.
     - **run lifecycle** (`get_run_status` / `get_run_result` / `wait_for_result`) — the
@@ -148,31 +146,49 @@ class PipelexAPIClient(MthdsAPIClient):
       surface (added in Phase 3), reached through `_request_product` so callers branch
       on the structured `ApiResponseError.code`, not the HTTP status.
 
-    Construction resolves credentials Pipelex-first (`PIPELEX_API_KEY` /
-    `PIPELEX_API_URL`), falling back to the `mthds` resolver (`MTHDS_API_KEY` /
-    `MTHDS_API_URL`, `~/.mthds/config`). The token is optional — anonymous access works
-    against the protocol routes; product routes return `401`. The base URL is validated
-    host-only (no path/query/fragment/credentials; http/https only).
+    Construction is Pipelex-only — it never reads the `mthds` resolver (`MTHDS_API_KEY` /
+    `MTHDS_BASE_URL`, `~/.mthds/config`), whose values are a credential pair for whatever
+    runner the vendor-neutral `mthds` tooling targets, not for this client. The API key
+    resolves from the `api_key` argument, then `PIPELEX_API_KEY`, then anonymous; the token
+    is optional — anonymous access works against the protocol routes, while product routes
+    return `401`. The base URL resolves from the `base_url` argument, then
+    `PIPELEX_BASE_URL`, then the hosted default (`https://api.pipelex.com`). Both chains
+    match the JS SDK exactly. The base URL is validated host-only (no
+    path/query/fragment/credentials; http/https only). `request_timeout_seconds` sets the
+    per-instance blocking-execute ceiling the inherited protocol routes read (default 20 min).
     """
 
-    def __init__(self, api_token: str | None = None, api_base_url: str | None = None) -> None:
-        credentials = load_credentials()
-
-        # Pipelex-primary, mthds fallback. `credentials` already layers env (MTHDS_*) >
-        # file (~/.mthds/config) > default, so this ladder gives the full precedence:
-        # explicit arg > PIPELEX_* env > MTHDS_* env > file > default. The token is optional
-        # and an empty string ("") means anonymous — so the first layer that is *present*
-        # wins even when it is empty. We test `is not None` (not truthiness) to honor an
-        # explicit `api_token=""` / `PIPELEX_API_KEY=""`, matching the JS SDK's `??` chain.
-        self.api_token: str
-        if api_token is not None:
-            self.api_token = api_token
-        elif (pipelex_env_token := os.environ.get(_PIPELEX_API_KEY_ENV)) is not None:
-            self.api_token = pipelex_env_token
+    def __init__(self, api_key: str | None = None, base_url: str | None = None, request_timeout_seconds: float | None = None) -> None:
+        # Pipelex-only resolution — this SDK never reads the mthds resolver (`MTHDS_*`
+        # env vars, `~/.mthds/config`). That config stores a (base_url, api_key) pair for
+        # whatever runner the vendor-neutral mthds tooling targets; borrowing its key while
+        # ignoring its URL would send a credential configured for another runner to
+        # api.pipelex.com. So the api_key resolves arg > `PIPELEX_API_KEY` > anonymous,
+        # matching the JS SDK's `options.apiKey ?? process.env.PIPELEX_API_KEY`.
+        #
+        # DO NOT collapse the argument layer into `api_key or os.environ.get(...)`:
+        # `or` treats "" as falsy and would fall through, silently discarding an explicit
+        # anonymous request (`api_key=""`) and reaching for a configured env key instead.
+        # We test `is not None` (presence, not truthiness) precisely to honor the empty
+        # string, matching the JS SDK's `??` chain. The env layer needs no such care —
+        # its fallthrough target IS anonymous ("").
+        self.api_key: str
+        if api_key is not None:
+            self.api_key = api_key
         else:
-            self.api_token = credentials["api_key"]
+            self.api_key = os.environ.get(_PIPELEX_API_KEY_ENV, "")
 
-        resolved_base_url = api_base_url or os.environ.get(_PIPELEX_API_URL_ENV) or credentials["api_url"] or DEFAULT_API_BASE_URL
+        # The base_url chain is presence-semantics too (`is not None` at the argument AND
+        # env layers), matching the JS SDK's `??` chain: an explicit empty string — an
+        # `base_url=""` argument or a set-but-empty `PIPELEX_BASE_URL` (e.g. an unfilled CI
+        # secret) — must reach the host-only validator below and fail fast, NOT silently
+        # fall through to the hosted default and send the configured API key there.
+        resolved_base_url: str
+        if base_url is not None:
+            resolved_base_url = base_url
+        else:
+            env_base_url = os.environ.get(_PIPELEX_BASE_URL_ENV)
+            resolved_base_url = env_base_url if env_base_url is not None else DEFAULT_API_BASE_URL
         normalized_base_url = resolved_base_url.rstrip("/")
         # The base URL must be host-only: a path-prefixed value (e.g. `.../v1`) would
         # compose as `/v1/v1/...` and fail with a misleading endpoint error instead of a
@@ -185,19 +201,27 @@ class PipelexAPIClient(MthdsAPIClient):
                 "Endpoints compose as {base}/v1/{endpoint}."
             )
             raise PipelineRequestError(msg)
-        self.api_base_url: str = normalized_base_url
+        self.base_url: str = normalized_base_url
         #: Origin root derived from the base URL — `/health` lives here, not under `/v1`.
         self.origin_url: str = _origin_of(normalized_base_url)
+        #: Per-request timeout the inherited protocol routes (`execute` / `start` / `validate`
+        #: / `models` / `version`) read — the blocking-execute ceiling. The default is the
+        #: base's `_DEFAULT_REQUEST_TIMEOUT_SECONDS` ClassVar (20 min, the runner's
+        #: blocking-execute ceiling — part of the documented protected extension surface).
+        #: The SDK's own poll and product GETs pass `_POLL_REQUEST_TIMEOUT_SECONDS` instead.
+        self.request_timeout_seconds: float = (
+            request_timeout_seconds if request_timeout_seconds is not None else self._DEFAULT_REQUEST_TIMEOUT_SECONDS
+        )
         self.client: httpx.AsyncClient | None = None
         #: Cached `/v1/version` handshake outcome — whether the durable lifecycle is served.
         self._lifecycle_available: bool | None = None
 
     @override
     def start_client(self) -> PipelexAPIClient:
-        """Initialize the HTTP client. The Authorization header is sent only when a token
-        is configured — anonymous access (empty token) omits it, matching the JS SDK.
+        """Initialize the HTTP client. The Authorization header is sent only when a key
+        is configured — anonymous access (empty key) omits it, matching the JS SDK.
         """
-        headers = {"Authorization": f"Bearer {self.api_token}"} if self.api_token else {}
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         self.client = httpx.AsyncClient(headers=headers)
         return self
 
@@ -211,12 +235,12 @@ class PipelexAPIClient(MthdsAPIClient):
         try:
             return await self._send(method, url, content=content, request_timeout=request_timeout)
         except httpx.TimeoutException as exc:
-            msg = f"Could not reach Pipelex API at {self.api_base_url} (timeout)"
-            raise ApiUnreachableError(msg, api_url=self.api_base_url, code="ABORT_TIMEOUT") from exc
+            msg = f"Could not reach Pipelex API at {self.base_url} (timeout)"
+            raise ApiUnreachableError(msg, api_url=self.base_url, code="ABORT_TIMEOUT") from exc
         except httpx.TransportError as exc:
             code = type(exc).__name__
-            msg = f"Could not reach Pipelex API at {self.api_base_url} ({code})"
-            raise ApiUnreachableError(msg, api_url=self.api_base_url, code=code) from exc
+            msg = f"Could not reach Pipelex API at {self.base_url} ({code})"
+            raise ApiUnreachableError(msg, api_url=self.base_url, code=code) from exc
 
     async def _request_product(self, method: str, endpoint: str, *, body: object | None = None) -> Any:
         """Issue a Pipelex-product request (`/v1/me`, `/v1/methods`, `/v1/billing/*`, …)
@@ -256,7 +280,7 @@ class PipelexAPIClient(MthdsAPIClient):
         msg = f"API {method} /{_API_PREFIX}/{endpoint} failed ({response.status_code}): {detail}"
         raise ApiResponseError(
             msg,
-            api_url=self.api_base_url,
+            api_url=self.base_url,
             status=response.status_code,
             status_text=response.reason_phrase,
             response_body=body_text,
@@ -277,9 +301,9 @@ class PipelexAPIClient(MthdsAPIClient):
             msg = (
                 f"The durable run lifecycle is not available: {url} returned 404. Run polling is a "
                 f"hosted-API extension (/{_API_PREFIX}/{_RUNS}/*), not part of the MTHDS Protocol; "
-                "PIPELEX_API_URL points at a bare runner that does not serve it."
+                "PIPELEX_BASE_URL points at a bare runner that does not serve it."
             )
-            raise RunLifecycleUnavailableError(msg, api_url=self.api_base_url)
+            raise RunLifecycleUnavailableError(msg, api_url=self.base_url)
 
     # ── Protocol surface: `execute` override (gateway-timeout translation) ──
 

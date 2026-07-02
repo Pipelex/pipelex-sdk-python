@@ -36,27 +36,19 @@ def _response(status_code: int, *, json: object = None, headers: dict[str, str] 
 
 
 class TestClientLifecycle:
-    @pytest.fixture(autouse=True)
-    def _mock_credentials(self, mocker: MockerFixture) -> None:
-        """Keep construction hermetic — never touch the real credentials file/env."""
-        mocker.patch(
-            "pipelex_sdk.client.load_credentials",
-            return_value={"api_key": "", "api_url": "", "runner": "api", "telemetry": "0"},
-        )
-
     def _client(self) -> PipelexAPIClient:
-        return PipelexAPIClient(api_token="test-token", api_base_url=_BASE_URL)
+        return PipelexAPIClient(api_key="test-token", base_url=_BASE_URL)
 
     # ── start (inherited body-building + bare-runner 404 translation) ──
 
     def test_start_targets_v1_url_and_returns_run_result_start(self, mocker: MockerFixture) -> None:
         """Start posts to <base>/v1/start; a 202 parses into RunResultStart with the authoritative id."""
-        client = PipelexAPIClient(api_token="t", api_base_url=f"{_BASE_URL}/")
+        client = PipelexAPIClient(api_key="t", base_url=f"{_BASE_URL}/")
         body = {"pipeline_run_id": "run_1", "state": "RUNNING", "created_at": "2026-06-10T00:00:00Z"}
         send_mock = mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(202, json=body)))
 
         started = asyncio.run(client.start(pipe_code="answer"))
-        assert client.api_base_url == _BASE_URL
+        assert client.base_url == _BASE_URL
         assert send_mock.call_args.args[1] == f"{_BASE_URL}/v1/start"
         assert started.pipeline_run_id == "run_1"
 
