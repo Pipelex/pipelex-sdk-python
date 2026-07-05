@@ -1,5 +1,15 @@
 # Changelog
 
+## [v0.3.0] - 2026-07-05
+
+### Changed
+
+- **`RunResults.main_stuff` is now always present (Breaking).** `main_stuff` was optional (`Any = None`) and callers had to fall back to `pipe_output` and shape-guess the main output on the blocking path. Leaning on the pipelex >= 0.37 main-stuff invariant (every completed run delivers a main stuff), the SDK now delivers a resolved, non-null `main_stuff` on **both** paths: on the hosted path it is the `main_stuff.json` S3 artifact; on the blocking-execute path the SDK resolves it out of the returned working memory via the response's `main_stuff_name` extension field, so both paths carry the same content shape. Consumers read `results.main_stuff` directly — no `main_stuff or pipe_output` fallback, no shape-guessing. The full working memory still rides `pipe_output` (blocking path only) for consumers that want it. *(Migration: read `results.main_stuff` instead of `results.main_stuff or results.pipe_output`.)*
+
+### Added
+
+- **`MissingMainStuffError`.** A completed run that cannot deliver a main stuff now raises this typed error (derives from `PipelineRequestError`, carries `run_id`) instead of silently yielding a null output: the hosted results endpoint answered a `200` with a null `main_stuff`, or a blocking `execute` response named a `main_stuff_name` absent from its working-memory root. A falsy-but-present main stuff (empty list, `0`) is a valid output and does not raise.
+
 ## [v0.2.0] - 2026-07-02
 
 ### Added

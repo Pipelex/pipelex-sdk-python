@@ -35,6 +35,7 @@ from typing_extensions import override
 from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
+    MissingMainStuffError,
     PipelineExecuteTimeoutError,
     RunFailedError,
     RunLifecycleUnavailableError,
@@ -525,6 +526,9 @@ class PipelexAPIClient(MthdsAPIClient):
         self._raise_if_lifecycle_unavailable(response, url)
         response.raise_for_status()
         result = RunResults.model_validate(response.json())
+        if result.main_stuff is None:
+            msg = f"Completed run '{run_id}' returned no main stuff — a completed run always delivers a main stuff."
+            raise MissingMainStuffError(msg, run_id=run_id)
         return RunResultCompleted(pipeline_run_id=run_id, result=result)
 
     async def wait_for_result(self, run_id: str, options: WaitForResultOptions | None = None) -> RunResults:
@@ -930,13 +934,26 @@ def _extract_run_status_from_message(message: str) -> RunStatus:
 def _map_run_result_to_run_results(response: DictRunResultExecute) -> RunResults:
     """Map the protocol's blocking `POST /v1/execute` response onto the lifecycle's `RunResults`.
 
-    The bare-runner path returns `pipe_output` (native runner shape); `main_stuff` and `graph_spec`
-    are hosted-durable artifacts and stay `None` here. Consumers read `main_stuff or pipe_output`
-    (the documented hosted/bare output-shape difference).
+    Resolves the main stuff out of the returned working memory using the response's `main_stuff_name`
+    (an always-present extension field, pipelex >= 0.37) and delivers its content as `main_stuff` — the
+    same content shape the hosted path relays from S3, so consumers read `main_stuff` uniformly. The
+    full working memory rides `pipe_output` (blocking only). A completed response that names no locatable
+    main stuff is a contract violation and raises `MissingMainStuffError`.
     """
+    working_memory = response.pipe_output.working_memory
+    raw_main_stuff_name = response.model_extra.get("main_stuff_name") if response.model_extra else None
+    main_stuff_name = raw_main_stuff_name if isinstance(raw_main_stuff_name, str) else None
+    main_stuff = working_memory.root.get(main_stuff_name) if main_stuff_name is not None else None
+    if main_stuff is None:
+        msg = (
+            f"Blocking run '{response.pipeline_run_id}' delivered no locatable main stuff "
+            f"(main_stuff_name={main_stuff_name!r} is absent from the working-memory root) — "
+            "a completed run always delivers a main stuff."
+        )
+        raise MissingMainStuffError(msg, run_id=response.pipeline_run_id)
     return RunResults(
         pipeline_run_id=response.pipeline_run_id,
-        main_stuff=None,
+        main_stuff=main_stuff.content,
         graph_spec=None,
         pipe_output=response.pipe_output.model_dump(),
     )

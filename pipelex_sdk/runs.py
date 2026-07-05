@@ -118,24 +118,29 @@ class RunRead(RunPublic):
 class RunResults(BaseModel):
     """Result artifacts for a completed run — `GET /v1/runs/{pipeline_run_id}/results`.
 
-    Hosted: `main_stuff` + `graph_spec` (S3 artifacts relayed VERBATIM;
-    `main_stuff` is polymorphic — a list output renders to a top-level array, a
-    structured output to an object — so both are typed as opaque JSON (`Any`),
-    never `dict`; either may be `None` mid-write). Bare-runner blocking fallback:
-    the runner's native execute response rides `pipe_output`. Consumers read
-    `main_stuff or pipe_output` (the documented hosted/bare output-shape
-    difference). Extension-open (`extra="allow"`): any other server artifact is
-    preserved without being named by the SDK.
+    `main_stuff` is the resolved main output content and is ALWAYS present for a
+    completed run (the pipelex >= 0.37 main-stuff invariant): on the hosted path
+    it is the `main_stuff.json` S3 artifact relayed verbatim; on the bare-runner
+    blocking path the SDK resolves it from the returned working memory via the
+    run's `main_stuff_name`, so both paths deliver the same content shape.
+    Consumers read `main_stuff` directly — no shape-guessing. A completed run that
+    cannot deliver a main stuff raises `MissingMainStuffError`. Extension-open
+    (`extra="allow"`): any other server artifact (e.g. the hosted `working_memory`)
+    is preserved without being named by the SDK.
     """
 
     model_config = ConfigDict(extra="allow")
 
     pipeline_run_id: str
+    #: The resolved main output content — always present for a completed run. Typed `Any` because the
+    #: content is polymorphic (a list output renders to a top-level array, a structured output to an
+    #: object) and may be a valid falsy value (empty list, `0`); it is never absent for a completed run.
+    main_stuff: Any
     #: Method graph spec (`graphspec.json`); `None` if missing mid-write or on the bare-runner path.
     graph_spec: Any = None
-    #: Main output stuff (`main_stuff.json`); `None` if missing mid-write or on the bare-runner path.
-    main_stuff: Any = None
-    #: Bare runner's native pipe output (blocking-execute fallback only); `None` on the hosted path.
+    #: Bare runner's native pipe output — the full working memory (`{"root": ..., "aliases": ...}`),
+    #: blocking-execute path only; `None` on the hosted path. Supplementary to `main_stuff`, which is
+    #: already resolved out of it; kept for consumers that need the whole working memory.
     pipe_output: dict[str, Any] | None = None
 
 
