@@ -13,13 +13,22 @@ import pytest
 from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
-from pipelex_sdk.errors import PipelineExecuteTimeoutError, RunStillRunningError
+from pipelex_sdk.errors import MissingMainStuffError, PipelineExecuteTimeoutError, RunStillRunningError
 
 _BASE_URL = "http://localhost:8081"
 
+# A completed execute response: `main_stuff_name` ("result") names the working-memory root key the
+# `.main_stuff` accessor resolves to.
 _EXECUTE_BODY: dict[str, object] = {
     "pipeline_run_id": "run-x",
-    "pipe_output": {"working_memory": {"root": {}, "aliases": {}}, "pipeline_run_id": "run-x"},
+    "main_stuff_name": "result",
+    "pipe_output": {
+        "working_memory": {
+            "root": {"result": {"concept": "native.Text", "content": {"text": "hi"}}},
+            "aliases": {"main_stuff": "result"},
+        },
+        "pipeline_run_id": "run-x",
+    },
 }
 
 
@@ -74,12 +83,31 @@ class TestClientExecute:
             asyncio.run(client.execute(pipe_code="p"))
         assert not isinstance(exc_info.value, PipelineExecuteTimeoutError)
 
-    def test_success_passes_through_untranslated(self, mocker: MockerFixture) -> None:
+    def test_success_resolves_main_stuff(self, mocker: MockerFixture) -> None:
         client = self._client()
         mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=_EXECUTE_BODY)))
 
         result = asyncio.run(client.execute(pipe_code="p"))
         assert result.pipeline_run_id == "run-x"
+        # `.main_stuff` resolves the output out of the working memory — same accessor as the durable path.
+        assert result.main_stuff == {"text": "hi"}
+
+    def test_main_stuff_raises_when_unlocatable(self, mocker: MockerFixture) -> None:
+        client = self._client()
+        # `main_stuff_name` names "missing", absent from the working-memory root.
+        body: dict[str, object] = {
+            "pipeline_run_id": "run-x",
+            "main_stuff_name": "missing",
+            "pipe_output": {
+                "working_memory": {"root": {"other": {"concept": "native.Text", "content": {}}}, "aliases": {}},
+                "pipeline_run_id": "run-x",
+            },
+        }
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=body)))
+
+        result = asyncio.run(client.execute(pipe_code="p"))
+        with pytest.raises(MissingMainStuffError):
+            _ = result.main_stuff
 
     def test_202_degrade_stays_run_still_running_error(self, mocker: MockerFixture) -> None:
         client = self._client()

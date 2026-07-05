@@ -41,6 +41,7 @@ from pipelex_sdk.errors import (
     RunLifecycleUnavailableError,
     RunTimeoutError,
 )
+from pipelex_sdk.execute_result import PipelexExecuteResult
 from pipelex_sdk.product_models import (
     BillingPortalResponse,
     ChangePlanResponse,
@@ -78,7 +79,6 @@ if TYPE_CHECKING:
     from mthds.protocol.pipeline_inputs import PipelineInputs
     from mthds.protocol.stuff import StuffType
     from mthds.protocol.working_memory import WorkingMemoryAbstract
-    from mthds.runners.api.models import DictRunResultExecute
 
     from pipelex_sdk.product_models import (
         MethodWriteInput,
@@ -318,8 +318,12 @@ class PipelexAPIClient(MthdsAPIClient):
         output_multiplicity: VariableMultiplicity | None = None,
         dynamic_output_concept_ref: str | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> DictRunResultExecute:
+    ) -> PipelexExecuteResult:
         """Execute a method synchronously and wait for its completion — `POST /v1/execute`.
+
+        Returns a `PipelexExecuteResult` — the protocol's raw execute response enriched with a
+        resolved `.main_stuff` accessor, so a blocking result reads its output the same way as a
+        durable one (`result.main_stuff`) instead of digging through `pipe_output`.
 
         Identical to the inherited protocol `execute`, except a failure consistent with the
         hosted gateway's ~30s synchronous ceiling — a gateway `503`/`504`, or a client-side
@@ -338,7 +342,7 @@ class PipelexAPIClient(MthdsAPIClient):
         """
         started_at = monotonic()
         try:
-            return await super().execute(
+            result = await super().execute(
                 pipe_code=pipe_code,
                 mthds_contents=mthds_contents,
                 inputs=inputs,
@@ -352,6 +356,9 @@ class PipelexAPIClient(MthdsAPIClient):
             if _is_gateway_timeout(exc, elapsed_seconds):
                 raise PipelineExecuteTimeoutError(_execute_timeout_message(elapsed_seconds), elapsed_seconds=elapsed_seconds) from exc
             raise
+        # Re-validate the base result into the enriched subclass (adds the `.main_stuff` accessor;
+        # the `main_stuff_name` extension + working memory ride `model_extra`/`pipe_output`).
+        return PipelexExecuteResult.model_validate(result.model_dump())
 
     # ── Protocol surface: `start` override (bare-runner 404 → typed error) ──
 
@@ -931,29 +938,17 @@ def _extract_run_status_from_message(message: str) -> RunStatus:
     return RunStatus.FAILED
 
 
-def _map_run_result_to_run_results(response: DictRunResultExecute) -> RunResults:
+def _map_run_result_to_run_results(response: PipelexExecuteResult) -> RunResults:
     """Map the protocol's blocking `POST /v1/execute` response onto the lifecycle's `RunResults`.
 
-    Resolves the main stuff out of the returned working memory using the response's `main_stuff_name`
-    (an always-present extension field, pipelex >= 0.37) and delivers its content as `main_stuff` — the
-    same content shape the hosted path relays from S3, so consumers read `main_stuff` uniformly. The
-    full working memory rides `pipe_output` (blocking only). A completed response that names no locatable
-    main stuff is a contract violation and raises `MissingMainStuffError`.
+    `response.main_stuff` resolves the main output out of the returned working memory (and raises
+    `MissingMainStuffError` if the run named no locatable main stuff), so the durable and blocking
+    paths hand back the same `main_stuff` content shape. The full working memory rides `pipe_output`
+    (blocking only).
     """
-    working_memory = response.pipe_output.working_memory
-    raw_main_stuff_name = response.model_extra.get("main_stuff_name") if response.model_extra else None
-    main_stuff_name = raw_main_stuff_name if isinstance(raw_main_stuff_name, str) else None
-    main_stuff = working_memory.root.get(main_stuff_name) if main_stuff_name is not None else None
-    if main_stuff is None:
-        msg = (
-            f"Blocking run '{response.pipeline_run_id}' delivered no locatable main stuff "
-            f"(main_stuff_name={main_stuff_name!r} is absent from the working-memory root) — "
-            "a completed run always delivers a main stuff."
-        )
-        raise MissingMainStuffError(msg, run_id=response.pipeline_run_id)
     return RunResults(
         pipeline_run_id=response.pipeline_run_id,
-        main_stuff=main_stuff.content,
+        main_stuff=response.main_stuff,
         graph_spec=None,
         pipe_output=response.pipe_output.model_dump(),
     )
