@@ -12,32 +12,31 @@ from mthds.runners.api.models import DictRunResultExecute
 
 from pipelex_sdk.errors import MissingMainStuffError
 
-# The execute response's extension field that names the working-memory root key of the main stuff.
-# Distinct from mthds's `MAIN_STUFF_NAME` ("main_stuff"), which is the root key / alias name itself.
-_MAIN_STUFF_NAME_FIELD = "main_stuff_name"
-
 
 class PipelexExecuteResult(DictRunResultExecute):
     """The SDK's blocking `execute()` result — a `DictRunResultExecute` that also exposes the
     resolved main output as `.main_stuff`.
 
     The protocol's raw execute response carries the working memory (`pipe_output`) and names the
-    main output via a `main_stuff_name` extension field, but not the output itself. This subclass
-    digs it out on access so callers read `result.main_stuff` exactly the same way as on the
-    durable path (`RunResults.main_stuff`) — one output accessor across both execution modes, no
-    working-memory spelunking.
+    main output via `main_stuff_name`, but not the output itself. The neutral `mthds` model leaves
+    `main_stuff_name` in its extension bag; this Pipelex-branded subclass declares it as a typed
+    field (Pipelex owns that concept) and digs the output out on access, so callers read
+    `result.main_stuff` exactly the same way as on the durable path (`RunResults.main_stuff`) — one
+    output accessor across both execution modes, no working-memory spelunking.
     """
+
+    #: The working-memory `root` key the completed execute response names as its main stuff
+    #: (pipelex >= 0.37 always sends it). `None` only if a runner omits it, in which case
+    #: `.main_stuff` raises `MissingMainStuffError`.
+    main_stuff_name: str | None = None
 
     @property
     def main_stuff(self) -> Any:
-        """The resolved main output content, dug out of the working memory via the response's
-        `main_stuff_name` (pipelex >= 0.37). Raises `MissingMainStuffError` if the completed run
-        named no locatable main stuff. A falsy-but-present value (empty list, `0`) is a valid
-        output and is returned as-is.
+        """The resolved main output content, dug out of the working memory via `main_stuff_name`.
+        Raises `MissingMainStuffError` if the completed run named no locatable main stuff. A
+        falsy-but-present value (empty list, `0`) is a valid output and is returned as-is.
         """
-        extras = self.model_extra or {}
-        raw_name = extras.get(_MAIN_STUFF_NAME_FIELD)
-        main_stuff_name = raw_name if isinstance(raw_name, str) else None
+        main_stuff_name = self.main_stuff_name
         stuff = self.pipe_output.working_memory.root.get(main_stuff_name) if main_stuff_name is not None else None
         if stuff is None:
             msg = (
