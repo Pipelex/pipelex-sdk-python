@@ -1,5 +1,18 @@
 # Changelog
 
+## [v0.3.0] - 2026-07-05
+
+### Changed
+
+- **One output accessor across both execution modes: `result.main_stuff` (Breaking).** Reading a run's output no longer depends on which path ran. Both the durable result (`RunResults`, from `wait_for_result` / `start_and_wait`) and the blocking result (now a `PipelexExecuteResult`, from `execute`) expose a resolved, non-null `.main_stuff` — so a caller writes `result = await client.<run>(...); output = result.main_stuff` uniformly, with no `main_stuff or pipe_output` fallback and no working-memory spelunking.
+  - `RunResults.main_stuff` is now **required and non-null** for a completed run (was `Any = None`). On the hosted path it is the `main_stuff.json` S3 artifact; on the blocking path the SDK resolves it out of the returned working memory via the response's `main_stuff_name` extension field. The full working memory still rides `pipe_output` (blocking path only) for consumers that want it.
+  - `execute()` now returns a `PipelexExecuteResult` — the protocol's raw execute response enriched with the same resolved `.main_stuff` accessor. It remains a `DictRunResultExecute` subtype, so existing field access (`pipeline_run_id`, `pipe_output`) is unchanged.
+  - *(Migration: read `result.main_stuff` instead of digging through `pipe_output` / falling back from `main_stuff` to `pipe_output`.)*
+
+### Added
+
+- **`MissingMainStuffError`.** A completed run that cannot deliver a main stuff now raises this typed error (derives from `PipelineRequestError`, carries `run_id`) instead of silently yielding a null output: the hosted results endpoint answered a `200` that omits `main_stuff` or sends it null, or a blocking `execute` response named a `main_stuff_name` absent from its working-memory root. The results path checks the decoded payload before validating into the now-required `RunResults` model, so an omitted key surfaces as `MissingMainStuffError` rather than a raw Pydantic validation error. A falsy-but-present main stuff (empty list, `0`) is a valid output and does not raise.
+
 ## [v0.2.0] - 2026-07-02
 
 ### Added

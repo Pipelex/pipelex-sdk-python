@@ -75,6 +75,8 @@ The protocol `execute` is **overridden** to add one Pipelex-API behavior the bar
 
 Everything else stays the inherited regime: the protocol's optional 202 async-degrade still raises `RunStillRunningError` (from the base `execute`), and every other non-2xx keeps `httpx.HTTPStatusError` — consistent with the other inherited protocol routes (decision #5). The `_execute_blocking` bare-runner fallback (below) calls this same overridden `execute`, so it inherits the translation; off-platform there is no gateway cap, so the `503/504`-after-28s condition effectively never fires there.
 
+The override also **enriches the return type**: it re-validates the base result into a `PipelexExecuteResult` (`pipelex_sdk/execute_result.py`), a `DictRunResultExecute` subtype that adds a resolved `.main_stuff` accessor (dug out of `pipe_output`'s working memory via the response's `main_stuff_name`, raising `MissingMainStuffError` if unlocatable). This gives blocking and durable results the **same output accessor** — `result.main_stuff` — so callers never branch on which path ran. `_map_run_result_to_run_results` reads that accessor too, keeping the resolution single-sourced.
+
 ## Run lifecycle (hosted extension)
 
 The durable run lifecycle (`pipelex_sdk/runs.py` + the client's lifecycle methods) is a **hosted-API extension, not part of the MTHDS Protocol**. Long method runs outlive the hosted gateway's ~30s synchronous cap, so a caller submits a run (`POST /v1/start`), then polls a self-healing endpoint by bare `pipeline_run_id` until it reaches a terminal state. All state lives behind the id (DynamoDB + Temporal on the platform), so a caller can drop the poll loop and resume later with just the id. A bare runner has no run store and `404`s these routes, which the client translates into a clear `RunLifecycleUnavailableError`.
@@ -85,7 +87,7 @@ The durable run lifecycle (`pipelex_sdk/runs.py` + the client's lifecycle method
 
 - `RunStatus` — the hosted status enum, with `is_terminal` / `is_success` predicates (exhaustive `match`).
 - `RunRead` — a run record read through the self-healing status path (adds `degraded` + `retry_after_seconds`).
-- `RunResults` — result artifacts. Hosted runs carry `main_stuff` (+ `graph_spec`); the bare-runner blocking fallback carries `pipe_output` (the runner's native execute response). Consumers read `main_stuff or pipe_output` (the documented hosted/bare output-shape difference). Extension-open, so any other server artifact is preserved.
+- `RunResults` — result artifacts. `main_stuff` (the resolved main output content) is always present for a completed run: on the hosted path it is the `main_stuff.json` S3 artifact; on the bare-runner blocking path the SDK resolves it from the returned working memory via the response's `main_stuff_name`, so both paths deliver the same shape. Consumers read `main_stuff` directly. The full working memory still rides `pipe_output` (blocking path only) for consumers that want it, and `graph_spec` rides the hosted path. A completed run that cannot deliver a main stuff raises `MissingMainStuffError`. Extension-open, so any other server artifact is preserved.
 - `RunResultState` — the single-shot result outcome, a union discriminated on `state` (`running` / `completed` / `failed`).
 - `WaitForResultOptions` / `PollInfo` — poll-loop tuning and progress info. Async-native cancellation is via `asyncio.CancelledError` (cancel the awaiting task), so there is no `signal` field.
 
@@ -103,7 +105,7 @@ These poll GETs go through `_send_or_unreachable`, so a transport failure surfac
 
 - A cached `GET /v1/version` handshake (`_supports_run_lifecycle`) classifies the runner. `VersionInfo.implementation == "pipelex-api"` ⇒ a bare runner (no run store); anything else ⇒ assumed hosted. The outcome is cached for the client's lifetime; a failed handshake assumes hosted and lets `start` surface the real error.
 - **Hosted:** durable `start` (202 ack) → `wait_for_result` (poll to terminal).
-- **Bare runner:** the blocking `POST /v1/execute` (`_execute_blocking`), which has no gateway cap off-platform and returns the native `pipe_output`, mapped onto `RunResults` (`main_stuff = None`).
+- **Bare runner:** the blocking `POST /v1/execute` (`_execute_blocking`), which has no gateway cap off-platform and returns the native `pipe_output`, mapped onto `RunResults` — the SDK resolves `main_stuff` out of the working memory via the response's `main_stuff_name` and keeps the full working memory on `pipe_output`.
 - **Self-heal:** a runner can look hosted yet lack the durable routes (`implementation` is an optional extension a compliant bare runner may omit). The client's `start` override translates a bare-runner missing-route `404` into `RunLifecycleUnavailableError` — raised **before any run is created** — so `start_and_wait` falls back to the blocking path without risking a double-run, and caches the negative so later calls skip the durable attempt.
 
 ### Run/lifecycle errors

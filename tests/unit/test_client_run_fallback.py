@@ -12,7 +12,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
-from pipelex_sdk.errors import ApiUnreachableError, RunLifecycleUnavailableError
+from pipelex_sdk.errors import ApiUnreachableError, MissingMainStuffError, RunLifecycleUnavailableError
 
 _BASE_URL = "http://localhost:8081"
 
@@ -23,9 +23,18 @@ _BARE_VERSION = {"protocol_version": "0.6.0", "implementation": "pipelex-api", "
 # discover the missing lifecycle at runtime (start 404s) and self-heal to the blocking path.
 _BASE_ONLY_VERSION = {"protocol_version": "0.6.0", "runner_version": "9.9.9"}
 
+# A completed blocking-execute response: `main_stuff_name` (an extension field) names the
+# working-memory root key of the main stuff, which the SDK resolves into `RunResults.main_stuff`.
 _EXECUTE_BODY: dict[str, object] = {
     "pipeline_run_id": "run-x",
-    "pipe_output": {"working_memory": {"root": {}, "aliases": {}}, "pipeline_run_id": "run-x"},
+    "main_stuff_name": "result",
+    "pipe_output": {
+        "working_memory": {
+            "root": {"result": {"concept": "native.Text", "content": {"text": "hello"}}},
+            "aliases": {"main_stuff": "result"},
+        },
+        "pipeline_run_id": "run-x",
+    },
 }
 
 
@@ -89,6 +98,24 @@ class TestClientRunFallback:
         asyncio.run(client.start_and_wait(pipe_code="p"))
         assert _urls(send).count(f"{_BASE_URL}/v1/version") == 1
 
+    def test_hosted_completed_with_null_main_stuff_raises(self, mocker: MockerFixture) -> None:
+        """A hosted 200 whose `main_stuff` is null is a completed run that delivered nothing — hard fail."""
+        client = self._client()
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(
+                side_effect=[
+                    _response(200, json=_HOSTED_VERSION),
+                    _response(202, json={"pipeline_run_id": "run-1", "state": "STARTED", "created_at": "t0"}),
+                    _response(200, json={"pipeline_run_id": "run-1", "main_stuff": None, "graph_spec": {"n": 1}}),
+                ]
+            ),
+        )
+
+        with pytest.raises(MissingMainStuffError):
+            asyncio.run(client.start_and_wait(pipe_code="p"))
+
     # ── Bare runner (blocking execute fallback) ──────────────────
 
     def test_bare_runner_falls_back_to_blocking_execute(self, mocker: MockerFixture) -> None:
@@ -102,9 +129,33 @@ class TestClientRunFallback:
 
         result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
         assert result.pipeline_run_id == "run-x"
-        assert result.main_stuff is None
-        assert result.pipe_output == {"working_memory": {"root": {}, "aliases": {}}, "pipeline_run_id": "run-x"}
+        # The SDK resolves `main_stuff` out of the working memory via `main_stuff_name` ("result") —
+        # its content, the same shape the hosted path relays; the full working memory rides pipe_output.
+        assert result.main_stuff == {"text": "hello"}
+        assert result.pipe_output is not None
+        assert result.pipe_output["working_memory"]["root"]["result"]["content"] == {"text": "hello"}
         assert _urls(send) == [f"{_BASE_URL}/v1/version", f"{_BASE_URL}/v1/execute"]
+
+    def test_blocking_fallback_raises_when_main_stuff_unlocatable(self, mocker: MockerFixture) -> None:
+        """A completed blocking response whose `main_stuff_name` names no root stuff is a hard fail."""
+        client = self._client()
+        # `main_stuff_name` points at "answer", but the working-memory root has no such stuff.
+        bad_body: dict[str, object] = {
+            "pipeline_run_id": "run-y",
+            "main_stuff_name": "answer",
+            "pipe_output": {
+                "working_memory": {"root": {"other": {"concept": "native.Text", "content": {}}}, "aliases": {}},
+                "pipeline_run_id": "run-y",
+            },
+        }
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(side_effect=[_response(200, json=_BARE_VERSION), _response(200, json=bad_body)]),
+        )
+
+        with pytest.raises(MissingMainStuffError):
+            asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
 
     def test_fallback_forwards_extra_extension_args(self, mocker: MockerFixture) -> None:
         """An `extra` extension arg rides the blocking execute body as a top-level field — not dropped."""

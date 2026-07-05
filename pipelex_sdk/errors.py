@@ -131,6 +131,22 @@ class RunTimeoutError(PipelineRequestError):
         self.timeout_seconds = timeout_seconds
 
 
+class MissingMainStuffError(PipelineRequestError):
+    """Raised when a completed run cannot deliver its main stuff.
+
+    Every completed run delivers a main stuff (the pipelex >= 0.37 wire invariant), so the SDK
+    hands consumers a non-null `RunResults.main_stuff`. This surfaces the contract violation when it
+    cannot: the hosted results endpoint answered a `200` with a null `main_stuff`, or a blocking
+    `execute` response named a `main_stuff_name` whose stuff is absent from the returned working
+    memory. `run_id` locates the run. (A falsy-but-present main stuff — an empty list, `0` — is a
+    valid output and does NOT raise; only a genuinely absent one does.)
+    """
+
+    def __init__(self, message: str, run_id: str) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+
+
 class RunLifecycleUnavailableError(PipelineRequestError):
     """Raised when the durable run lifecycle (`/v1/runs/*`) is not served by the
     configured `PIPELEX_BASE_URL`.

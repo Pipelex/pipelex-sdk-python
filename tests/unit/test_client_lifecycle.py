@@ -9,6 +9,7 @@ from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
 from pipelex_sdk.errors import (
+    MissingMainStuffError,
     RunFailedError,
     RunLifecycleUnavailableError,
     RunStillRunningError,
@@ -128,6 +129,32 @@ class TestClientLifecycle:
         assert isinstance(state, RunResultCompleted)
         assert state.result.main_stuff == [{"color": "red"}, {"color": "blue"}]
         assert state.result.graph_spec == {"nodes": []}
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"pipeline_run_id": "run_1"}, id="main_stuff_key_omitted"),
+            pytest.param({"pipeline_run_id": "run_1", "main_stuff": None}, id="main_stuff_null"),
+        ],
+    )
+    def test_get_run_result_completed_without_main_stuff_raises_typed_error(self, mocker: MockerFixture, body: dict[str, object]) -> None:
+        """A 200 that omits main_stuff (or sends it null) raises MissingMainStuffError, not a raw Pydantic error."""
+        client = self._client()
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=body)))
+
+        with pytest.raises(MissingMainStuffError) as exc_info:
+            asyncio.run(client.get_run_result("run_1"))
+        assert exc_info.value.run_id == "run_1"
+
+    def test_get_run_result_completed_keeps_falsy_main_stuff(self, mocker: MockerFixture) -> None:
+        """A present-but-falsy main_stuff (an empty list) is a valid output and does NOT raise."""
+        client = self._client()
+        body: dict[str, object] = {"pipeline_run_id": "run_1", "main_stuff": []}
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=body)))
+
+        state = asyncio.run(client.get_run_result("run_1"))
+        assert isinstance(state, RunResultCompleted)
+        assert state.result.main_stuff == []
 
     def test_get_run_result_running_honors_retry_after(self, mocker: MockerFixture) -> None:
         """A 202 maps to RunResultRunning with the server's Retry-After hint."""

@@ -45,9 +45,9 @@ async def main() -> None:
             inputs={"topic": "quantum computing"},
         )
 
-        # 3. Read the output. Hosted runs carry `main_stuff`; the bare-runner
-        #    fallback carries the native `pipe_output`.
-        print(result.main_stuff or result.pipe_output)
+        # 3. Read the output. Every completed run delivers a resolved `main_stuff`
+        #    (the full working memory also rides `pipe_output` on the blocking path).
+        print(result.main_stuff)
 ```
 
 ### Long runs: start + poll explicitly

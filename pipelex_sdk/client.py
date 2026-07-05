@@ -35,11 +35,13 @@ from typing_extensions import override
 from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
+    MissingMainStuffError,
     PipelineExecuteTimeoutError,
     RunFailedError,
     RunLifecycleUnavailableError,
     RunTimeoutError,
 )
+from pipelex_sdk.execute_result import PipelexExecuteResult
 from pipelex_sdk.product_models import (
     BillingPortalResponse,
     ChangePlanResponse,
@@ -77,7 +79,6 @@ if TYPE_CHECKING:
     from mthds.protocol.pipeline_inputs import PipelineInputs
     from mthds.protocol.stuff import StuffType
     from mthds.protocol.working_memory import WorkingMemoryAbstract
-    from mthds.runners.api.models import DictRunResultExecute
 
     from pipelex_sdk.product_models import (
         MethodWriteInput,
@@ -317,8 +318,12 @@ class PipelexAPIClient(MthdsAPIClient):
         output_multiplicity: VariableMultiplicity | None = None,
         dynamic_output_concept_ref: str | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> DictRunResultExecute:
+    ) -> PipelexExecuteResult:
         """Execute a method synchronously and wait for its completion — `POST /v1/execute`.
+
+        Returns a `PipelexExecuteResult` — the protocol's raw execute response enriched with a
+        resolved `.main_stuff` accessor, so a blocking result reads its output the same way as a
+        durable one (`result.main_stuff`) instead of digging through `pipe_output`.
 
         Identical to the inherited protocol `execute`, except a failure consistent with the
         hosted gateway's ~30s synchronous ceiling — a gateway `503`/`504`, or a client-side
@@ -337,7 +342,7 @@ class PipelexAPIClient(MthdsAPIClient):
         """
         started_at = monotonic()
         try:
-            return await super().execute(
+            result = await super().execute(
                 pipe_code=pipe_code,
                 mthds_contents=mthds_contents,
                 inputs=inputs,
@@ -351,6 +356,9 @@ class PipelexAPIClient(MthdsAPIClient):
             if _is_gateway_timeout(exc, elapsed_seconds):
                 raise PipelineExecuteTimeoutError(_execute_timeout_message(elapsed_seconds), elapsed_seconds=elapsed_seconds) from exc
             raise
+        # Re-validate the base result into the enriched subclass (adds the `.main_stuff` accessor;
+        # the `main_stuff_name` extension + working memory ride `model_extra`/`pipe_output`).
+        return PipelexExecuteResult.model_validate(result.model_dump())
 
     # ── Protocol surface: `start` override (bare-runner 404 → typed error) ──
 
@@ -524,7 +532,15 @@ class PipelexAPIClient(MthdsAPIClient):
 
         self._raise_if_lifecycle_unavailable(response, url)
         response.raise_for_status()
-        result = RunResults.model_validate(response.json())
+        # Inspect the decoded payload before validating: `main_stuff` is a required field on `RunResults`,
+        # so a `200` that omits the key would raise a raw Pydantic error instead of the typed
+        # `MissingMainStuffError`. `.get(...) is None` covers both the missing-key and explicit-null cases
+        # for the same un-deliverable-output condition (a present-but-falsy main stuff — `[]`, `0` — stays).
+        payload = response.json()
+        if isinstance(payload, dict) and cast("dict[str, Any]", payload).get("main_stuff") is None:
+            msg = f"Completed run '{run_id}' returned no main stuff — a completed run always delivers a main stuff."
+            raise MissingMainStuffError(msg, run_id=run_id)
+        result = RunResults.model_validate(payload)
         return RunResultCompleted(pipeline_run_id=run_id, result=result)
 
     async def wait_for_result(self, run_id: str, options: WaitForResultOptions | None = None) -> RunResults:
@@ -927,16 +943,17 @@ def _extract_run_status_from_message(message: str) -> RunStatus:
     return RunStatus.FAILED
 
 
-def _map_run_result_to_run_results(response: DictRunResultExecute) -> RunResults:
+def _map_run_result_to_run_results(response: PipelexExecuteResult) -> RunResults:
     """Map the protocol's blocking `POST /v1/execute` response onto the lifecycle's `RunResults`.
 
-    The bare-runner path returns `pipe_output` (native runner shape); `main_stuff` and `graph_spec`
-    are hosted-durable artifacts and stay `None` here. Consumers read `main_stuff or pipe_output`
-    (the documented hosted/bare output-shape difference).
+    `response.main_stuff` resolves the main output out of the returned working memory (and raises
+    `MissingMainStuffError` if the run named no locatable main stuff), so the durable and blocking
+    paths hand back the same `main_stuff` content shape. The full working memory rides `pipe_output`
+    (blocking only).
     """
     return RunResults(
         pipeline_run_id=response.pipeline_run_id,
-        main_stuff=None,
+        main_stuff=response.main_stuff,
         graph_spec=None,
         pipe_output=response.pipe_output.model_dump(),
     )
