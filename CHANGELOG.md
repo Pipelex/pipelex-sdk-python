@@ -11,7 +11,7 @@
 
 ### Added
 
-- **`MissingMainStuffError`.** A completed run that cannot deliver a main stuff now raises this typed error (derives from `PipelineRequestError`, carries `run_id`) instead of silently yielding a null output: the hosted results endpoint answered a `200` with a null `main_stuff`, or a blocking `execute` response named a `main_stuff_name` absent from its working-memory root. A falsy-but-present main stuff (empty list, `0`) is a valid output and does not raise.
+- **`MissingMainStuffError`.** A completed run that cannot deliver a main stuff now raises this typed error (derives from `PipelineRequestError`, carries `run_id`) instead of silently yielding a null output: the hosted results endpoint answered a `200` that omits `main_stuff` or sends it null, or a blocking `execute` response named a `main_stuff_name` absent from its working-memory root. The results path checks the decoded payload before validating into the now-required `RunResults` model, so an omitted key surfaces as `MissingMainStuffError` rather than a raw Pydantic validation error. A falsy-but-present main stuff (empty list, `0`) is a valid output and does not raise.
 
 ## [v0.2.0] - 2026-07-02
 

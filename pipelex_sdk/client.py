@@ -532,10 +532,15 @@ class PipelexAPIClient(MthdsAPIClient):
 
         self._raise_if_lifecycle_unavailable(response, url)
         response.raise_for_status()
-        result = RunResults.model_validate(response.json())
-        if result.main_stuff is None:
+        # Inspect the decoded payload before validating: `main_stuff` is a required field on `RunResults`,
+        # so a `200` that omits the key would raise a raw Pydantic error instead of the typed
+        # `MissingMainStuffError`. `.get(...) is None` covers both the missing-key and explicit-null cases
+        # for the same un-deliverable-output condition (a present-but-falsy main stuff — `[]`, `0` — stays).
+        payload = response.json()
+        if isinstance(payload, dict) and cast("dict[str, Any]", payload).get("main_stuff") is None:
             msg = f"Completed run '{run_id}' returned no main stuff — a completed run always delivers a main stuff."
             raise MissingMainStuffError(msg, run_id=run_id)
+        result = RunResults.model_validate(payload)
         return RunResultCompleted(pipeline_run_id=run_id, result=result)
 
     async def wait_for_result(self, run_id: str, options: WaitForResultOptions | None = None) -> RunResults:
