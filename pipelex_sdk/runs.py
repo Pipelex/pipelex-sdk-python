@@ -25,11 +25,10 @@ Wire contract mirrors `pipelex-platform`:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
-
-from pipelex_sdk._compat import StrEnum
 
 if TYPE_CHECKING:
     from collections.abc import Callable

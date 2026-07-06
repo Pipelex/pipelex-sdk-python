@@ -563,7 +563,7 @@ class PipelexAPIClient(MthdsAPIClient):
 
             try:
                 state = await asyncio.wait_for(self.get_run_result(run_id), timeout=remaining)
-            except asyncio.TimeoutError as exc:  # noqa: UP041 — on Python 3.10 asyncio.TimeoutError is its own class, distinct from builtin TimeoutError.
+            except TimeoutError as exc:
                 raise RunTimeoutError(_timeout_message(run_id, opts.timeout_seconds), run_id=run_id, timeout_seconds=opts.timeout_seconds) from exc
 
             if isinstance(state, RunResultCompleted):

@@ -53,4 +53,4 @@ Note: `mthds-python` does **not** currently carry the `/v1/build/*` helpers (the
 - Port target / philosophy reference: `pipelex-sdk-js/` (`PipelexApiClient`, `product-models.ts`).
 - Protocol base to depend on: `mthds-python/` (`MthdsAPIClient`, `protocol/`).
 - Normative boundary: `mthds/docs/spec/protocol.md` + `openapi/mthds-protocol.openapi.yaml`.
-- Python coding standards: `mthds-python/CLAUDE.md` (target 3.10+, Pydantic v2, StrEnum rules, etc.) — apply the same here.
+- Python coding standards: `mthds-python/CLAUDE.md` (target 3.11+, Pydantic v2, StrEnum rules, etc.) — apply the same here.

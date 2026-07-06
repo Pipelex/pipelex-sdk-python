@@ -124,7 +124,7 @@ Report the PR URL back to the user, and remind them that **merging the PR into `
   - `version-check.yml` — the `pyproject.toml` version must match the `release/vX.Y.Z` branch name.
   - `changelog-check.yml` — `CHANGELOG.md` must contain a `## [vX.Y.Z] -` entry for the new version.
   - `package-check.yml` — `uv.lock` must be in sync with `pyproject.toml` (`uv lock --locked`).
-  - `tests-check.yml` — the test matrix must pass on every supported Python version (3.10 through 3.14).
+  - `tests-check.yml` — the test matrix must pass on every supported Python version (3.11 through 3.14).
   - `lint-check.yml` — ruff format, ruff lint, pyright, and mypy merge checks across the same Python matrix (the same gates as `make agent-check`).
   - `guard-branches.yml` — only `release/vX.Y.Z` branches may target `main`.
   - `cla.yml` — the PR author must have signed the Pipelex CLA (maintainers are allow-listed; an external first-time author will be prompted to sign before the PR can merge).

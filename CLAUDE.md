@@ -32,12 +32,10 @@ It is the **hosted superset**: the five normative MTHDS Protocol routes (inherit
 
 ## Python Version Compatibility
 
-- Target Python 3.10+. Never use features introduced after Python 3.10 without a compatibility fallback.
+- Target Python 3.11+. Never use features introduced after Python 3.11 without a compatibility fallback.
+- `StrEnum` (`from enum import StrEnum`), `Self` (`from typing import Self`), `datetime.UTC`, `tomllib`, and `ExceptionGroup` / `except*` are all available at 3.11 — use them directly, no shim.
 - Common pitfalls:
-  - `datetime.UTC` was added in Python 3.11. Use `datetime.timezone.utc` instead.
-  - `StrEnum` was added in Python 3.11. Import it from the local `pipelex_sdk._compat` shim.
   - `type` statement (PEP 695) was added in Python 3.12. Use `TypeAlias` from `typing` instead.
-  - `ExceptionGroup` / `except*` was added in Python 3.11. Avoid unless using the `exceptiongroup` backport.
 
 ## Variables, Loops and Indexes
 
@@ -48,7 +46,7 @@ It is the **hosted superset**: the five normative MTHDS Protocol routes (inherit
 
 ## Enums
 
-- When defining enums related to string values, always inherit from `StrEnum` (from `pipelex_sdk._compat`).
+- When defining enums related to string values, always inherit from `StrEnum` (`from enum import StrEnum`).
 - When you need the enum value as a string, don't use `str(enum_var)` or `enum_var.value`, just use `enum_var` itself — that is the point of using StrEnum.
 - Never test equality to an enum value: use match/case, even to single out 1 case out of 10 cases. To avoid heavy match/case code in awkward places, add `@property` methods to the enum class such as `is_foobar()`. This prevents bugs: when new enum values are added the linter will complain about non-exhaustive matches. Use the `|` operator to group cases.
 - Match/case constructs over enums should always be exhaustive. NEVER add a default `case _: ...`.

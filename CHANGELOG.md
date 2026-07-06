@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.4.0] - 2026-07-06
+
+### Changed
+
+- **Dropped Python 3.10 support (breaking).** The minimum supported Python is now 3.11, matching the `mthds>=0.8.1` base. `requires-python` is now `>=3.11,<3.15`, and the 3.10 leg is removed from the CI lint/test matrices. Deleted the `pipelex_sdk._compat` StrEnum/`Self` backport shim and dropped the `backports.strenum` dependency (and its mypy override) — `StrEnum` now imports directly from the stdlib `enum`. *(Migration: run on Python 3.11 or newer.)*
+- Bumped the `mthds` dependency from `>=0.7.1` to `>=0.8.1`.
+- Bumped the dev-only `pytest` constraint to `>=9.0.3` (from `>=8.0.0,<9.0.0`) and moved its `pyproject.toml` config from `[tool.pytest.ini_options]` to the newer `[tool.pytest]` table with `minversion = "9.0"`, matching `mthds-python`.
+
 ## [v0.3.0] - 2026-07-05
 
 ### Changed
