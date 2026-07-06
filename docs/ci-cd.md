@@ -6,7 +6,7 @@ The GitHub Actions workflows under `.github/workflows/` mirror the `mthds-python
 
 | Workflow | Trigger | What it enforces |
 | --- | --- | --- |
-| `lint-check.yml` | `pull_request` | Runs `make merge-check-ruff-format`, `merge-check-ruff-lint`, `merge-check-pyright`, `merge-check-mypy` across the full Python matrix (3.10–3.14). A `lint-all` aggregator is the single required status check. |
+| `lint-check.yml` | `pull_request` | Runs `make merge-check-ruff-format`, `merge-check-ruff-lint`, `merge-check-pyright`, `merge-check-mypy` across the full Python matrix (3.11–3.14). A `lint-all` aggregator is the single required status check. |
 | `tests-check.yml` | `pull_request` | Runs `make gha-tests` across the same matrix; `tests-all` aggregates. Concurrency-cancels superseded runs on the same branch. |
 | `package-check.yml` | `pull_request` | `uv lock --locked` must leave `uv.lock` unchanged. |
 | `changelog-check.yml` | `pull_request → main` | `CHANGELOG.md` must contain a `## [v<version>] - …` entry matching `pyproject.toml`'s `version`. |

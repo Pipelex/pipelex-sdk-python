@@ -20,12 +20,12 @@ neutral `mthds` `ValidationResult`.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Annotated, Any, TypeAlias
 
 from mthds.protocol.models import InvalidValidationReport, ValidationDiagnostic, ValidationReport
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from pipelex_sdk._compat import StrEnum
 from pipelex_sdk._pydantic_utils import empty_list_factory_of
 
 

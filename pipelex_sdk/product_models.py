@@ -17,11 +17,11 @@ not in `mthds`. `PipelineRun.status` reuses the run-lifecycle `RunStatus`.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from pipelex_sdk._compat import StrEnum
 from pipelex_sdk.runs import RunStatus
 
 # ── User profile (`/v1/me`) ─────────────────────────────────────────────
