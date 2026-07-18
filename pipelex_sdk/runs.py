@@ -141,6 +141,15 @@ class RunResults(BaseModel):
     #: blocking-execute path only; `None` on the hosted path. Supplementary to `main_stuff`, which is
     #: already resolved out of it; kept for consumers that need the whole working memory.
     pipe_output: dict[str, Any] | None = None
+    #: Per-call usage records — token counts by category, `unit_costs` in $/1M, model id — for LLM and
+    #: img-gen/extract/search calls alike. On the hosted path this is the `tokens_usages.json` artifact's
+    #: record list relayed verbatim; on the blocking path it is the execute response's
+    #: `pipe_output.tokens_usages`. `None` when usage assembly was off for the run, or (hosted) when the
+    #: run was delivered before the artifact existed.
+    tokens_usages: list[dict[str, Any]] | None = None
+    #: Non-`None` when the runner's usage assembly failed for the run — distinguishes "usage broke"
+    #: from "usage was off" (both leave `tokens_usages` as `None`).
+    usage_assembly_error: str | None = None
 
 
 # ── Single-shot result lookup outcome (discriminated on `state`) ─────

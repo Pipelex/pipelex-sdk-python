@@ -156,6 +156,36 @@ class TestClientLifecycle:
         assert isinstance(state, RunResultCompleted)
         assert state.result.main_stuff == []
 
+    def test_get_run_result_completed_parses_usage_pair(self, mocker: MockerFixture) -> None:
+        """A 200 carrying the hosted usage pair lands on the typed fields, records verbatim; a body
+        without them (older platform / pre-artifact run) defaults both to None.
+        """
+        client = self._client()
+        tokens_usages = [
+            {
+                "model_type": "llm",
+                "inference_model_name": "test-model",
+                "nb_tokens_by_category": {"input": 15, "output": 4},
+                "unit_costs": {"input": 3.0, "output": 15.0},
+            }
+        ]
+        body: dict[str, object] = {
+            "pipeline_run_id": "run_1",
+            "main_stuff": {"answer": "42"},
+            "tokens_usages": tokens_usages,
+            "usage_assembly_error": None,
+        }
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=body)))
+
+        state = asyncio.run(client.get_run_result("run_1"))
+        assert isinstance(state, RunResultCompleted)
+        assert state.result.tokens_usages == tokens_usages
+        assert state.result.usage_assembly_error is None
+
+        bare = RunResults(pipeline_run_id="run_1", main_stuff={"answer": "42"})
+        assert bare.tokens_usages is None
+        assert bare.usage_assembly_error is None
+
     def test_get_run_result_running_honors_retry_after(self, mocker: MockerFixture) -> None:
         """A 202 maps to RunResultRunning with the server's Retry-After hint."""
         client = self._client()

@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Typed run usage: `RunResults.tokens_usages` + `RunResults.usage_assembly_error`.** The per-call usage records (token counts by category, `unit_costs` in $/1M, model id — LLM and img-gen/extract/search alike) that previously rode `model_extra` are now first-class typed fields, populated on both paths: the hosted durable path reads them from `GET /v1/runs/{id}/results` (which unpacks the runner's `tokens_usages.json` artifact), and the blocking fallback unpacks the same pair from the execute response's extension-open `pipe_output` — so `result.tokens_usages` reads the same regardless of which path ran. Both fields are `None` when usage assembly was off for the run, or against an older platform / a run delivered before the artifact existed; `usage_assembly_error` is set when the runner's usage assembly failed.
+
 ## [v0.4.0] - 2026-07-06
 
 ### Changed
