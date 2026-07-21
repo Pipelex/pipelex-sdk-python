@@ -13,6 +13,7 @@ from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
 from pipelex_sdk.errors import ApiUnreachableError, MissingMainStuffError, RunLifecycleUnavailableError
+from pipelex_sdk.runs import TokensUsageRecord
 
 _BASE_URL = "http://localhost:8081"
 
@@ -132,9 +133,75 @@ class TestClientRunFallback:
         # The SDK resolves `main_stuff` out of the working memory via `main_stuff_name` ("result") —
         # its content, the same shape the hosted path relays; the full working memory rides pipe_output.
         assert result.main_stuff == {"text": "hello"}
+        # `pipe_output` is the already-parsed protocol model, carried over without a dump round-trip.
         assert result.pipe_output is not None
-        assert result.pipe_output["working_memory"]["root"]["result"]["content"] == {"text": "hello"}
+        assert result.pipe_output.working_memory.root["result"].content == {"text": "hello"}
         assert _urls(send) == [f"{_BASE_URL}/v1/version", f"{_BASE_URL}/v1/execute"]
+
+    def test_blocking_fallback_unpacks_usage_pair_from_pipe_output(self, mocker: MockerFixture) -> None:
+        """The blocking execute response carries usage inside `pipe_output` (extension-open); the SDK
+        unpacks it onto `RunResults.tokens_usages` / `.usage_assembly_error` so the accessor reads the
+        same on both paths. A body without the pair (usage off) leaves both None.
+        """
+        client = self._client()
+        tokens_usages = [
+            {
+                "model_type": "llm",
+                "inference_model_name": "test-model",
+                "inference_model_id": "test-model-2026-01-01",
+                "pipe_code": "test_domain.summarize",
+                "job_category": "llm_job",
+                "unit_job_id": "llm_gen_text",
+                "nb_tokens_by_category": {"input": 15, "output": 4},
+                "cost": 0.000105,
+                "started_at": "2026-06-20T10:00:01+00:00",
+                "completed_at": "2026-06-20T10:00:03+00:00",
+            }
+        ]
+        usage_body: dict[str, object] = {
+            "pipeline_run_id": "run-x",
+            "main_stuff_name": "result",
+            "pipe_output": {
+                "working_memory": {
+                    "root": {"result": {"concept": "native.Text", "content": {"text": "hello"}}},
+                    "aliases": {"main_stuff": "result"},
+                },
+                "pipeline_run_id": "run-x",
+                "tokens_usages": tokens_usages,
+                "usage_assembly_error": None,
+            },
+        }
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(side_effect=[_response(200, json=_BARE_VERSION), _response(200, json=usage_body)]),
+        )
+
+        result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
+        assert result.tokens_usages is not None
+        record = result.tokens_usages[0]
+        # Same typed record the durable path yields — the pair is validated, not passed through raw.
+        assert isinstance(record, TokensUsageRecord)
+        assert record.inference_model_name == "test-model"
+        assert record.pipe_code == "test_domain.summarize"
+        assert record.nb_tokens_by_category == {"input": 15, "output": 4}
+        assert record.cost == 0.000105
+        assert result.usage_assembly_error is None
+
+    def test_blocking_fallback_without_usage_pair_defaults_to_none(self, mocker: MockerFixture) -> None:
+        """A blocking response whose pipe_output carries no usage fields (usage off, or an older
+        runner) maps to None on both fields — never a validation error.
+        """
+        client = self._client()
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(side_effect=[_response(200, json=_BARE_VERSION), _response(200, json=_EXECUTE_BODY)]),
+        )
+
+        result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
+        assert result.tokens_usages is None
+        assert result.usage_assembly_error is None
 
     def test_blocking_fallback_raises_when_main_stuff_unlocatable(self, mocker: MockerFixture) -> None:
         """A completed blocking response whose `main_stuff_name` names no root stuff is a hard fail."""

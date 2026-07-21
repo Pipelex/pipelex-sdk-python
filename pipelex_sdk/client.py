@@ -948,14 +948,23 @@ def _map_run_result_to_run_results(response: PipelexExecuteResult) -> RunResults
 
     `response.main_stuff` resolves the main output out of the returned working memory (and raises
     `MissingMainStuffError` if the run named no locatable main stuff), so the durable and blocking
-    paths hand back the same `main_stuff` content shape. The full working memory rides `pipe_output`
-    (blocking only).
+    paths hand back the same `main_stuff` content shape. The already-parsed `pipe_output` model is
+    carried over as-is — no `.model_dump()` round-trip — so the full working memory stays typed
+    (blocking only; the hosted path has none).
+
+    The usage pair (`tokens_usages` / `usage_assembly_error`) rides the execute response's
+    extension-open `pipe_output` as Pipelex extension fields. Lifting it onto the two top-level
+    fields here is what makes `.tokens_usages` read the same on the blocking and durable paths;
+    `RunResults` validates the raw records into `TokensUsageRecord`s on the way in.
     """
+    pipe_output_extras: dict[str, Any] = response.pipe_output.model_extra or {}
     return RunResults(
         pipeline_run_id=response.pipeline_run_id,
         main_stuff=response.main_stuff,
         graph_spec=None,
-        pipe_output=response.pipe_output.model_dump(),
+        pipe_output=response.pipe_output,
+        tokens_usages=pipe_output_extras.get("tokens_usages"),
+        usage_assembly_error=pipe_output_extras.get("usage_assembly_error"),
     )
 
 
