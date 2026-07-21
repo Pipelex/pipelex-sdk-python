@@ -2,12 +2,12 @@
 
 A completed run reports what its inference calls consumed as a list of `TokensUsageRecord` objects on `RunResults`, one per inference call, in the order the calls completed. This page covers how to read them, what each field means, and the edge cases the model is deliberately shaped around.
 
-The wire shape is not this SDK's invention: it is specified in the MTHDS protocol spec under [TokensUsage records on run artifacts](https://github.com/Pipelex/Pipelex/blob/main/docs/specs/pipelex-mthds-protocol.md#tokensusage-records-on-run-artifacts), and `pipelex_sdk.runs.TokensUsageRecord` is a client-side mirror of it. `@pipelex/sdk` carries the same mirror in TypeScript.
+The wire shape is not this SDK's invention: it is specified in Pipelex's protocol spec, under "TokensUsage records on run artifacts", and `pipelex_sdk.runs.TokensUsageRecord` is a client-side mirror of it. `@pipelex/sdk` carries the same mirror in TypeScript. The record is a Pipelex runtime concept rather than part of the MTHDS standard — the MTHDS protocol itself says nothing about usage reporting.
 
 ## Reading the records
 
 ```python
-result = await client.start_and_wait(pipe_code="my_domain.summarize", mthds_contents=[...])
+result = await client.start_and_wait(pipe_code="my_domain.summarize", inputs={"text": "..."})
 
 if result.tokens_usages is not None:
     total_cost = sum(record.cost or 0.0 for record in result.tokens_usages)
@@ -48,7 +48,7 @@ Two traps worth naming explicitly:
 
 ## Cost semantics
 
-`cost` is a server-computed USD total for that one call. The underlying rate table never crosses the wire, so there is nothing to recompute client-side and no risk of a client's arithmetic disagreeing with the runtime's own reporting — the figure comes from the same cost engine that produces the local CLI cost table.
+`cost` is a server-computed USD total for that one call. The rate table behind it is not a contract field and does not cross the wire, so there is nothing to recompute client-side and no risk of a client's arithmetic disagreeing with the runtime's own reporting — the figure comes from the same cost engine that produces the local CLI cost table. (Pre-contract artifacts are the one exception: they carry a raw `unit_costs` table, which is a relic rather than an API — see [Old artifacts parse too](#old-artifacts-parse-too).)
 
 - `cost is None` means the model has **no rate table at all** — an own-GPU model, a mock run, a dry run.
 - `cost == 0` means a rate table existed and priced the call at zero.
@@ -92,6 +92,6 @@ Conversely, a record the current runtime emits always carries the **full key set
 
 ## What is deliberately absent
 
-The runtime's internal reporting models carry execution plumbing — `job_metadata`, `otel_context`, `trace_context`, `session_id`, `request_id`, `user_id`, `pipe_run_id`, `content_generation_job_id` — that is dropped at the boundary and must never appear on a record. This is enforced upstream by leak-regression tests in `pipelex` and a conformance leak guard that walks relayed records at any nesting depth.
+The runtime's internal reporting models carry execution plumbing — `job_metadata`, `otel_context`, `trace_context`, `session_id`, `request_id`, `user_id`, `pipe_run_id`, `content_generation_job_id` — that is dropped at the boundary: on a record emitted under this contract, finding one of these is reading a leak, not a contract field. This is enforced upstream by leak-regression tests in `pipelex` and a conformance leak guard that walks relayed records at any nesting depth. Pre-contract artifacts are the documented exemption — relayed verbatim, they legitimately still carry `job_metadata` and `unit_costs`, and the leak guard does not run on them.
 
 One consequence worth knowing: the record shape is **invariant** with respect to server-side telemetry and tracing settings, because the only fields that varied with them are precisely the ones the boundary drops. You never get a structurally different record because an operator changed an observability setting.
