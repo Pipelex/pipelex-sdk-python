@@ -4,7 +4,15 @@
 
 ### Added
 
-- **Typed run usage: `RunResults.tokens_usages` + `RunResults.usage_assembly_error`.** The per-call usage records (token counts by category, `unit_costs` in $/1M, model id — LLM and img-gen/extract/search alike) that previously rode `model_extra` are now first-class typed fields, populated on both paths: the hosted durable path reads them from `GET /v1/runs/{id}/results` (which unpacks the runner's `tokens_usages.json` artifact), and the blocking fallback unpacks the same pair from the execute response's extension-open `pipe_output` — so `result.tokens_usages` reads the same regardless of which path ran. Both fields are `None` when usage assembly was off for the run, or against an older platform / a run delivered before the artifact existed; `usage_assembly_error` is set when the runner's usage assembly failed.
+- **Typed run usage: `RunResults.tokens_usages` + `RunResults.usage_assembly_error`.** The per-call usage records a run produces — token counts by category, the server-computed `cost` in USD, model name and id, the pipe that made the call, job-kind fields and timing, for LLM and img-gen/extract/search calls alike — are now first-class typed fields instead of riding `model_extra`. Records validate into a new `TokensUsageRecord` model (`pipelex_sdk/runs.py`) mirroring the wire contract specified in the MTHDS protocol spec. Both paths populate the pair: the hosted durable path reads it off `GET /v1/runs/{id}/results` (which unpacks the runner's `tokens_usages.json` artifact), and the blocking fallback lifts the same pair out of the execute response's extension-open `pipe_output` — so `result.tokens_usages` reads the same regardless of which path ran.
+
+  Note that the rate table (`unit_costs`) no longer crosses the wire: a record now carries the computed `cost` for the call instead, which is `None` when the model has no rate table at all (own-GPU, mock, dry run) and `0` when a rate table priced it at zero. There is no run-level aggregate — sum the records.
+
+  `tokens_usages` is `None` whenever usage assembly produced no list (it was off, it broke, or the run was delivered before the artifact existed) and `[]` when assembly ran and no inference happened; `usage_assembly_error` is the only field separating a broken assembly from an off one. `TokensUsageRecord` keeps every field optional and is extension-open, so durable artifacts written before the contract shipped — relayed verbatim, never migrated — still parse: `cost` and `pipe_code` come back `None`, and the legacy `job_metadata` / `unit_costs` survive in `model_extra`. Enum-ish fields (`model_type`, `job_category`, `unit_job_id`) are open sets typed as plain `str`, so runtime enum churn stays non-breaking.
+
+### Changed
+
+- **`RunResults.pipe_output` is now `DictPipeOutputAbstract | None`, was `dict[str, Any] | None` (breaking).** The blocking path already parsed the protocol model and then threw the types away with a `.model_dump()` round-trip; it now carries the parsed model straight through. Read the working memory as attributes — `result.pipe_output.working_memory.root["out"].content` — rather than nested dict keys. The durable path still leaves it `None`.
 
 ## [v0.4.0] - 2026-07-06
 

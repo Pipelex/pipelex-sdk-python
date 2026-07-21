@@ -13,6 +13,7 @@ from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
 from pipelex_sdk.errors import ApiUnreachableError, MissingMainStuffError, RunLifecycleUnavailableError
+from pipelex_sdk.runs import TokensUsageRecord
 
 _BASE_URL = "http://localhost:8081"
 
@@ -132,8 +133,9 @@ class TestClientRunFallback:
         # The SDK resolves `main_stuff` out of the working memory via `main_stuff_name` ("result") —
         # its content, the same shape the hosted path relays; the full working memory rides pipe_output.
         assert result.main_stuff == {"text": "hello"}
+        # `pipe_output` is the already-parsed protocol model, carried over without a dump round-trip.
         assert result.pipe_output is not None
-        assert result.pipe_output["working_memory"]["root"]["result"]["content"] == {"text": "hello"}
+        assert result.pipe_output.working_memory.root["result"].content == {"text": "hello"}
         assert _urls(send) == [f"{_BASE_URL}/v1/version", f"{_BASE_URL}/v1/execute"]
 
     def test_blocking_fallback_unpacks_usage_pair_from_pipe_output(self, mocker: MockerFixture) -> None:
@@ -146,8 +148,14 @@ class TestClientRunFallback:
             {
                 "model_type": "llm",
                 "inference_model_name": "test-model",
+                "inference_model_id": "test-model-2026-01-01",
+                "pipe_code": "test_domain.summarize",
+                "job_category": "llm_job",
+                "unit_job_id": "llm_gen_text",
                 "nb_tokens_by_category": {"input": 15, "output": 4},
-                "unit_costs": {"input": 3.0, "output": 15.0},
+                "cost": 0.000105,
+                "started_at": "2026-06-20T10:00:01+00:00",
+                "completed_at": "2026-06-20T10:00:03+00:00",
             }
         ]
         usage_body: dict[str, object] = {
@@ -170,7 +178,14 @@ class TestClientRunFallback:
         )
 
         result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
-        assert result.tokens_usages == tokens_usages
+        assert result.tokens_usages is not None
+        record = result.tokens_usages[0]
+        # Same typed record the durable path yields — the pair is validated, not passed through raw.
+        assert isinstance(record, TokensUsageRecord)
+        assert record.inference_model_name == "test-model"
+        assert record.pipe_code == "test_domain.summarize"
+        assert record.nb_tokens_by_category == {"input": 15, "output": 4}
+        assert record.cost == 0.000105
         assert result.usage_assembly_error is None
 
     def test_blocking_fallback_without_usage_pair_defaults_to_none(self, mocker: MockerFixture) -> None:

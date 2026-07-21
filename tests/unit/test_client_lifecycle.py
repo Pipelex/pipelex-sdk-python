@@ -22,6 +22,7 @@ from pipelex_sdk.runs import (
     RunResultRunning,
     RunResults,
     RunStatus,
+    TokensUsageRecord,
     WaitForResultOptions,
 )
 
@@ -157,16 +158,23 @@ class TestClientLifecycle:
         assert state.result.main_stuff == []
 
     def test_get_run_result_completed_parses_usage_pair(self, mocker: MockerFixture) -> None:
-        """A 200 carrying the hosted usage pair lands on the typed fields, records verbatim; a body
-        without them (older platform / pre-artifact run) defaults both to None.
+        """A 200 carrying the hosted usage pair validates the relayed records into
+        `TokensUsageRecord`s; a body without them (older platform / pre-artifact run) defaults both
+        to None.
         """
         client = self._client()
         tokens_usages = [
             {
                 "model_type": "llm",
                 "inference_model_name": "test-model",
+                "inference_model_id": "test-model-2026-01-01",
+                "pipe_code": "test_domain.summarize",
+                "job_category": "llm_job",
+                "unit_job_id": "llm_gen_text",
                 "nb_tokens_by_category": {"input": 15, "output": 4},
-                "unit_costs": {"input": 3.0, "output": 15.0},
+                "cost": 0.000105,
+                "started_at": "2026-06-20T10:00:01+00:00",
+                "completed_at": "2026-06-20T10:00:03+00:00",
             }
         ]
         body: dict[str, object] = {
@@ -179,7 +187,13 @@ class TestClientLifecycle:
 
         state = asyncio.run(client.get_run_result("run_1"))
         assert isinstance(state, RunResultCompleted)
-        assert state.result.tokens_usages == tokens_usages
+        assert state.result.tokens_usages is not None
+        record = state.result.tokens_usages[0]
+        assert isinstance(record, TokensUsageRecord)
+        assert record.inference_model_name == "test-model"
+        assert record.pipe_code == "test_domain.summarize"
+        assert record.nb_tokens_by_category == {"input": 15, "output": 4}
+        assert record.cost == 0.000105
         assert state.result.usage_assembly_error is None
 
         bare = RunResults(pipeline_run_id="run_1", main_stuff={"answer": "42"})
