@@ -318,6 +318,7 @@ convention = "google"
   "INP001",  # Allow test files to not have __init__.py in their directories (avoids namespace collisions)
   "SLF001",  # Unit tests legitimately probe private transport/error helpers (e.g. _request_product, _request_json)
   "PLC2701", # Unit tests legitimately import private module helpers under test (e.g. _parse_error_body)
+  "ARG002",  # Test-double methods match a Protocol signature; an unused param (e.g. a fake build_inputs ignoring `request`) is intentional
 ]
 "examples/**/*.py" = [
   "INP001", # Runnable demo scripts, not an importable package

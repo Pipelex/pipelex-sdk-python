@@ -161,3 +161,55 @@ class RunLifecycleUnavailableError(PipelineRequestError):
     def __init__(self, message: str, api_url: str) -> None:
         super().__init__(message)
         self.api_url = api_url
+
+
+class InputPreparationError(PipelineRequestError):
+    """Base class for every failure raised by input preparation (`upload_file` /
+    `prepare_inputs`).
+
+    Catch this to handle any preparation failure; catch a subclass to branch on the
+    semantic category. All preparation failures are raised BEFORE any run is created —
+    a run never triggers a hidden upload. Mirrors `pipelex-sdk-js`'s
+    `InputPreparationError` family.
+    """
+
+
+class InvalidLocalSourceError(InputPreparationError):
+    """A local asset could not be turned into bytes — a missing or unreadable path.
+    `source` is the offending path.
+    """
+
+    def __init__(self, message: str, source: str) -> None:
+        super().__init__(message)
+        self.source = source
+
+
+class RejectedAssetError(InputPreparationError):
+    """The server refused the asset — most commonly a `413` past the service-defined
+    size cap. The SDK imposes no client-side cap; it surfaces the server's rejection.
+    `filename` and `status` locate it.
+    """
+
+    def __init__(self, message: str, filename: str, status: int) -> None:
+        super().__init__(message)
+        self.filename = filename
+        self.status = status
+
+
+class UnsupportedUploadCapabilityError(InputPreparationError):
+    """The configured deployment does not support upload (no `/v1/upload` route, seen
+    as a `404`). Upload is a hosted Pipelex-product capability even though the SDK can
+    be pointed at other base URLs.
+    """
+
+
+class UploadAuthenticationError(InputPreparationError):
+    """Upload was not authorized — a `401`/`403` from the upload route."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class UploadTransportError(InputPreparationError):
+    """A network or server fault reaching the upload route (unreachable host, `5xx`)."""
