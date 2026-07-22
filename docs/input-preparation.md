@@ -1,6 +1,8 @@
 # Input preparation (`upload_file` / `prepare_inputs`)
 
-> **Status: planned surface — not yet implemented.** This document records the approved cross-repository contract (design source: `wip/upload/README.md` in the workspace, tracked in `TODOS.md`) so the SDK's own docs carry the part it owns before the code lands. The raw `upload()` primitive described in [architecture.md](./architecture.md) already exists; `upload_file` and `prepare_inputs` are the higher-level surface built on top of it, and are the Python counterpart of `@pipelex/sdk`'s `uploadFile` / `prepareInputs`.
+> **Status: implemented** (`pipelex_sdk/upload.py`, `pipelex_sdk/prepare_inputs.py`, `pipelex_sdk/build_models.py`). This document records the contract (design source: `wip/upload/README.md` in the workspace, tracked in `TODOS.md`). `upload_file` and `prepare_inputs` are the Python counterpart of `@pipelex/sdk`'s `uploadFile` / `prepareInputs`, built on the raw `upload()` wire call. This work also added the `build_inputs` route (the signature source), which the Python SDK previously lacked.
+>
+> **Current scope.** `prepare_inputs` takes the method closure as inline `files` (the signature source). Two pieces are deliberately deferred and additive (they do not change this contract): resolving a closure from a catalog `method_id`, and the opt-in ingest of `http(s)` URLs into storage — for now an `http(s)` URL at a file position always passes through unchanged. Kept in parity with `@pipelex/sdk`.
 
 ## Why this exists
 
@@ -12,7 +14,7 @@ Preparation is **explicit and separate from running.** `execute` / `start` never
 
 This is the Python side of one cross-language contract. The behavior matrix, pass-through rules, `Dynamic` handling, dedup, and failure categories are identical to the JS SDK; only the accepted source types differ per language. The two SDKs must agree semantically. See the JS counterpart's `docs/input-preparation.md` for the mirror.
 
-The Python SDK currently has **no `/v1/build/*` coverage** — `prepare_inputs` adds the `build_inputs` counterpart it needs to resolve the declared signature (the JS SDK already exposes `buildInputs`).
+The Python SDK previously had **no `/v1/build/*` coverage** — this change added the `build_inputs` counterpart `prepare_inputs` needs to resolve the declared signature (the JS SDK already exposes `buildInputs`).
 
 ## The two operations
 

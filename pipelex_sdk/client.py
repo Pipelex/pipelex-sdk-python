@@ -32,6 +32,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import to_json
 from typing_extensions import override
 
+from pipelex_sdk.build_models import BuildInputsRequest, BuildInputsResponse, BuildInputsResponseAdapter, MthdsFileItem
 from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
@@ -42,6 +43,8 @@ from pipelex_sdk.errors import (
     RunTimeoutError,
 )
 from pipelex_sdk.execute_result import PipelexExecuteResult
+from pipelex_sdk.prepare_inputs import PreparedInputs
+from pipelex_sdk.prepare_inputs import prepare_inputs as _prepare_inputs_impl
 from pipelex_sdk.product_models import (
     BillingPortalResponse,
     ChangePlanResponse,
@@ -71,6 +74,8 @@ from pipelex_sdk.runs import (
     RunStatus,
     WaitForResultOptions,
 )
+from pipelex_sdk.upload import UploadRecord, UploadSource
+from pipelex_sdk.upload import upload_file as _upload_file_impl
 from pipelex_sdk.validation_models import PipelexValidationResultAdapter, ValidationErrorItem
 
 if TYPE_CHECKING:
@@ -816,6 +821,49 @@ class PipelexAPIClient(MthdsAPIClient):
         """Upload a base64 file — `POST /v1/upload`."""
         body = upload_input.model_dump(mode="json", exclude_none=True)
         return UploadedFile.model_validate(await self._request_product("POST", "upload", body=body))
+
+    async def build_inputs(self, request: BuildInputsRequest) -> BuildInputsResponse:
+        """Project a pipe's declared inputs as a fill-in template — `POST /v1/build/inputs`.
+
+        Returns a 200 verdict: branch on `is_valid` before reading the arm — an unresolvable
+        closure comes back as `is_valid: false` with `validation_errors`, not a thrown error.
+        A no-verdict condition (unknown `pipe_ref`, auth, server fault) raises `ApiResponseError`.
+        This is the signature source `prepare_inputs` reads (with `explicit=True`).
+        """
+        body = request.model_dump(mode="json", exclude_none=True)
+        raw = await self._request_product("POST", "build/inputs", body=body)
+        return BuildInputsResponseAdapter.validate_python(raw)
+
+    async def upload_file(
+        self,
+        source: UploadSource,
+        *,
+        filename: str | None = None,
+        content_type: str | None = None,
+    ) -> UploadRecord:
+        """Upload one local asset and return its `UploadRecord` — the single-asset convenience
+        over `upload`. `source` is a filesystem path (`str`/`Path`) or raw `bytes`. The record
+        guarantees `uri`, `content_type`, `size`, and `filename`. Transport failures surface as
+        the semantic input-preparation errors (rejected asset, auth, unsupported capability,
+        transport). See `docs/input-preparation.md`.
+        """
+        return await _upload_file_impl(self, source, filename=filename, content_type=content_type)
+
+    async def prepare_inputs(
+        self,
+        *,
+        files: list[MthdsFileItem],
+        pipe_ref: str | None = None,
+        inputs: dict[str, Any],
+    ) -> PreparedInputs:
+        """Prepare a pipe's inputs — resolve the declared signature, upload the file-bearing
+        assets, and return copy-on-write rewritten inputs (canonical content carrying
+        `pipelex-storage://` in `url`) plus one upload record per prepared asset. HTTP(S) URLs
+        and existing `pipelex-storage://` URIs pass through unchanged; all failures are raised
+        before any run is created. The caller supplies the method closure as inline `files`.
+        See `docs/input-preparation.md`.
+        """
+        return await _prepare_inputs_impl(self, files=files, pipe_ref=pipe_ref, inputs=inputs)
 
     async def list_runs(self, method_id: str) -> list[PipelineRun]:
         """List a method's runs — `GET /v1/runs?method_id={methodId}`."""
