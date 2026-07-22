@@ -22,8 +22,8 @@ The Python SDK previously had **no `/v1/build/*` coverage** — this change adde
 
 Uploads one asset and returns its upload record. It is the language-native convenience over the raw `upload()` wire call (base64 JSON body), assembling the record client-side.
 
-- **Accepted sources:** `str` and `pathlib.Path` filesystem paths, and raw `bytes`.
-- A string that is an **HTTP(S) URL** or an existing **`pipelex-storage://` URI** is not a local asset and passes through (see pass-through rules below).
+- **Accepted sources:** `str` and `pathlib.Path` filesystem paths, and raw `bytes`. `upload_file` treats every string as a **filesystem path** — a URL handed directly to it is read as a local file and fails.
+- The URL / storage-URI **pass-through** (leaving **HTTP(S) URLs** and existing **`pipelex-storage://` URIs** untouched) is a `prepare_inputs`-level behavior (see pass-through rules below), not a feature of `upload_file` itself: `prepare_inputs` classifies each string (URL vs local path) against the declared signature *before* it reaches `upload_file`.
 - Open file objects and streams are **deferred** — they can be added later without removing anything.
 
 The returned **upload record** guarantees, beyond the source identity:
@@ -34,9 +34,8 @@ The returned **upload record** guarantees, beyond the source identity:
 | content type (MIME) | Known client-side at upload time. |
 | size (bytes) | Known client-side at upload time. |
 | filename | Already in the wire model. |
-| checksum | **Best-effort, not guaranteed.** Within-preparation dedup relies on source identity, not hashing; cross-preparation dedup is a hosted storage-policy concern (Phase 5). |
 
-The MIME type and size are known client-side, so the record is assembled without extending the `/v1/upload` response.
+The MIME type and size are known client-side, so the record is assembled without extending the `/v1/upload` response. There is deliberately **no checksum field**: within-preparation dedup keys on source identity (not hashing), and cross-preparation dedup is a hosted storage-policy concern (Phase 5).
 
 ### `prepare_inputs` — signature-driven input preparation
 

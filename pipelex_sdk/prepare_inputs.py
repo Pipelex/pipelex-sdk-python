@@ -16,10 +16,11 @@ and `docs/input-preparation.md`.
 from __future__ import annotations
 
 import base64
+import binascii
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
-from urllib.parse import unquote
+from urllib.parse import unquote_to_bytes
 
 from pydantic import BaseModel
 
@@ -70,7 +71,15 @@ def _is_file_content(node: Any) -> bool:
 
 
 def _decode_data_url(data_url: str) -> tuple[bytes, str]:
-    """Decode a `data:` URL into bytes plus its MIME type."""
+    """Decode a `data:` URL into bytes plus its MIME type.
+
+    A base64 payload is decoded with `validate=True` so junk characters are rejected rather
+    than silently discarded (which would upload corrupted bytes), and a decode failure (bad
+    padding or non-alphabet input) surfaces as a typed `InputPreparationError` — never a raw
+    `binascii.Error` escaping the preparation contract. A non-base64 payload decodes straight
+    to bytes via `unquote_to_bytes`, so percent-encoded binary keeps its exact bytes (decoding
+    it as UTF-8 text first would corrupt any byte ≥ 0x80).
+    """
     comma = data_url.find(",")
     if comma < 0:
         msg = f"Malformed data URL (no comma separator): {data_url[:32]}…"
@@ -79,8 +88,13 @@ def _decode_data_url(data_url: str) -> tuple[bytes, str]:
     payload = data_url[comma + 1 :]
     content_type = header.split(";")[0] or "application/octet-stream"
     if ";base64" in header.lower():
-        return base64.b64decode(payload), content_type
-    return unquote(payload).encode("utf-8"), content_type
+        try:
+            decoded = base64.b64decode(payload, validate=True)
+        except binascii.Error as exc:
+            msg = f"Malformed data URL: the base64 payload is not valid ({exc})."
+            raise InputPreparationError(msg) from exc
+        return decoded, content_type
+    return unquote_to_bytes(payload), content_type
 
 
 async def _do_resolve_source(ctx: _PrepareContext, source: Any) -> str:

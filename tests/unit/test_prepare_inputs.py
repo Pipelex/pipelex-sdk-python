@@ -9,6 +9,7 @@ template from `build_inputs` and a counting `upload`; one wiring test drives the
 """
 
 import asyncio
+import base64
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +89,31 @@ class TestPrepareInputs:
         assert prepared.inputs == {"photo": {"url": "pipelex-storage://user/assets/1.bin"}}
         assert client.upload_calls[0].content_type == "image/png"
         assert client.upload_calls[0].data == "AQIDBA=="
+
+    @pytest.mark.parametrize(
+        "data_url",
+        [
+            "data:image/png;base64,AQI",  # bad padding — binascii.Error
+            "data:image/png;base64,AQID!!!!",  # non-alphabet junk — rejected by validate=True
+        ],
+    )
+    def test_malformed_base64_data_url_raises_typed_error(self, data_url: str) -> None:
+        # A malformed base64 data URL must surface as the typed `InputPreparationError`
+        # (never a raw binascii.Error), and must never upload silently-corrupted bytes.
+        client = _FakePrepareClient({"photo": _entry("demo.Photo", {"url": "https://mock/p.png"})})
+
+        with pytest.raises(InputPreparationError):
+            asyncio.run(prepare_inputs(client, files=_FILES, inputs={"photo": data_url}))
+        assert client.upload_calls == []
+
+    def test_percent_encoded_binary_data_url_keeps_exact_bytes(self) -> None:
+        # A non-base64 data URL carrying percent-encoded binary must upload its exact bytes;
+        # decoding as UTF-8 text first would corrupt any byte >= 0x80 (e.g. %FF).
+        client = _FakePrepareClient({"photo": _entry("demo.Photo", {"url": "https://mock/p.png"})})
+
+        asyncio.run(prepare_inputs(client, files=_FILES, inputs={"photo": "data:application/octet-stream,%00%ff%01"}))
+
+        assert base64.b64decode(client.upload_calls[0].data) == bytes([0x00, 0xFF, 0x01])
 
     def test_uploads_each_element_of_declared_multiple(self) -> None:
         client = _FakePrepareClient({"exhibits": _entry("demo.Exhibit", [{"url": "https://mock/d.pdf"}])})
