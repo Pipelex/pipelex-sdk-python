@@ -32,6 +32,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import to_json
 from typing_extensions import override
 
+from pipelex_sdk.build_models import BuildInputsRequest, BuildInputsResponse, BuildInputsResponseAdapter, MthdsFileItem
 from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
@@ -42,6 +43,8 @@ from pipelex_sdk.errors import (
     RunTimeoutError,
 )
 from pipelex_sdk.execute_result import PipelexExecuteResult
+from pipelex_sdk.prepare_inputs import PreparedInputs
+from pipelex_sdk.prepare_inputs import prepare_inputs as _prepare_inputs_impl
 from pipelex_sdk.product_models import (
     BillingPortalResponse,
     ChangePlanResponse,
@@ -71,6 +74,8 @@ from pipelex_sdk.runs import (
     RunStatus,
     WaitForResultOptions,
 )
+from pipelex_sdk.upload import UploadRecord, UploadSource
+from pipelex_sdk.upload import upload_file as _upload_file_impl
 from pipelex_sdk.validation_models import PipelexValidationResultAdapter, ValidationErrorItem
 
 if TYPE_CHECKING:
@@ -817,6 +822,49 @@ class PipelexAPIClient(MthdsAPIClient):
         body = upload_input.model_dump(mode="json", exclude_none=True)
         return UploadedFile.model_validate(await self._request_product("POST", "upload", body=body))
 
+    async def build_inputs(self, request: BuildInputsRequest) -> BuildInputsResponse:
+        """Project a pipe's declared inputs as a fill-in template — `POST /v1/build/inputs`.
+
+        Returns a 200 verdict: branch on `is_valid` before reading the arm — an unresolvable
+        closure comes back as `is_valid: false` with `validation_errors`, not a thrown error.
+        A no-verdict condition (unknown `pipe_ref`, auth, server fault) raises `ApiResponseError`.
+        This is the signature source `prepare_inputs` reads (with `explicit=True`).
+        """
+        body = request.model_dump(mode="json", exclude_none=True)
+        raw = await self._request_product("POST", "build/inputs", body=body)
+        return BuildInputsResponseAdapter.validate_python(raw)
+
+    async def upload_file(
+        self,
+        source: UploadSource,
+        *,
+        filename: str | None = None,
+        content_type: str | None = None,
+    ) -> UploadRecord:
+        """Upload one local asset and return its `UploadRecord` — the single-asset convenience
+        over `upload`. `source` is a filesystem path (`str`/`Path`) or raw `bytes`. The record
+        guarantees `uri`, `content_type`, `size`, and `filename`. Transport failures surface as
+        the semantic input-preparation errors (rejected asset, auth, unsupported capability,
+        transport). See `docs/input-preparation.md`.
+        """
+        return await _upload_file_impl(self, source, filename=filename, content_type=content_type)
+
+    async def prepare_inputs(
+        self,
+        *,
+        files: list[MthdsFileItem],
+        pipe_ref: str | None = None,
+        inputs: dict[str, Any],
+    ) -> PreparedInputs:
+        """Prepare a pipe's inputs — resolve the declared signature, upload the file-bearing
+        assets, and return copy-on-write rewritten inputs (canonical content carrying
+        `pipelex-storage://` in `url`) plus one upload record per prepared asset. HTTP(S) URLs
+        and existing `pipelex-storage://` URIs pass through unchanged; all failures are raised
+        before any run is created. The caller supplies the method closure as inline `files`.
+        See `docs/input-preparation.md`.
+        """
+        return await _prepare_inputs_impl(self, files=files, pipe_ref=pipe_ref, inputs=inputs)
+
     async def list_runs(self, method_id: str) -> list[PipelineRun]:
         """List a method's runs — `GET /v1/runs?method_id={methodId}`."""
         result = await self._request_product("GET", f"{_RUNS}?method_id={quote(method_id, safe='')}")
@@ -948,14 +996,23 @@ def _map_run_result_to_run_results(response: PipelexExecuteResult) -> RunResults
 
     `response.main_stuff` resolves the main output out of the returned working memory (and raises
     `MissingMainStuffError` if the run named no locatable main stuff), so the durable and blocking
-    paths hand back the same `main_stuff` content shape. The full working memory rides `pipe_output`
-    (blocking only).
+    paths hand back the same `main_stuff` content shape. The already-parsed `pipe_output` model is
+    carried over as-is — no `.model_dump()` round-trip — so the full working memory stays typed
+    (blocking only; the hosted path has none).
+
+    The usage pair (`tokens_usages` / `usage_assembly_error`) rides the execute response's
+    extension-open `pipe_output` as Pipelex extension fields. Lifting it onto the two top-level
+    fields here is what makes `.tokens_usages` read the same on the blocking and durable paths;
+    `RunResults` validates the raw records into `TokensUsageRecord`s on the way in.
     """
+    pipe_output_extras: dict[str, Any] = response.pipe_output.model_extra or {}
     return RunResults(
         pipeline_run_id=response.pipeline_run_id,
         main_stuff=response.main_stuff,
         graph_spec=None,
-        pipe_output=response.pipe_output.model_dump(),
+        pipe_output=response.pipe_output,
+        tokens_usages=pipe_output_extras.get("tokens_usages"),
+        usage_assembly_error=pipe_output_extras.get("usage_assembly_error"),
     )
 
 

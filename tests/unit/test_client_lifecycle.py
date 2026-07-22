@@ -22,6 +22,7 @@ from pipelex_sdk.runs import (
     RunResultRunning,
     RunResults,
     RunStatus,
+    TokensUsageRecord,
     WaitForResultOptions,
 )
 
@@ -155,6 +156,49 @@ class TestClientLifecycle:
         state = asyncio.run(client.get_run_result("run_1"))
         assert isinstance(state, RunResultCompleted)
         assert state.result.main_stuff == []
+
+    def test_get_run_result_completed_parses_usage_pair(self, mocker: MockerFixture) -> None:
+        """A 200 carrying the hosted usage pair validates the relayed records into
+        `TokensUsageRecord`s; a body without them (older platform / pre-artifact run) defaults both
+        to None.
+        """
+        client = self._client()
+        tokens_usages = [
+            {
+                "model_type": "llm",
+                "inference_model_name": "test-model",
+                "inference_model_id": "test-model-2026-01-01",
+                "pipe_code": "test_domain.summarize",
+                "job_category": "llm_job",
+                "unit_job_id": "llm_gen_text",
+                "nb_tokens_by_category": {"input": 15, "output": 4},
+                "cost": 0.000105,
+                "started_at": "2026-06-20T10:00:01+00:00",
+                "completed_at": "2026-06-20T10:00:03+00:00",
+            }
+        ]
+        body: dict[str, object] = {
+            "pipeline_run_id": "run_1",
+            "main_stuff": {"answer": "42"},
+            "tokens_usages": tokens_usages,
+            "usage_assembly_error": None,
+        }
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=body)))
+
+        state = asyncio.run(client.get_run_result("run_1"))
+        assert isinstance(state, RunResultCompleted)
+        assert state.result.tokens_usages is not None
+        record = state.result.tokens_usages[0]
+        assert isinstance(record, TokensUsageRecord)
+        assert record.inference_model_name == "test-model"
+        assert record.pipe_code == "test_domain.summarize"
+        assert record.nb_tokens_by_category == {"input": 15, "output": 4}
+        assert record.cost == 0.000105
+        assert state.result.usage_assembly_error is None
+
+        bare = RunResults(pipeline_run_id="run_1", main_stuff={"answer": "42"})
+        assert bare.tokens_usages is None
+        assert bare.usage_assembly_error is None
 
     def test_get_run_result_running_honors_retry_after(self, mocker: MockerFixture) -> None:
         """A 202 maps to RunResultRunning with the server's Retry-After hint."""

@@ -88,6 +88,7 @@ The durable run lifecycle (`pipelex_sdk/runs.py` + the client's lifecycle method
 - `RunStatus` — the hosted status enum, with `is_terminal` / `is_success` predicates (exhaustive `match`).
 - `RunRead` — a run record read through the self-healing status path (adds `degraded` + `retry_after_seconds`).
 - `RunResults` — result artifacts. `main_stuff` (the resolved main output content) is always present for a completed run: on the hosted path it is the `main_stuff.json` S3 artifact; on the bare-runner blocking path the SDK resolves it from the returned working memory via the response's `main_stuff_name`, so both paths deliver the same shape. Consumers read `main_stuff` directly. The full working memory still rides `pipe_output` (blocking path only) for consumers that want it, and `graph_spec` rides the hosted path. A completed run that cannot deliver a main stuff raises `MissingMainStuffError`. Extension-open, so any other server artifact is preserved.
+- `TokensUsageRecord` — one client-facing usage record per inference call, carried by `RunResults.tokens_usages` on both paths. A mirror of the wire contract specified in the MTHDS protocol spec, not a shape this SDK owns: every field is optional and the model is extension-open so pre-contract artifacts (relayed verbatim, never migrated) still parse. See [`run-usage.md`](./run-usage.md) for the field reference, the cost/null semantics, and the old-artifact rules.
 - `RunResultState` — the single-shot result outcome, a union discriminated on `state` (`running` / `completed` / `failed`).
 - `WaitForResultOptions` / `PollInfo` — poll-loop tuning and progress info. Async-native cancellation is via `asyncio.CancelledError` (cancel the awaiting task), so there is no `signal` field.
 
@@ -137,7 +138,7 @@ The wire models are snake_case Pydantic v2. Response models are extension-open (
 - **Pipelex API keys** — `list_pipelex_api_keys()`; `create_pipelex_api_key(label)` and `rotate_pipelex_api_key(id)` return the plaintext `api_key` **once**; `revoke_pipelex_api_key(id)`. Creation surfaces a **409 `pipelex_api_key_limit_reached`** when the per-account limit is hit. Rotation sends no body.
 - **Gateway (LLM inference) key** — `create_gateway_api_key(promo_code)` **always sends a JSON body** (even with `promo_code=None` → `{"promo_code": null}`); the server 422s an empty body. `get_gateway_api_key()` → status (`gateway_api_key` is `None` until provisioned).
 - **Onboarding** — `submit_onboarding(OnboardingSubmission)` (`POST /v1/onboarding/submit`, empty 2xx body); absent optional fields are dropped.
-- **Storage** — `resolve_storage_url(uri)` → presigned URL; `upload(UploadInput)` → the stored file handle.
+- **Storage** — `resolve_storage_url(uri)` → presigned URL; `upload(UploadInput)` → the stored file handle. The higher-level `upload_file` / `prepare_inputs` preparation surface built on top of `upload` is now available — see [input-preparation.md](./input-preparation.md).
 - **Run records** — `list_runs(method_id)` → `list[PipelineRun]` (the catalog-style list, distinct from the lifecycle status/result routes); `update_run(run_id, UpdateRunInput)` (admin/manual status patch, empty 2xx body).
 
 ## Health probe
