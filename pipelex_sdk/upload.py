@@ -9,6 +9,7 @@ without extending the `/v1/upload` response.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import mimetypes
 from pathlib import Path
@@ -118,7 +119,11 @@ async def upload_file(
     asset, `401`/`403` an auth failure, `404` an unsupported upload capability, an
     unreachable host a transport failure.
     """
-    data, resolved_name, resolved_type = _to_asset_bytes(source, filename, content_type)
+    # Offload the (possibly large) synchronous file read off the event loop — `read_bytes`
+    # releases the GIL during the underlying os.read, so other coroutines run during disk I/O.
+    # base64 stays inline on purpose: CPython's binascii holds the GIL, so threading it would
+    # not free the loop (and this matches the JS SDK, which also reads off-loop but encodes inline).
+    data, resolved_name, resolved_type = await asyncio.to_thread(_to_asset_bytes, source, filename, content_type)
     encoded = base64.b64encode(data).decode("ascii")
     try:
         uploaded = await client.upload(UploadInput(filename=resolved_name, data=encoded, content_type=resolved_type))

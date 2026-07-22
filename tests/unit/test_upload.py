@@ -27,7 +27,7 @@ from pipelex_sdk.errors import (
     UploadTransportError,
 )
 from pipelex_sdk.product_models import UploadedFile, UploadInput
-from pipelex_sdk.upload import upload_file
+from pipelex_sdk.upload import _to_asset_bytes, upload_file
 
 _BASE_URL = "http://localhost:8081"
 
@@ -114,14 +114,33 @@ class TestUploadFile:
         with pytest.raises(UnsupportedUploadCapabilityError):
             asyncio.run(upload_file(client, bytes([1])))
 
-    def test_other_status_and_unreachable_map_to_transport(self) -> None:
-        client_500 = _FakeUploadClient(error=_api_error(500))
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _api_error(500),
+            ApiUnreachableError("down", api_url=_BASE_URL, code="ECONNREFUSED"),
+        ],
+    )
+    def test_non_semantic_failures_map_to_transport(self, error: Exception) -> None:
+        client = _FakeUploadClient(error=error)
         with pytest.raises(UploadTransportError):
-            asyncio.run(upload_file(client_500, bytes([1])))
+            asyncio.run(upload_file(client, bytes([1])))
 
-        client_down = _FakeUploadClient(error=ApiUnreachableError("down", api_url=_BASE_URL, code="ECONNREFUSED"))
-        with pytest.raises(UploadTransportError):
-            asyncio.run(upload_file(client_down, bytes([1])))
+    def test_reads_the_local_file_off_the_event_loop(self, mocker: MockerFixture, tmp_path: Path) -> None:
+        # The (possibly large) file read is offloaded via asyncio.to_thread so it never blocks
+        # the event loop. `wraps` keeps the real behavior; we only assert the offload happened.
+        to_thread_spy = mocker.patch("pipelex_sdk.upload.asyncio.to_thread", wraps=asyncio.to_thread)
+        client = _FakeUploadClient()
+        path = tmp_path / "shot.png"
+        path.write_bytes(bytes([1, 2, 3, 4]))
+
+        record = asyncio.run(upload_file(client, path))
+
+        assert to_thread_spy.await_count == 1
+        await_args = to_thread_spy.await_args
+        assert await_args is not None
+        assert await_args.args[0] is _to_asset_bytes
+        assert record.size == 4  # real behavior preserved through the wrapped call
 
     def test_wires_through_the_real_client(self, mocker: MockerFixture) -> None:
         client = PipelexAPIClient(api_key="test-token", base_url=_BASE_URL)

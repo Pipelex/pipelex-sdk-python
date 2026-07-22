@@ -10,9 +10,9 @@ A produced verdict is a `200` discriminated on `is_valid`; a no-verdict conditio
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, Self, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from pipelex_sdk.validation_models import ValidationErrorItem
 
@@ -50,6 +50,29 @@ class BuildInputsValidReport(BaseModel):
     explicit: bool
     inputs: dict[str, Any] | None = None
     inputs_toml: str | None = None
+
+    @model_validator(mode="after")
+    def _template_matches_format(self) -> Self:
+        # Honor the adapter's malformed-200 guarantee for the template shape too: a valid
+        # verdict must carry the template field its `format` selects (and not the other).
+        # Without this, an `is_valid: true` body missing both templates would parse as a valid
+        # report and only fail one layer down in `prepare_inputs`.
+        match self.format:
+            case "json":
+                if self.inputs is None:
+                    msg = "inputs is required when format is 'json'"
+                    raise ValueError(msg)
+                if self.inputs_toml is not None:
+                    msg = "inputs_toml must be absent when format is 'json'"
+                    raise ValueError(msg)
+            case "toml":
+                if self.inputs_toml is None:
+                    msg = "inputs_toml is required when format is 'toml'"
+                    raise ValueError(msg)
+                if self.inputs is not None:
+                    msg = "inputs must be absent when format is 'toml'"
+                    raise ValueError(msg)
+        return self
 
 
 class CrateInvalidReport(BaseModel):

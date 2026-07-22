@@ -11,9 +11,10 @@ import json
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from pytest_mock import MockerFixture, MockType
 
-from pipelex_sdk.build_models import BuildInputsRequest, BuildInputsValidReport, CrateInvalidReport, MthdsFileItem
+from pipelex_sdk.build_models import BuildInputsRequest, BuildInputsResponseAdapter, BuildInputsValidReport, CrateInvalidReport, MthdsFileItem
 from pipelex_sdk.client import PipelexAPIClient
 from pipelex_sdk.errors import ApiResponseError
 
@@ -72,6 +73,29 @@ class TestBuildInputs:
 
         assert isinstance(report, CrateInvalidReport)
         assert report.validation_errors[0].message == "unknown pipe type"
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # format=json but carrying no template at all — the flagged malformed-200 shape.
+            {"is_valid": True, "pipe_ref": "demo.main", "message": "ok", "format": "json", "explicit": True},
+            # format=json but carrying the toml template (mismatched/opposite shape).
+            {"is_valid": True, "pipe_ref": "demo.main", "message": "ok", "format": "json", "explicit": True, "inputs_toml": "x = 1"},
+            # format=toml but carrying no toml template.
+            {"is_valid": True, "pipe_ref": "demo.main", "message": "ok", "format": "toml", "explicit": True},
+        ],
+    )
+    def test_valid_report_without_matching_template_is_rejected(self, body: dict[str, object]) -> None:
+        # A valid verdict must carry the template its `format` selects — the adapter's
+        # malformed-200 guarantee, now honored for the template shape too.
+        with pytest.raises(ValidationError):
+            BuildInputsResponseAdapter.validate_python(body)
+
+    def test_valid_toml_report_is_accepted(self) -> None:
+        body = {"is_valid": True, "pipe_ref": "demo.main", "message": "ok", "format": "toml", "explicit": True, "inputs_toml": "photo = 1"}
+        report = BuildInputsResponseAdapter.validate_python(body)
+        assert isinstance(report, BuildInputsValidReport)
+        assert report.inputs_toml == "photo = 1"
 
     def test_no_verdict_422_raises_api_response_error(self, mocker: MockerFixture) -> None:
         client = self._client()
