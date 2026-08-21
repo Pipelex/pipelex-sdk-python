@@ -212,7 +212,7 @@ wheels = [
 
 [[package]]
 name = "mthds"
-version = "0.8.1"
+version = "0.8.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -221,9 +221,9 @@ dependencies = [
     { name = "tomlkit" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/24/62/8c94607b2466105906232858dcee74eb8dbc2ed0352fb6b280e1f06f94b9/mthds-0.8.1.tar.gz", hash = "sha256:0c9082c2c5d833605431911635d3290ab1d1ad9d8f6d0eb68a27b89df9d256a2", size = 129886, upload-time = "2026-07-06T21:24:01.313Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ed/87/9fefbf352f2f2794336ae6fa1f72ea7d7a74ce78524e3bce734bea83aa02/mthds-0.8.2.tar.gz", hash = "sha256:1ac24a415f5a4942e93309066ed6b65a553ca379578e2da93f492bc63342b0b6", size = 130890, upload-time = "2026-08-21T10:49:37.05Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/29/32de38940a4d1c452285eaa8aec8bf251136a26397ded8ff85edf624b217/mthds-0.8.1-py3-none-any.whl", hash = "sha256:ea421aa00a13009d12168fa84b5fd451d0c513e60febcbfb47431c058b15bbfa", size = 58115, upload-time = "2026-07-06T21:23:59.783Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/85/051bf842ead495c9126e04a940cbfd3fada2474599b89be27b6d73e73158/mthds-0.8.2-py3-none-any.whl", hash = "sha256:13d314523afc5f774b7f19f65b94ce32e753a617298aae8d6d11315448bbea9f", size = 58167, upload-time = "2026-08-21T10:49:35.804Z" },
 ]
 
 [[package]]
@@ -326,7 +326,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.23.0,<1.0.0" },
-    { name = "mthds", specifier = ">=0.8.1" },
+    { name = "mthds", specifier = ">=0.8.2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==1.19.1" },
     { name = "pydantic", specifier = ">=2.10.6,<3.0.0" },
     { name = "pylint", marker = "extra == 'dev'", specifier = "==4.0.4" },
