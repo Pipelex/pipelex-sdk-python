@@ -29,6 +29,7 @@ The client is **async-only** (httpx `AsyncClient`) and is an async context manag
 ```python
 from pipelex_sdk.client import PipelexAPIClient
 
+
 async def main() -> None:
     async with PipelexAPIClient() as client:
         # 1. Validate an MTHDS bundle. The verdict is always returned (never raised):
