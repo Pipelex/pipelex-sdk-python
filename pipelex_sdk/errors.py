@@ -28,7 +28,7 @@ from mthds.protocol.exceptions import PipelineRequestError
 
 # Explicit re-export (PEP 484 `as` self-alias): the protocol 202-degrade error stays owned by
 # `mthds`, surfaced here so consumers have a single import home for the run/lifecycle errors.
-from mthds.runners.api.exceptions import RunStillRunningError as RunStillRunningError  # noqa: PLC0414
+from mthds.runners.api.exceptions import RunStillRunningError as RunStillRunningError  # ruff: ignore[useless-import-alias]
 
 if TYPE_CHECKING:
     from pipelex_sdk.runs import RunStatus
