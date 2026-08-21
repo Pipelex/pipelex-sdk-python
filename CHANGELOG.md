@@ -8,6 +8,8 @@
 
   Two mechanical conversions ride along, both applied by `ruff check --fix` and therefore not deferrable, since `make lint` would re-apply them on first contact: selector lists in `pyproject.toml` now name rules rather than code them, and `# noqa: CODE` suppressions became `# ruff: ignore[rule-name]`. `float-equality-comparison`, newly reported under `preview`, joins the existing `tests/` relaxations — those tests assert float literals that round-trip exactly, so `pytest.approx` would only add noise.
 
+- **`too-many-statements-in-try-clause` is now ignored explicitly, ahead of ever having a finding.** Every repo in the workspace that runs `select = ["ALL"]` with `preview` has settled on ignoring this rule, because shrinking a `try` clause changes which statements its handlers cover — an error-handling refactor rather than lint cleanup. This repo happened to have no findings, so the decision was never written down here, which meant whoever wrote the first long `try` clause would have had to reach it again on their own. The reasoning now sits inline next to the ignore. No code changes; the rule fires nowhere today.
+
 ## [v0.5.0] - 2026-07-22
 
 ### Added
