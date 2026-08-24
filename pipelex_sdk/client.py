@@ -55,6 +55,7 @@ from pipelex_sdk.product_models import (
     Membership,
     MembershipsResponse,
     MethodData,
+    MethodDeletionAccepted,
     PipelexApiKeyCreated,
     PipelexApiKeyList,
     PipelineRun,
@@ -124,6 +125,18 @@ _BARE_RUNNER_IMPLEMENTATION = "pipelex-api"
 # `validate` always asks the Pipelex API for the Markdown view so both a valid result and a
 # produced validation-error verdict carry `rendered_markdown`; callers may add more tokens.
 _VALIDATE_MARKDOWN_RENDER_FORMAT = "markdown"
+
+# The HOSTED API's own run args — the layer-3 extensions this client names itself, on top of
+# the MTHDS Protocol's basic run args. They are named parameters here and travel to the base
+# client through its generic `extra` passthrough, which is exactly the layering: the protocol
+# client merges them into the body without knowing what they mean.
+#
+# Reserved on `extra` for the same reason the protocol args are: one argument must not arrive
+# by two paths with different validation. The guard is deliberately PER LAYER — it lives here
+# and must never be pushed down into `mthds`, because a protocol client talking to another
+# vendor's server has no business rejecting that vendor's arguments. See the workspace spec
+# `docs/specs/pipelex-platform-api.md` -> "Layered extension policy" (Rule 5).
+_HOSTED_RUN_ARGS: frozenset[str] = frozenset({"method_id"})
 
 
 class MthdsFile(BaseModel):
@@ -323,6 +336,8 @@ class PipelexAPIClient(MthdsAPIClient):
         output_multiplicity: VariableMultiplicity | None = None,
         dynamic_output_concept_ref: str | None = None,
         extra: dict[str, Any] | None = None,
+        *,
+        method_id: str | None = None,
     ) -> PipelexExecuteResult:
         """Execute a method synchronously and wait for its completion — `POST /v1/execute`.
 
@@ -330,7 +345,8 @@ class PipelexAPIClient(MthdsAPIClient):
         resolved `.main_stuff` accessor, so a blocking result reads its output the same way as a
         durable one (`result.main_stuff`) instead of digging through `pipe_output`.
 
-        Identical to the inherited protocol `execute`, except a failure consistent with the
+        Identical to the inherited protocol `execute`, except for two things. First, `method_id`
+        — the hosted platform's own run arg (see below). Second, a failure consistent with the
         hosted gateway's ~30s synchronous ceiling — a gateway `503`/`504`, or a client-side
         request timeout, after at least ~28s have elapsed — is translated into a clear
         `PipelineExecuteTimeoutError` pointing at the durable start+poll path, matching the JS
@@ -338,9 +354,30 @@ class PipelexAPIClient(MthdsAPIClient):
         (from the inherited `execute`), and every other non-2xx keeps the inherited
         `httpx.HTTPStatusError` regime (consistent with the other inherited protocol routes).
 
+        Args:
+            pipe_code: The code identifying the pipe to execute.
+            mthds_contents: List of MTHDS bundle contents to load.
+            inputs: Inputs passed to the method.
+            output_name: Name of the output slot to write to.
+            output_multiplicity: Output multiplicity setting.
+            dynamic_output_concept_ref: Override for the dynamic output concept ref.
+            extra: Server-specific extension args this client does not know about, merged into
+                the request body as top-level properties. Protocol args and this client's own
+                hosted args (`method_id`) must be passed as named parameters, not through
+                `extra` (raises `PipelineRequestError`).
+            method_id: A stored method's hosted catalog id (`mt_…`) — a pure PASS-THROUGH the
+                platform resolves against the org's catalog; nothing is expanded client-side,
+                and it is meaningless off-platform (an open-source runner answers a `422`
+                naming the key). Alone, the platform resolves and runs the stored method's
+                source. Alongside `mthds_contents`, the inline source is what RUNS (precedence)
+                and the id is recorded as run-history linkage on the Run row — the index key
+                `GET /v1/runs?method_id=` queries, so a run started without it is absent from
+                its method's history permanently. An empty string is treated as absent.
+
         Raises:
             PipelineExecuteTimeoutError: The blocking request hit the hosted gateway's ~30s
                 synchronous ceiling — use `start_and_wait` (or `start` + `wait_for_result`).
+            PipelineRequestError: `extra` carries a protocol arg or a hosted arg.
             RunStillRunningError: The server answered 202 (the protocol's optional async
                 degrade) — the run continues server-side; resume by `pipeline_run_id`.
             httpx.HTTPStatusError: Any other non-2xx response (the inherited regime).
@@ -354,7 +391,7 @@ class PipelexAPIClient(MthdsAPIClient):
                 output_name=output_name,
                 output_multiplicity=output_multiplicity,
                 dynamic_output_concept_ref=dynamic_output_concept_ref,
-                extra=extra,
+                extra=_merge_hosted_run_extensions(extra, method_id),
             )
         except (httpx.HTTPStatusError, httpx.TimeoutException) as exc:
             elapsed_seconds = monotonic() - started_at
@@ -377,14 +414,22 @@ class PipelexAPIClient(MthdsAPIClient):
         output_multiplicity: VariableMultiplicity | None = None,
         dynamic_output_concept_ref: str | None = None,
         extra: dict[str, Any] | None = None,
+        *,
+        method_id: str | None = None,
     ) -> RunResultStart:
         """Start a method asynchronously — `POST /v1/start` (202: `pipeline_run_id` only).
 
-        Identical to the inherited protocol `start`, except a bare-runner missing-route 404
-        (no run store) is translated into a clear `RunLifecycleUnavailableError` instead of a
-        raw `httpx.HTTPStatusError` — matching the JS SDK and letting `start_and_wait` self-heal
-        to the blocking-execute fallback. The platform's structured 404s (run not found) keep
-        their normal `httpx.HTTPStatusError` behavior.
+        Identical to the inherited protocol `start`, except for `method_id` — the hosted
+        platform's own run arg, documented on `execute` and carrying the same semantics here —
+        and that a bare-runner missing-route 404 (no run store) is translated into a clear
+        `RunLifecycleUnavailableError` instead of a raw `httpx.HTTPStatusError`, matching the JS
+        SDK and letting `start_and_wait` self-heal to the blocking-execute fallback. The
+        platform's structured 404s (run not found) keep their normal `httpx.HTTPStatusError`
+        behavior.
+
+        Raises:
+            PipelineRequestError: `extra` carries a protocol arg or a hosted arg.
+            RunLifecycleUnavailableError: The configured server has no run store.
         """
         try:
             return await super().start(
@@ -394,7 +439,7 @@ class PipelexAPIClient(MthdsAPIClient):
                 output_name=output_name,
                 output_multiplicity=output_multiplicity,
                 dynamic_output_concept_ref=dynamic_output_concept_ref,
-                extra=extra,
+                extra=_merge_hosted_run_extensions(extra, method_id),
             )
         except httpx.HTTPStatusError as exc:
             self._raise_if_lifecycle_unavailable(exc.response, str(exc.request.url))
@@ -615,6 +660,8 @@ class PipelexAPIClient(MthdsAPIClient):
         dynamic_output_concept_ref: str | None = None,
         extra: dict[str, Any] | None = None,
         wait_options: WaitForResultOptions | None = None,
+        *,
+        method_id: str | None = None,
     ) -> RunResults:
         """Start a run and wait for its result — the whole lifecycle in one call, self-healing
         across hosted and bare runners.
@@ -628,6 +675,10 @@ class PipelexAPIClient(MthdsAPIClient):
         field a compliant bare runner may omit). Such a runner raises `RunLifecycleUnavailableError`
         from `start`, BEFORE any run is created, so the blocking fallback cannot double-run; the
         negative is cached so later calls skip the durable attempt.
+
+        `method_id` — the hosted platform's own run arg, documented on `execute` — is forwarded
+        on BOTH paths. Dropping it on the blocking fallback would turn a server-side 422 that
+        names the key into a silently different run.
 
         Raises:
             RunFailedError: If the run reaches a terminal status other than COMPLETED.
@@ -643,6 +694,7 @@ class PipelexAPIClient(MthdsAPIClient):
                     output_multiplicity=output_multiplicity,
                     dynamic_output_concept_ref=dynamic_output_concept_ref,
                     extra=extra,
+                    method_id=method_id,
                 )
             except RunLifecycleUnavailableError:
                 self._lifecycle_available = False
@@ -654,6 +706,7 @@ class PipelexAPIClient(MthdsAPIClient):
                     output_multiplicity=output_multiplicity,
                     dynamic_output_concept_ref=dynamic_output_concept_ref,
                     extra=extra,
+                    method_id=method_id,
                 )
             return await self.wait_for_result(started.pipeline_run_id, options=wait_options)
 
@@ -665,6 +718,7 @@ class PipelexAPIClient(MthdsAPIClient):
             output_multiplicity=output_multiplicity,
             dynamic_output_concept_ref=dynamic_output_concept_ref,
             extra=extra,
+            method_id=method_id,
         )
 
     async def _execute_blocking(
@@ -677,12 +731,15 @@ class PipelexAPIClient(MthdsAPIClient):
         output_multiplicity: VariableMultiplicity | None,
         dynamic_output_concept_ref: str | None,
         extra: dict[str, Any] | None,
+        method_id: str | None = None,
     ) -> RunResults:
         """Blocking `POST /v1/execute` adapted onto `RunResults` — the bare-runner path.
 
-        Forwards every protocol field PLUS the `extra` extension passthrough: an extension-only
-        call (`{extra}` with no pipe_code/bundle) or a vendor selector riding `extra` must survive
-        this path, not just the durable one.
+        Forwards every protocol field PLUS both extension surfaces: the hosted `method_id` and
+        the generic `extra` passthrough. An extension-only call (`{extra}` with no pipe_code) or
+        a vendor selector riding `extra` must survive this path, not just the durable one — and
+        a hosted `method_id` must reach the server here too, so a runner that cannot resolve it
+        says so instead of the client silently dropping it.
         """
         result = await self.execute(
             pipe_code=pipe_code,
@@ -692,6 +749,7 @@ class PipelexAPIClient(MthdsAPIClient):
             output_multiplicity=output_multiplicity,
             dynamic_output_concept_ref=dynamic_output_concept_ref,
             extra=extra,
+            method_id=method_id,
         )
         return _map_run_result_to_run_results(result)
 
@@ -725,9 +783,29 @@ class PipelexAPIClient(MthdsAPIClient):
         body = write_input.model_dump(mode="json", exclude_none=True)
         return MethodData.model_validate(await self._request_product("PUT", f"methods/{quote(method_id, safe='')}", body=body))
 
-    async def delete_method(self, method_id: str) -> None:
-        """Delete a method — `DELETE /v1/methods/{id}` (empty body)."""
-        await self._request_product("DELETE", f"methods/{quote(method_id, safe='')}")
+    async def delete_method(self, method_id: str) -> MethodDeletionAccepted:
+        """Erase a method and everything it produced — `DELETE /v1/methods/{id}`.
+
+        **Asynchronous, and the return value says so.** The platform answers `202` the moment it
+        has claimed the method and terminated its in-flight workflows; the rest of the cascade
+        (runs, events, S3 objects) is enqueued. So a returned `MethodDeletionAccepted` means
+        "accepted", never "gone" — completion is the method's row disappearing from
+        `list_methods`, not any field of the acceptance body. Until then the row stays listed
+        with a `deletion_state`, which is what lets a UI render it as "Deleting…", while
+        `get_method` refuses it with a `409`.
+
+        A double-clicked delete is safe: the claim is a conditional write, so the second call is
+        an `ApiResponseError` (`409 conflict`) rather than a second cascade over the same runs.
+        An unknown or foreign-org id is a `404`.
+
+        Args:
+            method_id: The method to erase.
+
+        Returns:
+            The platform's acceptance — `method_id`, the `deletion_state` the cascade started
+            in, and the `deletion_job_id` a caller can log or correlate.
+        """
+        return MethodDeletionAccepted.model_validate(await self._request_product("DELETE", f"methods/{quote(method_id, safe='')}"))
 
     async def list_memberships(self) -> MembershipsResponse:
         """The caller's org memberships + active-org feature flags — `GET /v1/organizations/memberships`."""
@@ -892,6 +970,39 @@ class PipelexAPIClient(MthdsAPIClient):
 
 
 _KNOWN_RUN_STATUS_NAMES: frozenset[str] = frozenset(RunStatus.__members__)
+
+
+def _merge_hosted_run_extensions(extra: dict[str, Any] | None, method_id: str | None) -> dict[str, Any] | None:
+    """Fold the hosted API's own run args into the generic `extra` passthrough handed to the base client.
+
+    This is the seam between layer 3 and layer 2: `method_id` is a named parameter on this
+    client (it is the hosted platform's argument, so this client must type it), and it reaches
+    the wire as a top-level body property through the protocol client's extension mechanism —
+    which merges it without knowing what it means. See `_HOSTED_RUN_ARGS`.
+
+    An absent or empty `method_id` contributes nothing: `method_id=""` selects no method and
+    links no run, so it is not sent and does not satisfy the base client's "something to run"
+    precondition. `None` is returned for an empty result, leaving the base's own handling of an
+    absent `extra` untouched.
+
+    Args:
+        extra: Server-specific extension args from the caller, or None.
+        method_id: The hosted catalog id, or None.
+
+    Returns:
+        The merged extension mapping to hand to the base client, or None if there is nothing.
+
+    Raises:
+        PipelineRequestError: If `extra` carries a hosted arg this client names itself.
+    """
+    extensions: dict[str, Any] = dict(extra or {})
+    hosted_overlap = extensions.keys() & _HOSTED_RUN_ARGS
+    if hosted_overlap:
+        msg = f"extra carries hosted args {sorted(hosted_overlap)} — pass them as named parameters instead."
+        raise PipelineRequestError(msg)
+    if method_id:
+        extensions["method_id"] = method_id
+    return extensions or None
 
 
 def _with_validate_markdown_render(render: list[str] | None) -> list[str]:

@@ -66,6 +66,30 @@ class MethodWriteInput(BaseModel):
     input_data: dict[str, Any] | None = None
 
 
+class MethodDeletionState(StrEnum):
+    """Where a method is in the erasure cascade; absent on a normal method."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    FAILED = "failed"
+
+
+class MethodDeletionAccepted(BaseModel):
+    """The `202` acceptance of `DELETE /v1/methods/{id}`.
+
+    Returned the moment the erasure is CLAIMED and handed off, not when it completes.
+    Nothing in this body means "done": completion is the method's row disappearing from
+    `list_methods`. What the body buys a caller is a claim it can log and correlate
+    (`deletion_job_id`) plus the state the cascade started in.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    method_id: str
+    deletion_state: MethodDeletionState
+    deletion_job_id: str
+
+
 # ── Organizations (`/v1/organizations`) ──────────────────────────────────
 
 

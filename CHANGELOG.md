@@ -2,7 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`method_id` is a typed run option.** `execute`, `start`, and `start_and_wait` take the hosted platform's `method_id` as a first-class keyword parameter. It is a pure pass-through — the platform resolves the id against the org's catalog, and nothing is expanded client-side. Alone it is a run source; alongside `mthds_contents` the inline source is what runs and the id is recorded as run-history linkage on the Run row, which is what makes the run appear under `GET /v1/runs?method_id=`. It rides the blocking `execute` fallback too, so a bare runner answers the `422` that names it rather than the client silently dropping it. An empty string is treated as absent. Mechanically it reaches the wire through the base client's generic extension passthrough, which merges it into the body without knowing what it means — the protocol client stays catalog-agnostic while this client owns the concept. Typing its own platform's arguments is what a hosted client is for; `extra` remains the escape hatch for extensions this client does not know about. The doctrine is normative in the workspace spec `docs/specs/pipelex-platform-api.md` → "Layered extension policy".
+
 ### Changed
+
+- **Breaking: `delete_method` returns the platform's acceptance instead of `None`.** `DELETE /v1/methods/{id}` answers `202` with `method_id`, `deletion_state`, and `deletion_job_id`, and the erasure continues asynchronously after that; the method was annotated `-> None` with a docstring promising an empty synchronous delete, so a caller reasonably concluded the method was gone when the call returned. It now returns the new `MethodDeletionAccepted` (with `MethodDeletionState`), which means "accepted", never "gone" — completion is the row disappearing from `list_methods`. A misleading contract around a destructive operation is worth a breaking change.
+- **Breaking: `extra` now rejects `method_id`.** The client names the key itself, so it must also guard it — one argument must not arrive by two paths with different validation. Callers passing `extra={"method_id": …}` must pass the named parameter instead. The guard is deliberately per layer: `method_id` must never become reserved in `mthds`, which has no business rejecting another vendor's arguments.
 
 - **Ruff moves to 0.16.4, matching the version the VS Code extension bundles.** The extension now syncs `pyproject.toml` and `ruff.toml` documents to the language server, because Ruff from 0.16 on lints its own config files. A binary older than that parses those documents as Python source and paints phantom `invalid-syntax` diagnostics across every `pyproject.toml`. Pinning the dev dependency to the exact version the extension ships keeps the editor and the command line on one binary. This is a dev-dependency change: nothing shipped changes, and there is no version bump.
 

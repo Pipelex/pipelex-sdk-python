@@ -14,6 +14,7 @@ from pytest_mock import MockerFixture, MockType
 from pipelex_sdk.client import PipelexAPIClient
 from pipelex_sdk.errors import ApiResponseError
 from pipelex_sdk.product_models import (
+    MethodDeletionState,
     MethodWriteInput,
     OnboardingCurrentTool,
     OnboardingHeardFrom,
@@ -124,16 +125,24 @@ class TestClientProduct:
         # input_data is None → dropped from the wire (matches the JS undefined-drop).
         assert sent.body == {"name": "Renamed", "mthds": "src"}
 
-    def test_delete_method_tolerates_empty_204(self, mocker: MockerFixture) -> None:
-        client = self._client()
-        send = self._mock_send(mocker, client, _response(204))
+    def test_delete_method_returns_the_202_acceptance(self, mocker: MockerFixture) -> None:
+        """The erasure is asynchronous: the caller gets the CLAIM, never a "it's gone" signal.
 
-        result = asyncio.run(client.delete_method("m1"))
+        Completion is the row disappearing from `list_methods`, so the honest return value is the
+        acceptance body — a `deletion_job_id` to log or correlate, and the state it started in.
+        """
+        client = self._client()
+        body = {"method_id": "m1", "deletion_state": "pending", "deletion_job_id": "job-1"}
+        send = self._mock_send(mocker, client, _response(202, json_body=body))
+
+        accepted = asyncio.run(client.delete_method("m/1"))
 
         sent = self._sent(send)
-        assert result is None
         assert sent.method == "DELETE"
-        assert sent.url == f"{_BASE_URL}/v1/methods/m1"
+        assert sent.url == f"{_BASE_URL}/v1/methods/m%2F1"
+        assert accepted.method_id == "m1"
+        assert accepted.deletion_state is MethodDeletionState.PENDING
+        assert accepted.deletion_job_id == "job-1"
 
     # ── Organizations ────────────────────────────────────────────────
 
