@@ -165,10 +165,10 @@ The 2026-08-25 decision in `pipelex-sdk-js/wip/boundary-option-type-validation.m
 
 ## Phase 5 — wrap-up
 
-- [ ] `make check` (adds pylint to the agent gate) and `make agent-test` pass on the final tree.
-- [ ] Re-read `docs/architecture.md` end to end for any remaining claim the code no longer supports (parity, `Out of scope`, the validate section, the product section).
-- [ ] Re-read `CHANGELOG.md` `[Unreleased]`: every breaking item is labelled "breaking", no counts, no WIP-doc mentions, the version line untouched.
-- [ ] `wip/updates.md` stays where it is, with its §7 decisions; this file stays too. Neither is deleted or emptied as part of finishing the work.
+- [x] `make check` (adds pylint to the agent gate) and `make agent-test` pass on the final tree.
+- [x] Re-read `docs/architecture.md` end to end for any remaining claim the code no longer supports (parity, `Out of scope`, the validate section, the product section). Three further corrections beyond the ones §3.5 named: the intro line claiming "the full `0.1.0` surface", the parity section's "**Methods** — full coverage" (which contradicted the gap list directly above it), and the "**Models** — full field-for-field match" claim; the Models paragraph now also names the two deliberate divergences (snake_case `next_cursor`, the converter's home).
+- [x] Re-read `CHANGELOG.md` `[Unreleased]`: every breaking item is labelled "breaking", no counts, no WIP-doc mentions, the version line untouched (still `0.5.0`).
+- [x] `wip/updates.md` stays where it is, with its §7 decisions; this file stays too. Neither is deleted or emptied as part of finishing the work.
 - [ ] Open the PR against `dev`, then follow `/review-pr-agents` for the Greptile / Codex loop (compare SHAs, not notifications; reply and resolve each thread in one pass).
 
 ### Checkpoint 3
