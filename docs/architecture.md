@@ -179,7 +179,7 @@ The wire models are snake_case Pydantic v2. Response models are extension-open (
 
 `health()` → `GET {origin}/health`. The one route served at the **origin**, NOT under the `/v1` prefix — the origin is derived from the base URL (`_origin_of`, exposed as `self.origin_url`), so a base URL of `https://api.pipelex.com/v1/...` still probes `https://api.pipelex.com/health`. It is **out-of-protocol**: the MTHDS Protocol defines no health route, and `/health` is neither a protocol nor a product surface. It rides `_request_json` (the plainer regime), so a non-2xx raises `PipelineRequestError` rather than the product `ApiResponseError` — liveness needs no `code` taxonomy. Transport failures still map to `ApiUnreachableError`. (Checkpoint-5 decision: kept the plainer regime — see "Error regimes" above.)
 
-## Out of scope for v0.1
+## Out of scope
 
 - The remaining `/v1/build/*` authoring helpers — `build_output`, `build_runner`, `concept`, `pipe_spec`. `build_inputs` shipped in 0.5.0 and is no longer deferred.
 - Organization *switch* (a WorkOS session operation, not a `/v1` route).

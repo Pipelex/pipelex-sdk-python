@@ -10,7 +10,7 @@ The findings that *were* acted on during the review are recorded in `CHANGELOG.m
 
 **Status:** Confirmed, pre-existing, widened by this branch. Deferred because the fix is a packaging change to `pyproject.toml`, which this branch does not touch and which has release implications worth deciding on their own.
 
-`pyproject.toml` declares `build-backend = "hatchling.build"` (`pyproject.toml:40`) and carries no `[tool.hatch.build.targets.sdist]` section, so hatchling falls back to including everything the VCS does not ignore. Building the current tree confirms it:
+`pyproject.toml` declares `build-backend = "hatchling.build"` (`pyproject.toml:40`) and carries no `[tool.hatch.build.targets.sdist]` section, so hatchling falls back to including everything the VCS does not ignore. An sdist built at the review point confirms it. The listing below is that build — version 0.5.0, at `301d96e` — and is kept as it was taken rather than re-run, so it predates this very file and is not the current release's archive:
 
 ```
 $ uv build --sdist

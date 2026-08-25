@@ -1,5 +1,7 @@
 # Updates warranted by pipelex-api 0.17.0 / 0.18.0, the pipelex-server bump, and `@pipelex/sdk` 0.14.0
 
+**Status: implemented.** Every change designed below landed, and shipped in `pipelex-sdk` v0.6.0. [`TODOS.md`](../TODOS.md) is the implementation tracker for this design and carries the per-item status; read it for what was done, and this file for what was intended and why. This document is deliberately left as it was written, so its sections below still speak in the future tense and its §7 decisions stay quotable from the tracker.
+
 A design for what this repo still owes after the three sources named in the title, written on the `feature/Typed-method-id-run-option` branch, which already carries the typed `method_id` run option and the honest `delete_method` contract. Every claim below was checked against the code it names; line numbers are as of 2026-08-25 and will drift.
 
 ## Verdict
