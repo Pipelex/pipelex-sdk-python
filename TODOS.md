@@ -143,19 +143,25 @@ Breaking, and the most urgent fix in this plan: `list_methods` and `list_runs` c
 
 ### Checkpoint 2
 
-- [ ] Update this file: tick what landed, record the Phase 2 and Phase 3 commit SHAs, and note any place the Python shapes deliberately diverge from the JS mirror beyond snake_case (there should be none besides the `python` converter living here).
+- [x] Update this file: tick what landed, record the Phase 2 and Phase 3 commit SHAs, and note any place the Python shapes deliberately diverge from the JS mirror beyond snake_case (there should be none besides the `python` converter living here).
+
+**Phase 2 landed in `2a8c589`, Phase 3 in `5e01c1b`.** Notes:
+
+- **Divergences from the JS mirror beyond snake_case:** the `python` converter lives here rather than in `mthds-python` (the decision of `wip/updates.md` §7.2), and `parse_method_files` raises `ValueError` where the JS pair raises `PipelineRequestError` — because the Python parser is reached through a pydantic `field_validator`, where a `ValueError` is the idiomatic signal and surfaces to the caller as a `pydantic.ValidationError` like any other malformed response body. Nothing else diverges.
+- **`MethodPage.items` / `RunPage.items` are required**, not defaulted empty. A page body with no `items` is malformed, and failing loudly is the whole point of this phase — the previous shape failed silently in the tests and loudly in production.
+- **The shared test fixtures landed in a new `tests/unit/conftest.py`** (`api_client`, `wire_response`, `patch_send`), used by the two new modules. Migrating `test_client_product.py` onto them was left out as the plan allowed; it keeps its own equivalent private helpers.
 
 ## Phase 4 — `method_id` boundary type guard (`wip/updates.md` §4)
 
 The 2026-08-25 decision in `pipelex-sdk-js/wip/boundary-option-type-validation.md`: a published client validates request-option types at its boundary and raises `PipelineRequestError` rather than dropping or forwarding a wrong-typed value. Its evidence names this repo's bare `if method_id:` in `_merge_hosted_run_extensions`, which drops falsy non-strings and forwards truthy ones to a server `422`.
 
-- [ ] `_merge_hosted_run_extensions` (`client.py` near line 975): replace `if method_id:` with an explicit presence check (`if method_id is not None`) followed by `if not isinstance(method_id, str): raise PipelineRequestError(msg)` naming the received type, then the existing empty-string-is-absent normalization. `None` and `""` still contribute nothing.
-- [ ] Update the docstring's `Raises:` and the "An absent or empty `method_id`" paragraph.
-- [ ] `tests/unit/test_client_method_id.py`: one parametrized test over wrong-typed values (`0`, `123`, `[]`, `["mt_1"]`, `{}`) asserting `PipelineRequestError` on `execute` and `start` before any request is sent; keep `test_empty_method_id_is_absent` green.
-- [ ] `docs/architecture.md` → "Hosted run extensions (`method_id`)": add a bullet that a non-string raises at the boundary, and why (one partition of wrong values across both SDKs).
-- [ ] `CHANGELOG.md` `[Unreleased]` → **Changed**: the guard, with the JS decision as the reason.
-- [ ] `make agent-check` and `make agent-test` pass.
-- [ ] Commit (suggested message: "Reject a non-string method_id at the client boundary").
+- [x] `_merge_hosted_run_extensions` (`client.py` near line 975): replace `if method_id:` with an explicit presence check (`if method_id is not None`) followed by `if not isinstance(method_id, str): raise PipelineRequestError(msg)` naming the received type, then the existing empty-string-is-absent normalization. `None` and `""` still contribute nothing.
+- [x] Update the docstring's `Raises:` and the "An absent or empty `method_id`" paragraph.
+- [x] `tests/unit/test_client_method_id.py`: one parametrized test over wrong-typed values (`0`, `123`, `[]`, `["mt_1"]`, `{}`) asserting `PipelineRequestError` on `execute` and `start` before any request is sent; keep `test_empty_method_id_is_absent` green.
+- [x] `docs/architecture.md` → "Hosted run extensions (`method_id`)": add a bullet that a non-string raises at the boundary, and why (one partition of wrong values across both SDKs).
+- [x] `CHANGELOG.md` `[Unreleased]` → **Changed**: the guard, with the JS decision as the reason.
+- [x] `make agent-check` and `make agent-test` pass.
+- [x] Commit (suggested message: "Reject a non-string method_id at the client boundary").
 
 ## Phase 5 — wrap-up
 

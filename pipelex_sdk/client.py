@@ -1115,7 +1115,7 @@ class PipelexAPIClient(MthdsAPIClient):
 _KNOWN_RUN_STATUS_NAMES: frozenset[str] = frozenset(RunStatus.__members__)
 
 
-def _merge_hosted_run_extensions(extra: dict[str, Any] | None, method_id: str | None) -> dict[str, Any] | None:
+def _merge_hosted_run_extensions(extra: dict[str, Any] | None, method_id: object) -> dict[str, Any] | None:
     """Fold the hosted API's own run args into the generic `extra` passthrough handed to the base client.
 
     This is the seam between layer 3 and layer 2: `method_id` is a named parameter on this
@@ -1123,28 +1123,41 @@ def _merge_hosted_run_extensions(extra: dict[str, Any] | None, method_id: str | 
     the wire as a top-level body property through the protocol client's extension mechanism —
     which merges it without knowing what it means. See `_HOSTED_RUN_ARGS`.
 
-    An absent or empty `method_id` contributes nothing: `method_id=""` selects no method and
-    links no run, so it is not sent and does not satisfy the base client's "something to run"
-    precondition. `None` is returned for an empty result, leaving the base's own handling of an
-    absent `extra` untouched.
+    A **non-string** `method_id` is refused here rather than dropped or forwarded. A published
+    client validates its request-option types at its own boundary, so that one wrong value gets
+    one answer: a bare truthiness check would silently drop the falsy wrong types (`0`, `[]`)
+    and forward the truthy ones (`123`, `["mt_1"]`) to a server `422` — a different partition of
+    wrong values than the JS client makes for the same argument on the same wire.
+
+    An absent or empty `method_id` still contributes nothing: `method_id=""` selects no method
+    and links no run, so it is not sent and does not satisfy the base client's "something to
+    run" precondition, and neither does `None`. `None` is returned for an empty result, leaving
+    the base's own handling of an absent `extra` untouched.
 
     Args:
         extra: Server-specific extension args from the caller, or None.
-        method_id: The hosted catalog id, or None.
+        method_id: The hosted catalog id, or None. Typed `object` rather than `str | None`
+            deliberately — this helper *is* the runtime boundary, and the callers it guards
+            against are the untyped ones a type checker never sees.
 
     Returns:
         The merged extension mapping to hand to the base client, or None if there is nothing.
 
     Raises:
-        PipelineRequestError: If `extra` carries a hosted arg this client names itself.
+        PipelineRequestError: If `extra` carries a hosted arg this client names itself, or if
+            `method_id` is present and is not a string.
     """
     extensions: dict[str, Any] = dict(extra or {})
     hosted_overlap = extensions.keys() & _HOSTED_RUN_ARGS
     if hosted_overlap:
         msg = f"extra carries hosted args {sorted(hosted_overlap)} — pass them as named parameters instead."
         raise PipelineRequestError(msg)
-    if method_id:
-        extensions["method_id"] = method_id
+    if method_id is not None:
+        if not isinstance(method_id, str):
+            msg = f"method_id must be a string, received {type(method_id).__name__}."
+            raise PipelineRequestError(msg)
+        if method_id:
+            extensions["method_id"] = method_id
     return extensions or None
 
 

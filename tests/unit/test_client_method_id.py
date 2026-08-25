@@ -102,6 +102,24 @@ class TestHostedMethodIdOption:
         with pytest.raises(PipelineRequestError):
             asyncio.run(client.start(method_id=""))
 
+    @pytest.mark.parametrize("wrong_typed_method_id", [0, 123, [], ["mt_1"], {}, 1.5, True])
+    def test_non_string_method_id_raises_before_any_request(self, mocker: MockerFixture, wrong_typed_method_id: object) -> None:
+        """A wrong-typed selector is refused at the boundary, on both run routes, before the wire.
+
+        Without the guard the partition of wrong values is arbitrary: a bare truthiness check
+        drops the falsy ones (`0`, `[]`) and forwards the truthy ones (`123`, `["mt_1"]`) to a
+        server `422`. One wrong value, one answer.
+        """
+        client = self._client()
+        send = mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(202, json=_START_BODY)))
+
+        with pytest.raises(PipelineRequestError, match="method_id must be a string"):
+            asyncio.run(client.execute(pipe_code="p", method_id=wrong_typed_method_id))  # type: ignore[arg-type]
+        with pytest.raises(PipelineRequestError, match="method_id must be a string"):
+            asyncio.run(client.start(pipe_code="p", method_id=wrong_typed_method_id))  # type: ignore[arg-type]
+
+        send.assert_not_called()
+
     def test_blocking_fallback_forwards_method_id(self, mocker: MockerFixture) -> None:
         """A bare runner must SEE the selector, so it can answer the 422 that names it.
 
