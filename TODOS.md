@@ -16,7 +16,7 @@ Suggested order is the order below. Phase 3 is the most urgent fix (a crash agai
 
 ## Phase 0 — preflight
 
-- [x] `make install` and confirm the pinned `mthds` base is the one the code was written against (`uv pip show mthds`; the floor is `>=0.8.1` and the workspace copy is 0.8.2). Nothing in this plan needs a newer `mthds`. Confirmed: 0.8.2.
+- [x] `make install` and confirm the pinned `mthds` base is the one the code was written against (`uv pip show mthds`; the floor is `>=0.8.2` and the workspace copy is 0.8.2). Nothing in this plan needs a newer `mthds`. Confirmed: 0.8.2.
 - [x] Run `make agent-check` and `make agent-test` before touching anything, so a later failure is attributable to this work and not to the starting point. Both green at the starting point.
 - [x] Re-read `wip/updates.md` §6 and §7 once; if anything there contradicts this file, this file is the stale one. No contradiction found.
 
@@ -225,6 +225,16 @@ Deferred to `wip/pr-14-review-notes.md`, each verified and none blocking: the sd
 One finding reached outside this repo and was filed rather than fixed: `PipelineRun.pipe_statuses` is a field no server has ever filled — it is absent from the platform's `RunPublic` response model and appears nowhere in `pipelex-server` — yet it is declared in this SDK, in `@pipelex/sdk`, and in `pipelex-app`, where run-history progress dots are gated on it and have therefore never rendered. Retiring it here alone would break the parity invariant this package is built on, so the decision belongs to whoever owns the run wire contract: `../wip/inbox/2026-08-25-workspace-pipe-statuses-dead-field-in-three-clients.md`.
 
 Considered and declined: guarding `iterate_methods` against a `next_cursor` of `""`, which would let a page double-yield. The adversarial pass demonstrated the mechanism and then confirmed the case is unreachable, since the platform's cursor is a base64 `LastEvaluatedKey`. That is the impossible-scenario defensiveness this plan set out to avoid.
+
+Cubic's pass on `cb391c9` reported four more. Two were real:
+
+- **`docs/architecture.md` documented an API that does not exist.** The hosted-run-extensions section contrasted `method_id` with "`build_inputs(method_id=…)` and `prepare_inputs`, which are client-side sugar that resolves an id to inline files". Neither helper accepts a `method_id`: `build_inputs` takes a `BuildInputsRequest` of `files` / `pipe_ref` / `format` / `explicit`, `prepare_inputs` takes `files` / `pipe_ref` / `inputs`, and catalog-id resolution for input preparation is recorded as deferred in the 0.5.0 changelog. A reader following that sentence gets a `TypeError`. The contrast it wanted to draw is real, so the bullet now draws it truthfully. This is exactly the class of untrue claim Phase 5 set out to remove from this file, in a section Phase 4 added.
+- **This tracker recorded the wrong `mthds` floor.** Phase 0 wrote `>=0.8.1`; `pyproject.toml` has said `>=0.8.2` since `bc17c07`, which is an ancestor of this branch's base — so the floor was already 0.8.2 when the preflight ran, and the number was wrong the day it was written.
+
+Two were not worth a commit:
+
+- **Adding this branch's own review-notes file to the sdist inventory in `wip/pr-14-review-notes.md`.** That listing is `tar -tzf` output captured from a build made before the notes file existed. Extending it changes nothing about the finding it supports — that the sdist ships internal planning documents — or about what someone picking the item up would do.
+- **The counts in the completion narrative above ("two page-ceiling tests", "two hardcoded counts").** The no-hardcoded-counts rule exists because a live inventory drifts: it "creates diff churn, goes stale silently, and adds no value". None of that applies to a closed record of a finished review round, which gains no members and cannot go stale. The rule targets counting things that are still moving.
 
 ## Known gaps left open on purpose
 
