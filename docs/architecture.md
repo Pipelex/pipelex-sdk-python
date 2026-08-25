@@ -128,7 +128,7 @@ These poll GETs go through `_send_or_unreachable`, so a transport failure surfac
 
 ## `validate` override (Pipelex-API presentation + sources)
 
-The protocol `validate` is **overridden** (not inherited) to add the three Pipelex-API extensions the bare protocol route doesn't carry, while keeping the inherited protocol error regime (a no-verdict non-2xx surfaces as `httpx.HTTPStatusError`, not `ApiResponseError` — the verdict itself is always a 200 discriminated on `is_valid`):
+The protocol `validate` is **overridden** (not inherited) to add the Pipelex-API extensions the bare protocol route doesn't carry, while keeping the inherited protocol error regime (a no-verdict non-2xx surfaces as `httpx.HTTPStatusError`, not `ApiResponseError` — the verdict itself is always a 200 discriminated on `is_valid`):
 
 - **Markdown render is always injected.** `validate(...)` adds `"markdown"` to the `render` list (de-duplicated, caller tokens first) so both a valid `PipelexValidationReport` and a produced `PipelexInvalidReport` carry `rendered_markdown`. Unknown render tokens are server-side lenient-ignored.
 - **`mthds_sources`** is a named parameter (parallel to `mthds_contents`) threaded onto each diagnostic's `source`; sent only when provided.

@@ -116,12 +116,15 @@ class TestClientPaging:
         """The backstop raises rather than returning: a truncated list is the bug paging removed."""
         mocker.patch("pipelex_sdk.client._MAX_LIST_PAGES", 2)
         pages = [wire_response(200, json_body={"items": [_method(f"m{index}")], "next_cursor": f"c{index}"}) for index in range(5)]
-        patch_send(api_client, *pages)
+        send = patch_send(api_client, *pages)
 
         with pytest.raises(PagingNotTerminatingError) as exc_info:
             asyncio.run(_drain_methods(api_client))
 
         assert exc_info.value.page_limit == 2
+        # The raise lands ON the ceiling, not one page past it — otherwise a loosened
+        # comparison would still satisfy `page_limit`, which only echoes the constant.
+        assert send.call_count == 2
 
     def test_iterate_runs_stops_on_an_empty_page(
         self,
@@ -178,12 +181,13 @@ class TestClientPaging:
             wire_response(200, json_body={"items": [_run("r2")], "next_cursor": "c2"}),
             wire_response(200, json_body={"items": [_run("r1")], "next_cursor": "c1"}),
         ]
-        patch_send(api_client, *cycle)
+        send = patch_send(api_client, *cycle)
 
         with pytest.raises(PagingNotTerminatingError) as exc_info:
             asyncio.run(_drain_runs(api_client, "m1"))
 
         assert exc_info.value.page_limit == 4
+        assert send.call_count == 4
 
     def test_iterate_runs_stops_on_an_unchanged_cursor_without_re_yielding(
         self,

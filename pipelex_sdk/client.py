@@ -392,7 +392,8 @@ class PipelexAPIClient(MthdsAPIClient):
         Raises:
             PipelineExecuteTimeoutError: The blocking request hit the hosted gateway's ~30s
                 synchronous ceiling — use `start_and_wait` (or `start` + `wait_for_result`).
-            PipelineRequestError: `extra` carries a protocol arg or a hosted arg.
+            PipelineRequestError: `extra` carries a protocol arg or a hosted arg, or `method_id`
+                is present and is not a string.
             RunStillRunningError: The server answered 202 (the protocol's optional async
                 degrade) — the run continues server-side; resume by `pipeline_run_id`.
             httpx.HTTPStatusError: Any other non-2xx response (the inherited regime).
@@ -443,7 +444,8 @@ class PipelexAPIClient(MthdsAPIClient):
         behavior.
 
         Raises:
-            PipelineRequestError: `extra` carries a protocol arg or a hosted arg.
+            PipelineRequestError: `extra` carries a protocol arg or a hosted arg, or `method_id`
+                is present and is not a string.
             RunLifecycleUnavailableError: The configured server has no run store.
         """
         try:
@@ -477,7 +479,7 @@ class PipelexAPIClient(MthdsAPIClient):
         means no verdict could be produced (request shape, auth, server fault) and surfaces as
         `httpx.HTTPStatusError` (the inherited protocol error regime).
 
-        This override differs from the inherited protocol `validate` in three Pipelex-API ways:
+        This override differs from the inherited protocol `validate` in these Pipelex-API ways:
         it always injects `render: ["markdown"]` (so both valid and invalid verdicts carry
         `rendered_markdown`), it accepts `mthds_sources` as a named parameter, and it carries
         the `views` opt-in for the server's structured views.
