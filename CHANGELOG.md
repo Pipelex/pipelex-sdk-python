@@ -1,5 +1,34 @@
 # Changelog
 
+## [v0.6.0] - 2026-08-25
+
+### Added
+
+- **Paginated catalog surface**: Introduced `iterate_methods` and `iterate_runs` async generators that follow pagination cursors to fetch entire catalogs without silent truncation, backed by new product models (`MethodPage`, `MethodSummary`, `RunPage`, `RunDetail`, `RunErrorReport`, `MethodFile`). A runaway page backstop raises the new `PagingNotTerminatingError` instead of looping forever on a cursor that cycles across non-empty pages.
+- **Run details**: Added `get_run_detail(run_id)` to fetch a single run's execution details, including `mthds_contents` and `inputs`, which are excluded from list views for performance.
+- **Validation views & typed reports**: Added a `views` parameter to `validate` and `validate_files` for opt-in structured views (e.g. `VALIDATION_VIEW_INPUT_FORM`), and extended `PipelexValidationReport` with typed `warnings`, `liftable_pipes`, and `input_form` fields.
+- **Structured repair proposals**: Added `SuggestedFix` and a fix-operation vocabulary (`FixOpKind`, `FixSafety`, etc.) to `ValidationErrorItem`, along with a new `missing_pipe_code` field.
+- **Method file parsers**: Added `parse_method_files` and `serialize_method_files` to convert custom Python source files to and from the platform's at-rest catalog string format.
+- **Typed `method_id`**: `execute`, `start`, and `start_and_wait` now accept `method_id` as a first-class, typed keyword parameter.
+
+### Changed
+
+- `list_methods` and `list_runs` now return page envelopes (`MethodPage` and `RunPage`) instead of bare arrays, with `q`, `limit`, and `cursor` query parameters forwarded based on presence rather than truthiness. (Breaking)
+- `PipelineRun.method_id` and `pipe_code` are now nullable to accurately reflect platform behavior for ad-hoc runs and dynamic pipes. (Breaking)
+- `MethodData.python` is now a typed `list[MethodFile]` instead of a raw string, converted automatically at the client boundary. (Breaking)
+- `delete_method` now returns a `MethodDeletionAccepted` object instead of `None`, reflecting that deletion is an asynchronous cascade rather than an immediate synchronous action. (Breaking)
+- The `extra` parameter on run methods now rejects `method_id`; it must be passed via the dedicated named parameter, and passing a non-string `method_id` raises a `PipelineRequestError` at the client boundary rather than delegating the failure to the server. (Breaking)
+- Bumped the `mthds` dependency floor from `>=0.8.1` to `>=0.8.2`.
+- **Linting & tooling**: Bumped the `ruff` dev dependency to `0.16.4` to match the version the VS Code extension bundles, converted `pyproject.toml` selector lists to rule names instead of codes, and explicitly ignored `too-many-statements-in-try-clause`.
+
+### Fixed
+
+- **Pagination crash**: Fixed a critical bug where `list_methods` and `list_runs` crashed against the deployed platform after the API shifted to `{items, next_cursor}` envelope responses; tests were updated to mock the correct paginated shape.
+- **Docs – parity claims**: Updated `docs/architecture.md` to honestly reflect the parity gaps with the TypeScript `@pipelex/sdk` (e.g. deferring `lint`, `format`, `codegen`) instead of claiming a surface-complete client.
+- **Docs – import paths**: Fixed a broken import path in the `README.md` quickstart (`PipelexValidationResult` is owned by this package, not `mthds`).
+- **Docs – brand attribution**: Corrected docstrings and architecture docs to attribute `TokensUsageRecord` as a Pipelex runtime extension rather than an MTHDS protocol specification.
+- **Docs – dead links**: Replaced unopenable internal repository citations in docstrings and comments with explicit, readable rule descriptions.
+
 ## [v0.5.0] - 2026-07-22
 
 ### Added

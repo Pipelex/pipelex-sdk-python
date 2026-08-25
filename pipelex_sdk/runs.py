@@ -20,8 +20,9 @@ Two things in this module are deliberately NOT owned here, and both reuse rather
 than redefine. `RunResults.pipe_output` is typed with the protocol's own
 `DictPipeOutputAbstract` wire model from `mthds` — a shared wire contract the
 `pipelex` runtime also builds on, not a lifecycle concept. `TokensUsageRecord`
-mirrors a runtime wire contract specified in the MTHDS protocol spec; this SDK
-follows that shape, it does not define it.
+mirrors the runtime's own record: inference accounting is a Pipelex runtime
+extension the MTHDS Protocol does not model, so the hosted API is what pins that
+wire contract; this SDK follows the shape, it does not define it.
 
 Wire contract mirrors `pipelex-platform`:
     POST /v1/start                           -> RunResultStart   (start, 202)
@@ -125,10 +126,11 @@ class RunRead(RunPublic):
 class TokensUsageRecord(BaseModel):
     """One inference call's token usage — the client-facing wire record.
 
-    Mirrors the runtime's `TokensUsageRecord`, specified in
-    `docs/specs/pipelex-mthds-protocol.md#tokensusage-records-on-run-artifacts`. The same
-    shape rides both surfaces: the durable `tokens_usages.json` artifact that the hosted
-    results route relays, and the blocking execute response's `pipe_output.tokens_usages`.
+    Mirrors the runtime's `TokensUsageRecord`. Inference accounting is a Pipelex runtime
+    extension — the MTHDS Protocol does not model it — so the hosted API is what pins this
+    wire contract. The same shape rides both surfaces: the durable `tokens_usages.json`
+    artifact that the hosted results route relays, and the blocking execute response's
+    `pipe_output.tokens_usages`.
 
     Every field is optional and the model is extension-open **on purpose**. A record the
     current runtime emits always carries the full key set (a field with no value is an

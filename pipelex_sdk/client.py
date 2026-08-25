@@ -23,7 +23,7 @@ import os
 import re
 from time import monotonic
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 from mthds.protocol.exceptions import PipelineRequestError
@@ -37,6 +37,7 @@ from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
     MissingMainStuffError,
+    PagingNotTerminatingError,
     PipelineExecuteTimeoutError,
     RunFailedError,
     RunLifecycleUnavailableError,
@@ -55,11 +56,16 @@ from pipelex_sdk.product_models import (
     Membership,
     MembershipsResponse,
     MethodData,
+    MethodDeletionAccepted,
+    MethodPage,
+    MethodSummary,
     PipelexApiKeyCreated,
     PipelexApiKeyList,
     PipelineRun,
     PlanView,
     ResolvedStorageUrl,
+    RunDetail,
+    RunPage,
     SubscriptionResponse,
     UploadedFile,
     UserProfile,
@@ -79,6 +85,8 @@ from pipelex_sdk.upload import upload_file as _upload_file_impl
 from pipelex_sdk.validation_models import PipelexValidationResultAdapter, ValidationErrorItem
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mthds.protocol.models import RunResultStart
     from mthds.protocol.pipe_output import VariableMultiplicity
     from mthds.protocol.pipeline_inputs import PipelineInputs
@@ -105,6 +113,12 @@ _RUNS = "runs"
 DEFAULT_API_BASE_URL = "https://api.pipelex.com"
 
 _POLL_REQUEST_TIMEOUT_SECONDS = 30.0  # single status/result/product GETs; the hosted gateway caps responses at ~30s.
+
+# A runaway backstop for both paged-list iterators, set far beyond any real catalog — never a
+# coverage cap. Reaching it means the server kept minting cursors, which is a fault to raise on,
+# not a limit to truncate at. It is what bounds a cursor that CYCLES (`c1 -> c2 -> c1`) over
+# non-empty pages: neither iterator's adjacent-cursor check sees a non-adjacent repeat.
+_MAX_LIST_PAGES: int = 10_000
 _DEFAULT_DEGRADED_RETRY_SECONDS = 5  # matches the platform's `_DEGRADE_RETRY_AFTER_SECONDS`.
 
 # The hosted gateway caps synchronous requests at ~30s. A blocking-`execute` failure at/after
@@ -124,6 +138,18 @@ _BARE_RUNNER_IMPLEMENTATION = "pipelex-api"
 # `validate` always asks the Pipelex API for the Markdown view so both a valid result and a
 # produced validation-error verdict carry `rendered_markdown`; callers may add more tokens.
 _VALIDATE_MARKDOWN_RENDER_FORMAT = "markdown"
+
+# The HOSTED API's own run args — the layer-3 extensions this client names itself, on top of
+# the MTHDS Protocol's basic run args. They are named parameters here and travel to the base
+# client through its generic `extra` passthrough, which is exactly the layering: the protocol
+# client merges them into the body without knowing what they mean.
+#
+# Reserved on `extra` for the same reason the protocol args are: one argument must not arrive
+# by two paths with different validation. The guard is deliberately PER LAYER — it lives here
+# and must never be pushed down into `mthds`, because a protocol client talking to another
+# vendor's server has no business rejecting that vendor's arguments. This is the layered
+# extension policy: a hosted client types its own platform's arguments and guards them per layer.
+_HOSTED_RUN_ARGS: frozenset[str] = frozenset({"method_id"})
 
 
 class MthdsFile(BaseModel):
@@ -150,7 +176,9 @@ class PipelexAPIClient(MthdsAPIClient):
       durable polling extension (added in Phase 2).
     - **product** (`/v1/me`, `/v1/methods`, `/v1/billing/*`, …) — the hosted product
       surface (added in Phase 3), reached through `_request_product` so callers branch
-      on the structured `ApiResponseError.code`, not the HTTP status.
+      on the structured `ApiResponseError.code`, not the HTTP status. The two list routes
+      are paged: `list_methods` / `list_runs` answer one `{items, next_cursor}` page, and
+      `iterate_methods` / `iterate_runs` follow the cursors for the whole catalog.
 
     Construction is Pipelex-only — it never reads the `mthds` resolver (`MTHDS_API_KEY` /
     `MTHDS_BASE_URL`, `~/.mthds/config`), whose values are a credential pair for whatever
@@ -323,6 +351,8 @@ class PipelexAPIClient(MthdsAPIClient):
         output_multiplicity: VariableMultiplicity | None = None,
         dynamic_output_concept_ref: str | None = None,
         extra: dict[str, Any] | None = None,
+        *,
+        method_id: str | None = None,
     ) -> PipelexExecuteResult:
         """Execute a method synchronously and wait for its completion — `POST /v1/execute`.
 
@@ -330,7 +360,8 @@ class PipelexAPIClient(MthdsAPIClient):
         resolved `.main_stuff` accessor, so a blocking result reads its output the same way as a
         durable one (`result.main_stuff`) instead of digging through `pipe_output`.
 
-        Identical to the inherited protocol `execute`, except a failure consistent with the
+        Identical to the inherited protocol `execute`, except for two things. First, `method_id`
+        — the hosted platform's own run arg (see below). Second, a failure consistent with the
         hosted gateway's ~30s synchronous ceiling — a gateway `503`/`504`, or a client-side
         request timeout, after at least ~28s have elapsed — is translated into a clear
         `PipelineExecuteTimeoutError` pointing at the durable start+poll path, matching the JS
@@ -338,9 +369,31 @@ class PipelexAPIClient(MthdsAPIClient):
         (from the inherited `execute`), and every other non-2xx keeps the inherited
         `httpx.HTTPStatusError` regime (consistent with the other inherited protocol routes).
 
+        Args:
+            pipe_code: The code identifying the pipe to execute.
+            mthds_contents: List of MTHDS bundle contents to load.
+            inputs: Inputs passed to the method.
+            output_name: Name of the output slot to write to.
+            output_multiplicity: Output multiplicity setting.
+            dynamic_output_concept_ref: Override for the dynamic output concept ref.
+            extra: Server-specific extension args this client does not know about, merged into
+                the request body as top-level properties. Protocol args and this client's own
+                hosted args (`method_id`) must be passed as named parameters, not through
+                `extra` (raises `PipelineRequestError`).
+            method_id: A stored method's hosted catalog id (`mt_…`) — a pure PASS-THROUGH the
+                platform resolves against the org's catalog; nothing is expanded client-side,
+                and it is meaningless off-platform (an open-source runner answers a `422`
+                naming the key). Alone, the platform resolves and runs the stored method's
+                source. Alongside `mthds_contents`, the inline source is what RUNS (precedence)
+                and the id is recorded as run-history linkage on the Run row — the index key
+                `GET /v1/runs?method_id=` queries, so a run started without it is absent from
+                its method's history permanently. An empty string is treated as absent.
+
         Raises:
             PipelineExecuteTimeoutError: The blocking request hit the hosted gateway's ~30s
                 synchronous ceiling — use `start_and_wait` (or `start` + `wait_for_result`).
+            PipelineRequestError: `extra` carries a protocol arg or a hosted arg, or `method_id`
+                is present and is not a string.
             RunStillRunningError: The server answered 202 (the protocol's optional async
                 degrade) — the run continues server-side; resume by `pipeline_run_id`.
             httpx.HTTPStatusError: Any other non-2xx response (the inherited regime).
@@ -354,7 +407,7 @@ class PipelexAPIClient(MthdsAPIClient):
                 output_name=output_name,
                 output_multiplicity=output_multiplicity,
                 dynamic_output_concept_ref=dynamic_output_concept_ref,
-                extra=extra,
+                extra=_merge_hosted_run_extensions(extra, method_id),
             )
         except (httpx.HTTPStatusError, httpx.TimeoutException) as exc:
             elapsed_seconds = monotonic() - started_at
@@ -377,14 +430,23 @@ class PipelexAPIClient(MthdsAPIClient):
         output_multiplicity: VariableMultiplicity | None = None,
         dynamic_output_concept_ref: str | None = None,
         extra: dict[str, Any] | None = None,
+        *,
+        method_id: str | None = None,
     ) -> RunResultStart:
         """Start a method asynchronously — `POST /v1/start` (202: `pipeline_run_id` only).
 
-        Identical to the inherited protocol `start`, except a bare-runner missing-route 404
-        (no run store) is translated into a clear `RunLifecycleUnavailableError` instead of a
-        raw `httpx.HTTPStatusError` — matching the JS SDK and letting `start_and_wait` self-heal
-        to the blocking-execute fallback. The platform's structured 404s (run not found) keep
-        their normal `httpx.HTTPStatusError` behavior.
+        Identical to the inherited protocol `start`, except for `method_id` — the hosted
+        platform's own run arg, documented on `execute` and carrying the same semantics here —
+        and that a bare-runner missing-route 404 (no run store) is translated into a clear
+        `RunLifecycleUnavailableError` instead of a raw `httpx.HTTPStatusError`, matching the JS
+        SDK and letting `start_and_wait` self-heal to the blocking-execute fallback. The
+        platform's structured 404s (run not found) keep their normal `httpx.HTTPStatusError`
+        behavior.
+
+        Raises:
+            PipelineRequestError: `extra` carries a protocol arg or a hosted arg, or `method_id`
+                is present and is not a string.
+            RunLifecycleUnavailableError: The configured server has no run store.
         """
         try:
             return await super().start(
@@ -394,7 +456,7 @@ class PipelexAPIClient(MthdsAPIClient):
                 output_name=output_name,
                 output_multiplicity=output_multiplicity,
                 dynamic_output_concept_ref=dynamic_output_concept_ref,
-                extra=extra,
+                extra=_merge_hosted_run_extensions(extra, method_id),
             )
         except httpx.HTTPStatusError as exc:
             self._raise_if_lifecycle_unavailable(exc.response, str(exc.request.url))
@@ -407,6 +469,7 @@ class PipelexAPIClient(MthdsAPIClient):
         allow_signatures: bool = False,
         mthds_sources: list[str] | None = None,
         render: list[str] | None = None,
+        views: list[str] | None = None,
     ) -> PipelexValidationResult:
         """Parse, validate, and dry-run an MTHDS bundle — `POST /v1/validate`.
 
@@ -416,9 +479,10 @@ class PipelexAPIClient(MthdsAPIClient):
         means no verdict could be produced (request shape, auth, server fault) and surfaces as
         `httpx.HTTPStatusError` (the inherited protocol error regime).
 
-        This override differs from the inherited protocol `validate` in two Pipelex-API ways:
+        This override differs from the inherited protocol `validate` in these Pipelex-API ways:
         it always injects `render: ["markdown"]` (so both valid and invalid verdicts carry
-        `rendered_markdown`), and it accepts `mthds_sources` as a named parameter.
+        `rendered_markdown`), it accepts `mthds_sources` as a named parameter, and it carries
+        the `views` opt-in for the server's structured views.
 
         Args:
             mthds_contents: MTHDS contents to load (always a list, even for one file).
@@ -428,15 +492,24 @@ class PipelexAPIClient(MthdsAPIClient):
                 `source: null`). The server 422s a length mismatch.
             render: Optional Pipelex-API presentation hints; `"markdown"` is always added.
                 Unknown tokens are server-side lenient-ignored (never a 422).
+            views: Optional opt-in for the server's structured views. `input_form` — named by
+                `VALIDATION_VIEW_INPUT_FORM` — is the only token today; unknown tokens are
+                server-side lenient-ignored (never a 422). Unlike `render`, the list is sent
+                **verbatim**: nothing is injected and nothing is de-duplicated, and an explicit
+                `[]` is sent as `[]`. Left at `None` the key is not sent at all, which is what
+                keeps the default response byte-identical for consumers that discard views.
 
         Returns:
             The 200-diagnostic union: `PipelexValidationReport` (`is_valid: true`) or
             `PipelexInvalidReport` (`is_valid: false`, with `validation_errors`), each
-            carrying `rendered_markdown`.
+            carrying `rendered_markdown`. A valid report also carries `warnings` and
+            `liftable_pipes`, plus `input_form` when `views` asked for it.
         """
         extra: dict[str, Any] = {"render": _with_validate_markdown_render(render)}
         if mthds_sources is not None:
             extra["mthds_sources"] = mthds_sources
+        if views is not None:
+            extra["views"] = views
         # Reuse the inherited transport seam (`_post_validate`) for body-building + the wire call,
         # then parse the 200-diagnostic body into this SDK's Pipelex-branded narrowing. The base's
         # own `validate` parses the same body into the neutral `mthds` `ValidationResult`.
@@ -448,12 +521,20 @@ class PipelexAPIClient(MthdsAPIClient):
         files: list[MthdsFile],
         allow_signatures: bool = False,
         render: list[str] | None = None,
+        views: list[str] | None = None,
     ) -> PipelexValidationResult:
         """Validate paired MTHDS files while preserving URI attribution for diagnostics.
 
         Decomposes the files into the low-level `validate(...)` payload. When any file carries
         a URI, every content gets a parallel source label (a deterministic `inline://` label
         for the ones without), so the server never sees a length-mismatched `mthds_sources`.
+
+        Args:
+            files: The MTHDS files to validate, each content plus an optional provenance URI.
+            allow_signatures: Tolerate unimplemented pipe signatures (strict by default).
+            render: Optional Pipelex-API presentation hints, threaded to `validate`.
+            views: Optional structured-view opt-in, threaded to `validate` unchanged — see
+                `validate` for the semantics.
 
         Raises:
             PipelineRequestError: If `files` is empty.
@@ -472,7 +553,7 @@ class PipelexAPIClient(MthdsAPIClient):
         else:
             mthds_sources = None
 
-        return await self.validate(mthds_contents, allow_signatures, mthds_sources, render)
+        return await self.validate(mthds_contents, allow_signatures, mthds_sources, render, views)
 
     # ── Hosted extension: durable run lifecycle (NOT part of the protocol) ──
     #
@@ -615,6 +696,8 @@ class PipelexAPIClient(MthdsAPIClient):
         dynamic_output_concept_ref: str | None = None,
         extra: dict[str, Any] | None = None,
         wait_options: WaitForResultOptions | None = None,
+        *,
+        method_id: str | None = None,
     ) -> RunResults:
         """Start a run and wait for its result — the whole lifecycle in one call, self-healing
         across hosted and bare runners.
@@ -628,6 +711,10 @@ class PipelexAPIClient(MthdsAPIClient):
         field a compliant bare runner may omit). Such a runner raises `RunLifecycleUnavailableError`
         from `start`, BEFORE any run is created, so the blocking fallback cannot double-run; the
         negative is cached so later calls skip the durable attempt.
+
+        `method_id` — the hosted platform's own run arg, documented on `execute` — is forwarded
+        on BOTH paths. Dropping it on the blocking fallback would turn a server-side 422 that
+        names the key into a silently different run.
 
         Raises:
             RunFailedError: If the run reaches a terminal status other than COMPLETED.
@@ -643,6 +730,7 @@ class PipelexAPIClient(MthdsAPIClient):
                     output_multiplicity=output_multiplicity,
                     dynamic_output_concept_ref=dynamic_output_concept_ref,
                     extra=extra,
+                    method_id=method_id,
                 )
             except RunLifecycleUnavailableError:
                 self._lifecycle_available = False
@@ -654,6 +742,7 @@ class PipelexAPIClient(MthdsAPIClient):
                     output_multiplicity=output_multiplicity,
                     dynamic_output_concept_ref=dynamic_output_concept_ref,
                     extra=extra,
+                    method_id=method_id,
                 )
             return await self.wait_for_result(started.pipeline_run_id, options=wait_options)
 
@@ -665,6 +754,7 @@ class PipelexAPIClient(MthdsAPIClient):
             output_multiplicity=output_multiplicity,
             dynamic_output_concept_ref=dynamic_output_concept_ref,
             extra=extra,
+            method_id=method_id,
         )
 
     async def _execute_blocking(
@@ -677,12 +767,15 @@ class PipelexAPIClient(MthdsAPIClient):
         output_multiplicity: VariableMultiplicity | None,
         dynamic_output_concept_ref: str | None,
         extra: dict[str, Any] | None,
+        method_id: str | None = None,
     ) -> RunResults:
         """Blocking `POST /v1/execute` adapted onto `RunResults` — the bare-runner path.
 
-        Forwards every protocol field PLUS the `extra` extension passthrough: an extension-only
-        call (`{extra}` with no pipe_code/bundle) or a vendor selector riding `extra` must survive
-        this path, not just the durable one.
+        Forwards every protocol field PLUS both extension surfaces: the hosted `method_id` and
+        the generic `extra` passthrough. An extension-only call (`{extra}` with no pipe_code) or
+        a vendor selector riding `extra` must survive this path, not just the durable one — and
+        a hosted `method_id` must reach the server here too, so a runner that cannot resolve it
+        says so instead of the client silently dropping it.
         """
         result = await self.execute(
             pipe_code=pipe_code,
@@ -692,6 +785,7 @@ class PipelexAPIClient(MthdsAPIClient):
             output_multiplicity=output_multiplicity,
             dynamic_output_concept_ref=dynamic_output_concept_ref,
             extra=extra,
+            method_id=method_id,
         )
         return _map_run_result_to_run_results(result)
 
@@ -706,10 +800,54 @@ class PipelexAPIClient(MthdsAPIClient):
         """The authenticated user's profile — `GET /v1/me`."""
         return UserProfile.model_validate(await self._request_product("GET", "me"))
 
-    async def list_methods(self) -> list[MethodData]:
-        """List the caller's saved methods — `GET /v1/methods`."""
-        result = await self._request_product("GET", "methods")
-        return [MethodData.model_validate(item) for item in result]
+    async def list_methods(self, *, q: str | None = None, limit: int | None = None, cursor: str | None = None) -> MethodPage:
+        """List one page of the caller's saved methods — `GET /v1/methods`.
+
+        Args:
+            q: Server-side case-insensitive substring match over name and description,
+                applied across the whole catalog rather than within the returned page.
+            limit: Page size. The API supplies the default and caps the maximum.
+            cursor: The `next_cursor` of the previous page, passed back opaquely.
+
+        Returns:
+            A `MethodPage` of `MethodSummary` rows, ordered by creation, newest first.
+            `next_cursor` is `None` on the last page. For the whole catalog, prefer
+            `iterate_methods`, which follows the cursors and cannot truncate.
+        """
+        query = _product_query({"q": q, "limit": limit, "cursor": cursor})
+        return MethodPage.model_validate(await self._request_product("GET", f"methods{query}"))
+
+    async def iterate_methods(self, *, q: str | None = None, limit: int | None = None) -> AsyncIterator[MethodSummary]:
+        """Yield every saved method, following the cursors — `GET /v1/methods`.
+
+        There is deliberately no `list_all_methods()`: an all-at-once helper needs a cap, and
+        a cap is the silent truncation paging was introduced to remove.
+
+        The loop keeps going **through an empty page that carries a live cursor**, because `q`
+        is a post-read filter over a bounded index slice per request, so `{items: [], next_cursor: "…"}`
+        means "keep going", not "done". It stops when `next_cursor` is `None`, and also when the
+        server hands back the cursor it was just sent — checked *before* yielding, so a stuck
+        cursor never double-counts a page.
+
+        Raises:
+            PagingNotTerminatingError: If the server never stops handing out cursors.
+        """
+        cursor: str | None = None
+        pages_seen = 0
+        while True:
+            page = await self.list_methods(q=q, limit=limit, cursor=cursor)
+            if cursor is not None and page.next_cursor == cursor:
+                # The server did not advance. Stop before yielding, or this page is counted twice.
+                return
+            for method_summary in page.items:
+                yield method_summary
+            if page.next_cursor is None:
+                return
+            pages_seen += 1
+            if pages_seen >= _MAX_LIST_PAGES:
+                msg = f"Method paging did not terminate after {_MAX_LIST_PAGES} pages; this is a server-side fault, not a coverage limit."
+                raise PagingNotTerminatingError(msg, _MAX_LIST_PAGES)
+            cursor = page.next_cursor
 
     async def get_method(self, method_id: str) -> MethodData:
         """Fetch one method by id — `GET /v1/methods/{id}`."""
@@ -725,9 +863,29 @@ class PipelexAPIClient(MthdsAPIClient):
         body = write_input.model_dump(mode="json", exclude_none=True)
         return MethodData.model_validate(await self._request_product("PUT", f"methods/{quote(method_id, safe='')}", body=body))
 
-    async def delete_method(self, method_id: str) -> None:
-        """Delete a method — `DELETE /v1/methods/{id}` (empty body)."""
-        await self._request_product("DELETE", f"methods/{quote(method_id, safe='')}")
+    async def delete_method(self, method_id: str) -> MethodDeletionAccepted:
+        """Erase a method and everything it produced — `DELETE /v1/methods/{id}`.
+
+        **Asynchronous, and the return value says so.** The platform answers `202` the moment it
+        has claimed the method and terminated its in-flight workflows; the rest of the cascade
+        (runs, events, S3 objects) is enqueued. So a returned `MethodDeletionAccepted` means
+        "accepted", never "gone" — completion is the method's row disappearing from
+        `list_methods`, not any field of the acceptance body. Until then the row stays listed
+        with a `deletion_state`, which is what lets a UI render it as "Deleting…", while
+        `get_method` refuses it with a `409`.
+
+        A double-clicked delete is safe: the claim is a conditional write, so the second call is
+        an `ApiResponseError` (`409 conflict`) rather than a second cascade over the same runs.
+        An unknown or foreign-org id is a `404`.
+
+        Args:
+            method_id: The method to erase.
+
+        Returns:
+            The platform's acceptance — `method_id`, the `deletion_state` the cascade started
+            in, and the `deletion_job_id` a caller can log or correlate.
+        """
+        return MethodDeletionAccepted.model_validate(await self._request_product("DELETE", f"methods/{quote(method_id, safe='')}"))
 
     async def list_memberships(self) -> MembershipsResponse:
         """The caller's org memberships + active-org feature flags — `GET /v1/organizations/memberships`."""
@@ -865,10 +1023,89 @@ class PipelexAPIClient(MthdsAPIClient):
         """
         return await _prepare_inputs_impl(self, files=files, pipe_ref=pipe_ref, inputs=inputs)
 
-    async def list_runs(self, method_id: str) -> list[PipelineRun]:
-        """List a method's runs — `GET /v1/runs?method_id={methodId}`."""
-        result = await self._request_product("GET", f"{_RUNS}?method_id={quote(method_id, safe='')}")
-        return [PipelineRun.model_validate(item) for item in result]
+    async def list_runs(
+        self,
+        method_id: str,
+        *,
+        created_from: str | None = None,
+        created_to: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> RunPage:
+        """List one page of a method's runs — `GET /v1/runs?method_id={methodId}`.
+
+        Args:
+            method_id: The method whose runs to list.
+            created_from: Inclusive lower bound on creation, an **instant**: ISO-8601 with a
+                UTC offset. These are index key conditions rather than filters, so a bare date
+                or a naive timestamp is a platform `400` surfaced as `ApiResponseError`.
+            created_to: Inclusive upper bound, same instant-only rule.
+            limit: Page size. The API supplies the default and caps the maximum.
+            cursor: The `next_cursor` of the previous page, passed back opaquely.
+
+        Returns:
+            A `RunPage` of `PipelineRun` rows. For the whole history, prefer `iterate_runs`.
+
+        Raises:
+            ApiResponseError: On any non-2xx. Note that every `/v1/runs*` product route sits
+                behind the platform's surface-access gate, which for API-key auth demands the
+                `ff_api_keys` feature flag and fails closed — so a `403` here means "flag", not
+                "wrong key".
+        """
+        query = _product_query({"method_id": method_id, "created_from": created_from, "created_to": created_to, "limit": limit, "cursor": cursor})
+        return RunPage.model_validate(await self._request_product("GET", f"{_RUNS}{query}"))
+
+    async def iterate_runs(
+        self,
+        method_id: str,
+        *,
+        created_from: str | None = None,
+        created_to: str | None = None,
+        limit: int | None = None,
+    ) -> AsyncIterator[PipelineRun]:
+        """Yield every run of a method, following the cursors — `GET /v1/runs`.
+
+        The same loop as `iterate_methods` with one deliberate difference: an **empty page ends
+        it**. The date bounds are index key conditions rather than a post-read filter, so a run
+        page is never empty-with-a-cursor. The difference is in the server, not in the client.
+
+        The page ceiling applies here too. The empty-page stop only catches a server minting
+        fresh cursors while returning *nothing*; a cursor that cycles across two or more values
+        while every page is non-empty (`c1 → c2 → c1`) trips neither that check nor the
+        adjacent-cursor one, and would loop forever re-yielding the same runs. The ceiling is
+        the cheap guard against the whole family — tracking every cursor seen would cost
+        unbounded memory for the same protection.
+
+        Raises:
+            PagingNotTerminatingError: If the server never stops handing out cursors.
+        """
+        cursor: str | None = None
+        pages_seen = 0
+        while True:
+            page = await self.list_runs(method_id, created_from=created_from, created_to=created_to, limit=limit, cursor=cursor)
+            if cursor is not None and page.next_cursor == cursor:
+                # The server did not advance. Stop before yielding, or this page is counted twice.
+                return
+            if not page.items:
+                return
+            for pipeline_run in page.items:
+                yield pipeline_run
+            if page.next_cursor is None:
+                return
+            pages_seen += 1
+            if pages_seen >= _MAX_LIST_PAGES:
+                msg = f"Run paging did not terminate after {_MAX_LIST_PAGES} pages; this is a server-side fault, not a coverage limit."
+                raise PagingNotTerminatingError(msg, _MAX_LIST_PAGES)
+            cursor = page.next_cursor
+
+    async def get_run_detail(self, run_id: str) -> RunDetail:
+        """Fetch one run record with what it executed — `GET /v1/runs/{id}`.
+
+        Distinct from the two lifecycle reads: `get_run_status` polls `/status`, `get_run_result`
+        fetches `/results`. This is the catalog-style record, and the only read that carries
+        `mthds_contents` and `inputs`.
+        """
+        return RunDetail.model_validate(await self._request_product("GET", f"{_RUNS}/{quote(run_id, safe='')}"))
 
     async def update_run(self, run_id: str, update_input: UpdateRunInput) -> None:
         """Patch a run's status (admin/manual) — `PUT /v1/runs/{id}` (empty body)."""
@@ -894,6 +1131,52 @@ class PipelexAPIClient(MthdsAPIClient):
 _KNOWN_RUN_STATUS_NAMES: frozenset[str] = frozenset(RunStatus.__members__)
 
 
+def _merge_hosted_run_extensions(extra: dict[str, Any] | None, method_id: object) -> dict[str, Any] | None:
+    """Fold the hosted API's own run args into the generic `extra` passthrough handed to the base client.
+
+    This is the seam between layer 3 and layer 2: `method_id` is a named parameter on this
+    client (it is the hosted platform's argument, so this client must type it), and it reaches
+    the wire as a top-level body property through the protocol client's extension mechanism —
+    which merges it without knowing what it means. See `_HOSTED_RUN_ARGS`.
+
+    A **non-string** `method_id` is refused here rather than dropped or forwarded. A published
+    client validates its request-option types at its own boundary, so that one wrong value gets
+    one answer: a bare truthiness check would silently drop the falsy wrong types (`0`, `[]`)
+    and forward the truthy ones (`123`, `["mt_1"]`) to a server `422` — a different partition of
+    wrong values than the JS client makes for the same argument on the same wire.
+
+    An absent or empty `method_id` still contributes nothing: `method_id=""` selects no method
+    and links no run, so it is not sent and does not satisfy the base client's "something to
+    run" precondition, and neither does `None`. `None` is returned for an empty result, leaving
+    the base's own handling of an absent `extra` untouched.
+
+    Args:
+        extra: Server-specific extension args from the caller, or None.
+        method_id: The hosted catalog id, or None. Typed `object` rather than `str | None`
+            deliberately — this helper *is* the runtime boundary, and the callers it guards
+            against are the untyped ones a type checker never sees.
+
+    Returns:
+        The merged extension mapping to hand to the base client, or None if there is nothing.
+
+    Raises:
+        PipelineRequestError: If `extra` carries a hosted arg this client names itself, or if
+            `method_id` is present and is not a string.
+    """
+    extensions: dict[str, Any] = dict(extra or {})
+    hosted_overlap = extensions.keys() & _HOSTED_RUN_ARGS
+    if hosted_overlap:
+        msg = f"extra carries hosted args {sorted(hosted_overlap)} — pass them as named parameters instead."
+        raise PipelineRequestError(msg)
+    if method_id is not None:
+        if not isinstance(method_id, str):
+            msg = f"method_id must be a string, received {type(method_id).__name__}."
+            raise PipelineRequestError(msg)
+        if method_id:
+            extensions["method_id"] = method_id
+    return extensions or None
+
+
 def _with_validate_markdown_render(render: list[str] | None) -> list[str]:
     """Ensure `"markdown"` rides the `/validate` render list, preserving order and de-duplicating.
 
@@ -907,6 +1190,19 @@ def _with_validate_markdown_render(render: list[str] | None) -> list[str]:
 def _timeout_message(run_id: str, timeout_seconds: float) -> str:
     """The shared `RunTimeoutError` message — the run survives and is resumable by id."""
     return f"Run {run_id} did not reach a terminal state within {timeout_seconds}s; it is still executing server-side and can be resumed by id."
+
+
+def _product_query(params: dict[str, str | int | None]) -> str:
+    """Build the query string of a product list route, keeping entries on **presence**.
+
+    Presence (`is not None`), never truthiness: an explicit empty `q` or cursor is bad input
+    the API should reject, not something to silently drop into an unfiltered query that reads
+    as working. Returns `""` for no parameters, otherwise a leading `?`.
+    """
+    kept = {key: value for key, value in params.items() if value is not None}
+    if not kept:
+        return ""
+    return "?" + urlencode(kept)
 
 
 def _is_gateway_timeout(exc: httpx.HTTPStatusError | httpx.TimeoutException, elapsed_seconds: float) -> bool:

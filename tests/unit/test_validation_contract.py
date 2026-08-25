@@ -1,9 +1,9 @@
 """Contract round-trip tests for the 200-diagnostic `/validate` union.
 
 Pins the Pipelex validation wire models (`pipelex_sdk.validation_models`) against the
-canonical example bodies from the protocol spec (`docs/specs/pipelex-mthds-protocol.md`,
-`## Validation report union`). Mirrors `mthds-js/tests/unit/protocol/validation-contract.test.ts`:
-parse a wire body at the boundary, discriminate on `is_valid`, and assert the narrowed arm.
+canonical example bodies of the MTHDS Protocol's validation-report union. Mirrors
+`mthds-js/tests/unit/protocol/validation-contract.test.ts`: parse a wire body at the boundary,
+discriminate on `is_valid`, and assert the narrowed arm.
 """
 
 from __future__ import annotations
@@ -14,11 +14,20 @@ import pytest
 from pydantic import ValidationError
 
 from pipelex_sdk.validation_models import (
+    DeleteKeyOp,
+    DeleteTableOp,
     DryRunStatus,
+    EnsureTableOp,
+    FixOpKind,
+    FixSafety,
+    MoveKeyOp,
     PipelexInvalidReport,
     PipelexValidationReport,
     PipelexValidationResult,
     PipelexValidationResultAdapter,
+    RemapValueOp,
+    RenameTableKeyOp,
+    SetKeyOp,
     ValidationErrorCategory,
 )
 
@@ -86,10 +95,87 @@ PENDING_SIGNATURE_BODY: dict[str, Any] = {
     "message": "Validation succeeded.",
 }
 
+# The 0.17+ valid arm: advisory warnings, the liftable inventory, and the opt-in input form.
+# The valid arm is dumped WITHOUT `exclude_none`, so an unset locator arrives as an explicit
+# `null` where the invalid arm drops the key entirely — same item type, two serializations.
+# Mirrors the JS fixture "carries advisory warnings on the VALID arm, with the valid arm's
+# explicit nulls" (`pipelex-sdk-js/tests/client.test.ts`).
+VALID_BODY_WITH_VIEWS: dict[str, Any] = {
+    **VALID_BODY,
+    "warnings": [
+        {
+            "category": "pipe_validation",
+            "message": "the `!` on `profile` is redundant — the slot is always present",
+            "error_type": "optional_force_redundant",
+            "pipe_code": "legal_contracts.summarize",
+            "concept_code": None,
+            "domain_code": None,
+            "source": None,
+            "field_path": None,
+            "field_name": None,
+            "missing_concept_code": None,
+            "missing_pipe_code": None,
+            "variable_names": None,
+            "declared_concepts": None,
+            "suggested_fix": None,
+        }
+    ],
+    "liftable_pipes": [
+        {
+            "pipe_ref": "legal_contracts.enrich",
+            "within_pipe_ref": "legal_contracts.summarize",
+            "skipped_when_absent": ["profile"],
+            "absence_source": "optional input `profile` of legal_contracts.summarize",
+        }
+    ],
+    "input_form": {"legal_contracts.summarize": {"fields": [{"name": "contract", "kind": "text"}]}},
+}
+
+# The 0.17+ invalid arm: the new `missing_pipe_code` locator and a structured repair proposal.
+INVALID_BODY_WITH_FIX: dict[str, Any] = {
+    "is_valid": False,
+    "validation_errors": [
+        {
+            "category": "pipe_validation",
+            "error_type": "PipeValidationError",
+            "message": "Sequence step references an unknown pipe.",
+            "pipe_code": "summarize",
+            "missing_pipe_code": "enrichh",
+            "source": "contracts.mthds",
+            "suggested_fix": {
+                "fix_code": "match-sequence-output",
+                "description": "Rename the step and record its output.",
+                "safety": "safe",
+                "source": "contracts.mthds",
+                "ops": [
+                    {"kind": "rename_table_key", "table_path": ["pipe", "summarize", "steps"], "key": "enrichh", "new_key": "enrich"},
+                    {"kind": "set_key", "table_path": ["pipe", "summarize"], "key": "output", "value": "legal_contracts.Summary"},
+                ],
+            },
+        }
+    ],
+    "pending_signatures": [],
+    "is_runnable": False,
+    "message": "Validation found errors.",
+}
+
 
 def _parse(body: dict[str, Any]) -> PipelexValidationResult:
     """Parse a wire body through the real discriminated-union adapter — the exact parse path `PipelexAPIClient.validate()` uses."""
     return PipelexValidationResultAdapter.validate_python(body)
+
+
+def _body_with_single_op(fix_op: dict[str, Any]) -> dict[str, Any]:
+    """An invalid body whose one error carries a `suggested_fix` holding exactly `fix_op`."""
+    return {
+        **INVALID_BODY_WITH_FIX,
+        "validation_errors": [
+            {
+                **INVALID_BODY_WITH_FIX["validation_errors"][0],
+                "suggested_fix": {**INVALID_BODY_WITH_FIX["validation_errors"][0]["suggested_fix"], "ops": [fix_op]},
+            }
+        ],
+    }
 
 
 class TestValidationContract:
@@ -163,8 +249,116 @@ class TestValidationContract:
         assert isinstance(invalid, PipelexInvalidReport)
         assert invalid.rendered_markdown is None
 
+    # ── The 0.17+ valid arm: warnings, liftable pipes, the opt-in input form ──
+
+    def test_valid_arm_carries_warnings_liftable_pipes_and_input_form(self) -> None:
+        """The 0.17+ valid-arm additions parse into typed fields, `input_form` keyed like `pipe_io_contracts`."""
+        report = _parse(VALID_BODY_WITH_VIEWS)
+        assert isinstance(report, PipelexValidationReport)
+        # Advisory items never flip the verdict.
+        assert report.is_valid is True
+        warning = report.warnings[0]
+        assert warning.category is ValidationErrorCategory.PIPE_VALIDATION
+        assert warning.error_type == "optional_force_redundant"
+        assert warning.pipe_code == "legal_contracts.summarize"
+        liftable = report.liftable_pipes[0]
+        assert liftable.pipe_ref == "legal_contracts.enrich"
+        assert liftable.within_pipe_ref == "legal_contracts.summarize"
+        assert liftable.skipped_when_absent == ["profile"]
+        assert liftable.absence_source == "optional input `profile` of legal_contracts.summarize"
+        assert report.input_form is not None
+        # Keyed exactly like `pipe_io_contracts`, and opaque on purpose.
+        assert set(report.input_form) == set(report.pipe_io_contracts)
+
+    def test_valid_arm_warning_reads_every_explicit_null_as_none(self) -> None:
+        """Every explicitly-null locator on a warning reads as `None`.
+
+        The valid arm is dumped without `exclude_none`, so an unset locator arrives as an
+        explicit `null` where the invalid arm drops the key. This is the regression guard
+        against a future "tighten to required" edit on `ValidationErrorItem`.
+        """
+        report = _parse(VALID_BODY_WITH_VIEWS)
+        assert isinstance(report, PipelexValidationReport)
+        warning = report.warnings[0]
+        assert warning.concept_code is None
+        assert warning.domain_code is None
+        assert warning.source is None
+        assert warning.field_path is None
+        assert warning.field_name is None
+        assert warning.missing_concept_code is None
+        assert warning.missing_pipe_code is None
+        assert warning.variable_names is None
+        assert warning.declared_concepts is None
+        assert warning.suggested_fix is None
+
+    def test_pre_0_52_valid_body_still_parses_with_empty_defaults(self) -> None:
+        """A body from a runner predating the fields parses: both lists empty, `input_form` None."""
+        report = _parse(VALID_BODY)
+        assert isinstance(report, PipelexValidationReport)
+        assert report.warnings == []
+        assert report.liftable_pipes == []
+        assert report.input_form is None
+
+    # ── The 0.17+ invalid arm: `missing_pipe_code` and the fix vocabulary ──
+
+    def test_invalid_arm_carries_missing_pipe_code_and_narrowable_fix_ops(self) -> None:
+        """A structured `suggested_fix` parses, and `match`-narrowing reaches each op's own members."""
+        report = _parse(INVALID_BODY_WITH_FIX)
+        assert isinstance(report, PipelexInvalidReport)
+        item = report.validation_errors[0]
+        assert item.missing_pipe_code == "enrichh"
+        fix = item.suggested_fix
+        assert fix is not None
+        assert fix.fix_code == "match-sequence-output"
+        assert fix.safety is FixSafety.SAFE
+        assert fix.safety.is_safe is True
+        assert fix.source == "contracts.mthds"
+
+        rename_op, set_op = fix.ops
+        # Narrowing is an exhaustive `match` over the op classes — the Python spelling of the
+        # JS mirror's `kind` narrowing.
+        match rename_op:
+            case RenameTableKeyOp():
+                assert rename_op.table_path == ["pipe", "summarize", "steps"]
+                assert rename_op.key == "enrichh"
+                assert rename_op.new_key == "enrich"
+            case SetKeyOp() | EnsureTableOp() | DeleteKeyOp() | DeleteTableOp() | MoveKeyOp() | RemapValueOp():
+                pytest.fail("expected a rename_table_key op")
+        match set_op:
+            case SetKeyOp():
+                assert set_op.table_path == ["pipe", "summarize"]
+                assert set_op.key == "output"
+                assert set_op.value == "legal_contracts.Summary"
+            case EnsureTableOp() | DeleteKeyOp() | DeleteTableOp() | RenameTableKeyOp() | MoveKeyOp() | RemapValueOp():
+                pytest.fail("expected a set_key op")
+
+    def test_ensure_table_op_rejects_an_empty_table_path(self) -> None:
+        """`ensure_table` addresses the table itself, so its path is never empty (artifact `minItems: 1`)."""
+        bad_body = _body_with_single_op({"kind": "ensure_table", "table_path": []})
+        with pytest.raises(ValidationError, match="table_path"):
+            PipelexValidationResultAdapter.validate_python(bad_body)
+
+    def test_unknown_fix_op_kind_is_rejected(self) -> None:
+        """An out-of-vocabulary op kind fails the whole verdict parse — the discriminator is closed."""
+        bad_body = _body_with_single_op({"kind": "invent_key", "table_path": ["pipe"], "key": "x"})
+        with pytest.raises(ValidationError, match="invent_key"):
+            PipelexValidationResultAdapter.validate_python(bad_body)
+
+    def test_fix_vocabularies_are_the_locked_sets(self) -> None:
+        """`FixSafety` and `FixOpKind` mirror the runtime's closed vocabularies (drift guard)."""
+        assert {safety.value for safety in FixSafety} == {"safe", "unsafe"}
+        assert {kind.value for kind in FixOpKind} == {
+            "set_key",
+            "ensure_table",
+            "delete_key",
+            "delete_table",
+            "rename_table_key",
+            "move_key",
+            "remap_value",
+        }
+
     def test_category_vocabulary_is_the_locked_set(self) -> None:
-        """The closed category set mirrors `conformance/.../validation_contract.py` (drift guard)."""
+        """The closed category set mirrors the locked conformance vocabulary (drift guard)."""
         assert {category.value for category in ValidationErrorCategory} == {
             "blueprint_validation",
             "pipe_factory",

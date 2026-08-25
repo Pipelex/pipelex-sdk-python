@@ -6,6 +6,7 @@ shapes (Pydantic validates on the way back, unlike the TS interfaces).
 
 import asyncio
 import json
+from typing import cast
 
 import httpx
 import pytest
@@ -14,6 +15,8 @@ from pytest_mock import MockerFixture, MockType
 from pipelex_sdk.client import PipelexAPIClient
 from pipelex_sdk.errors import ApiResponseError
 from pipelex_sdk.product_models import (
+    MethodDeletionState,
+    MethodFile,
     MethodWriteInput,
     OnboardingCurrentTool,
     OnboardingHeardFrom,
@@ -28,6 +31,19 @@ from pipelex_sdk.runs import RunStatus
 
 _BASE_URL = "http://localhost:8081"
 
+# The platform's `MethodPublic` shape: `org_id` and `created_by_user_id` are required, and
+# `python` crosses the wire as one string holding a JSON `[{name, content}]` array.
+_METHOD_BODY: dict[str, object] = {
+    "method_id": "m1",
+    "name": "M",
+    "mthds": "src",
+    "org_id": "org_1",
+    "created_by_user_id": "u1",
+    "python": "",
+    "created_at": "t",
+    "updated_at": "t",
+}
+
 
 def _response(status_code: int, *, json_body: object | None = None, content: bytes | None = None) -> httpx.Response:
     request = httpx.Request("GET", f"{_BASE_URL}/x")
@@ -36,6 +52,12 @@ def _response(status_code: int, *, json_body: object | None = None, content: byt
     if content is not None:
         return httpx.Response(status_code, content=content, request=request)
     return httpx.Response(status_code, request=request)
+
+
+def _sent_body(send: MockType) -> dict[str, object]:
+    """The decoded JSON request body of the single recorded `_send` call."""
+    content = send.call_args.kwargs["content"]
+    return cast("dict[str, object]", json.loads(content))
 
 
 class _Sent:
@@ -79,20 +101,80 @@ class TestClientProduct:
 
     # ── Methods catalog ──────────────────────────────────────────────
 
-    def test_list_methods(self, mocker: MockerFixture) -> None:
+    def test_list_methods_returns_the_page_envelope(self, mocker: MockerFixture) -> None:
+        """The route answers `{items, next_cursor}`; the rows are index projections, not full methods."""
         client = self._client()
-        methods = [{"method_id": "m1", "name": "M", "mthds": "...", "created_at": "t", "updated_at": "t"}]
-        send = self._mock_send(mocker, client, _response(200, json_body=methods))
+        page = {
+            "items": [{"method_id": "m1", "name": "M", "description": "d", "created_at": "t", "deletion_state": "pending"}],
+            "next_cursor": "c1",
+        }
+        send = self._mock_send(mocker, client, _response(200, json_body=page))
 
         result = asyncio.run(client.list_methods())
 
         assert self._sent(send).url == f"{_BASE_URL}/v1/methods"
-        assert result[0].method_id == "m1"
-        assert result[0].name == "M"
+        assert result.next_cursor == "c1"
+        assert result.items[0].method_id == "m1"
+        assert result.items[0].description == "d"
+        # A method mid-deletion stays listed, so a UI can render "Deleting…".
+        assert result.items[0].deletion_state is MethodDeletionState.PENDING
+
+    def test_list_methods_keeps_query_params_on_presence(self, mocker: MockerFixture) -> None:
+        """An explicit empty `q` is forwarded — bad input the API should reject, not something to drop."""
+        client = self._client()
+        send = self._mock_send(mocker, client, _response(200, json_body={"items": [], "next_cursor": None}))
+
+        asyncio.run(client.list_methods(q="", limit=50, cursor="c/1"))
+
+        assert self._sent(send).url == f"{_BASE_URL}/v1/methods?q=&limit=50&cursor=c%2F1"
+
+    def test_list_methods_omits_absent_query_params_entirely(self, mocker: MockerFixture) -> None:
+        client = self._client()
+        send = self._mock_send(mocker, client, _response(200, json_body={"items": [], "next_cursor": None}))
+
+        asyncio.run(client.list_methods(limit=5))
+
+        assert self._sent(send).url == f"{_BASE_URL}/v1/methods?limit=5"
+
+    def test_method_data_parses_the_new_fields_and_the_python_wire_string(self, mocker: MockerFixture) -> None:
+        """`python` is one wire string; the boundary converts it so callers never see it."""
+        client = self._client()
+        body = {**_METHOD_BODY, "description": "d", "python": '[{"name": "a.py", "content": "x = 1"}]'}
+        self._mock_send(mocker, client, _response(200, json_body=body))
+
+        method = asyncio.run(client.get_method("m1"))
+
+        assert method.org_id == "org_1"
+        assert method.created_by_user_id == "u1"
+        assert method.description == "d"
+        assert method.deletion_state is None
+        assert method.python == [MethodFile(name="a.py", content="x = 1")]
+
+    def test_method_data_reads_the_clear_sentinel_as_no_files(self, mocker: MockerFixture) -> None:
+        client = self._client()
+        self._mock_send(mocker, client, _response(200, json_body=_METHOD_BODY))
+
+        assert asyncio.run(client.get_method("m1")).python == []
+
+    def test_write_input_sends_python_three_ways(self, mocker: MockerFixture) -> None:
+        """`None` omits the key (preserve), `[]` sends the clear sentinel, a list sends the JSON text."""
+        client = self._client()
+        send = self._mock_send(mocker, client, _response(200, json_body=_METHOD_BODY))
+
+        asyncio.run(client.update_method("m1", MethodWriteInput(name="M", mthds="src")))
+        assert "python" not in _sent_body(send)
+
+        send = self._mock_send(mocker, client, _response(200, json_body=_METHOD_BODY))
+        asyncio.run(client.update_method("m1", MethodWriteInput(name="M", mthds="src", python=[])))
+        assert _sent_body(send)["python"] == ""
+
+        send = self._mock_send(mocker, client, _response(200, json_body=_METHOD_BODY))
+        asyncio.run(client.create_method(MethodWriteInput(name="M", mthds="src", python=[MethodFile(name="a.py", content="x = 1")])))
+        assert json.loads(cast("str", _sent_body(send)["python"])) == [{"name": "a.py", "content": "x = 1"}]
 
     def test_get_method_encodes_id(self, mocker: MockerFixture) -> None:
         client = self._client()
-        body = {"method_id": "a/b", "name": "M", "mthds": "...", "created_at": "t", "updated_at": "t"}
+        body = {**_METHOD_BODY, "method_id": "a/b"}
         send = self._mock_send(mocker, client, _response(200, json_body=body))
 
         asyncio.run(client.get_method("a/b"))
@@ -101,7 +183,7 @@ class TestClientProduct:
 
     def test_create_method_posts_write_body(self, mocker: MockerFixture) -> None:
         client = self._client()
-        body = {"method_id": "m1", "name": "M", "mthds": "src", "created_at": "t", "updated_at": "t"}
+        body = _METHOD_BODY
         send = self._mock_send(mocker, client, _response(200, json_body=body))
 
         asyncio.run(client.create_method(MethodWriteInput(name="M", mthds="src", input_data={"a": 1})))
@@ -113,7 +195,7 @@ class TestClientProduct:
 
     def test_update_method_puts_and_drops_absent_input_data(self, mocker: MockerFixture) -> None:
         client = self._client()
-        body = {"method_id": "m1", "name": "Renamed", "mthds": "src", "created_at": "t", "updated_at": "t"}
+        body = {**_METHOD_BODY, "name": "Renamed"}
         send = self._mock_send(mocker, client, _response(200, json_body=body))
 
         asyncio.run(client.update_method("m1", MethodWriteInput(name="Renamed", mthds="src")))
@@ -124,16 +206,24 @@ class TestClientProduct:
         # input_data is None → dropped from the wire (matches the JS undefined-drop).
         assert sent.body == {"name": "Renamed", "mthds": "src"}
 
-    def test_delete_method_tolerates_empty_204(self, mocker: MockerFixture) -> None:
-        client = self._client()
-        send = self._mock_send(mocker, client, _response(204))
+    def test_delete_method_returns_the_202_acceptance(self, mocker: MockerFixture) -> None:
+        """The erasure is asynchronous: the caller gets the CLAIM, never a "it's gone" signal.
 
-        result = asyncio.run(client.delete_method("m1"))
+        Completion is the row disappearing from `list_methods`, so the honest return value is the
+        acceptance body — a `deletion_job_id` to log or correlate, and the state it started in.
+        """
+        client = self._client()
+        body = {"method_id": "m1", "deletion_state": "pending", "deletion_job_id": "job-1"}
+        send = self._mock_send(mocker, client, _response(202, json_body=body))
+
+        accepted = asyncio.run(client.delete_method("m/1"))
 
         sent = self._sent(send)
-        assert result is None
         assert sent.method == "DELETE"
-        assert sent.url == f"{_BASE_URL}/v1/methods/m1"
+        assert sent.url == f"{_BASE_URL}/v1/methods/m%2F1"
+        assert accepted.method_id == "m1"
+        assert accepted.deletion_state is MethodDeletionState.PENDING
+        assert accepted.deletion_job_id == "job-1"
 
     # ── Organizations ────────────────────────────────────────────────
 
@@ -367,14 +457,72 @@ class TestClientProduct:
 
     def test_list_runs_encodes_query_value(self, mocker: MockerFixture) -> None:
         client = self._client()
-        runs = [{"pipeline_run_id": "r1", "method_id": "m/1", "pipe_code": "p", "status": "RUNNING", "created_at": "t"}]
-        send = self._mock_send(mocker, client, _response(200, json_body=runs))
+        page = {
+            "items": [{"pipeline_run_id": "r1", "method_id": "m/1", "pipe_code": "p", "status": "RUNNING", "created_at": "t"}],
+            "next_cursor": "c1",
+        }
+        send = self._mock_send(mocker, client, _response(200, json_body=page))
 
         result = asyncio.run(client.list_runs("m/1"))
 
         assert self._sent(send).url == f"{_BASE_URL}/v1/runs?method_id=m%2F1"
-        assert result[0].pipeline_run_id == "r1"
-        assert result[0].status is RunStatus.RUNNING
+        assert result.next_cursor == "c1"
+        assert result.items[0].pipeline_run_id == "r1"
+        assert result.items[0].status is RunStatus.RUNNING
+
+    def test_list_runs_keeps_date_bounds_and_paging_params_on_presence(self, mocker: MockerFixture) -> None:
+        client = self._client()
+        send = self._mock_send(mocker, client, _response(200, json_body={"items": [], "next_cursor": None}))
+
+        asyncio.run(client.list_runs("m1", created_from="2026-08-01T00:00:00+00:00", created_to="", limit=10, cursor="c1"))
+
+        # Instants are percent-encoded; an explicit empty bound is forwarded, not dropped.
+        assert self._sent(send).url == (
+            f"{_BASE_URL}/v1/runs?method_id=m1&created_from=2026-08-01T00%3A00%3A00%2B00%3A00&created_to=&limit=10&cursor=c1"
+        )
+
+    def test_run_row_parses_with_null_method_id_and_pipe_code(self, mocker: MockerFixture) -> None:
+        """An ad-hoc run belongs to no stored method, and a `main_pipe` run names no pipe."""
+        client = self._client()
+        row = {
+            "pipeline_run_id": "r1",
+            "method_id": None,
+            "pipe_code": None,
+            "status": "FAILED",
+            "created_at": "t",
+            "error": {"message": "boom", "error_type": "PipeExecutionError"},
+        }
+        self._mock_send(mocker, client, _response(200, json_body={"items": [row], "next_cursor": None}))
+
+        result = asyncio.run(client.list_runs("m1"))
+
+        pipeline_run = result.items[0]
+        assert pipeline_run.method_id is None
+        assert pipeline_run.pipe_code is None
+        assert pipeline_run.error is not None
+        assert pipeline_run.error.message == "boom"
+        assert pipeline_run.error.error_type == "PipeExecutionError"
+
+    def test_get_run_detail_encodes_id_and_returns_what_ran(self, mocker: MockerFixture) -> None:
+        """The detail read is the only one carrying `mthds_contents` and `inputs`."""
+        client = self._client()
+        body = {
+            "pipeline_run_id": "r/1",
+            "method_id": "m1",
+            "pipe_code": "p",
+            "status": "COMPLETED",
+            "created_at": "t",
+            "mthds_contents": ["domain = 'x'"],
+            "inputs": {"topic": "quantum"},
+        }
+        send = self._mock_send(mocker, client, _response(200, json_body=body))
+
+        detail = asyncio.run(client.get_run_detail("r/1"))
+
+        assert self._sent(send).url == f"{_BASE_URL}/v1/runs/r%2F1"
+        assert detail.mthds_contents == ["domain = 'x'"]
+        assert detail.inputs == {"topic": "quantum"}
+        assert detail.status is RunStatus.COMPLETED
 
     def test_update_run_drops_absent_finished_at_and_tolerates_empty_body(self, mocker: MockerFixture) -> None:
         client = self._client()

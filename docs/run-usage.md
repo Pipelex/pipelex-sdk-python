@@ -2,7 +2,7 @@
 
 A completed run reports what its inference calls consumed as a list of `TokensUsageRecord` objects on `RunResults`, one per inference call, in the order the calls completed. This page covers how to read them, what each field means, and the edge cases the model is deliberately shaped around.
 
-The wire shape is not this SDK's invention: it is specified in Pipelex's protocol spec, under "TokensUsage records on run artifacts", and `pipelex_sdk.runs.TokensUsageRecord` is a client-side mirror of it. `@pipelex/sdk` carries the same mirror in TypeScript. The record is a Pipelex runtime concept rather than part of the MTHDS standard — the MTHDS protocol itself says nothing about usage reporting.
+The wire shape is not this SDK's invention. Inference accounting is a Pipelex runtime extension — the MTHDS Protocol does not model it, and says nothing about usage reporting — so the hosted API is what pins the contract, and `pipelex_sdk.runs.TokensUsageRecord` is a client-side mirror of the runtime's own record. `@pipelex/sdk` carries the same mirror in TypeScript.
 
 ## Reading the records
 

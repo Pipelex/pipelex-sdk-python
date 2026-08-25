@@ -28,12 +28,17 @@ The client is **async-only** (httpx `AsyncClient`) and is an async context manag
 
 ```python
 from pipelex_sdk.client import PipelexAPIClient
+from pipelex_sdk.validation_models import VALIDATION_VIEW_INPUT_FORM
+
 
 async def main() -> None:
     async with PipelexAPIClient() as client:
         # 1. Validate an MTHDS bundle. The verdict is always returned (never raised):
         #    a 200 discriminated on `is_valid`, carrying `rendered_markdown`.
-        report = await client.validate([bundle_text])
+        #    Structured views are opt-in: asking for `input_form` here is what populates
+        #    `report.input_form` (the per-pipe input-form descriptors); omit `views` and the
+        #    request body carries no `views` key at all.
+        report = await client.validate([bundle_text], views=[VALIDATION_VIEW_INPUT_FORM])
         print(report.rendered_markdown)
         if not report.is_valid:
             return
@@ -83,9 +88,10 @@ There is no barrel import — package `__init__.py` files stay empty. Import eac
 - **Client & construction** — `from pipelex_sdk.client import PipelexAPIClient, DEFAULT_API_BASE_URL, MthdsFile`
 - **Run lifecycle types** — `from pipelex_sdk.runs import RunStatus, RunPublic, RunRead, RunResults, RunResultState, WaitForResultOptions, PollInfo`
 - **Product wire models** — `from pipelex_sdk.product_models import UserProfile, MethodData, MethodWriteInput, Membership, MembershipsResponse, SubscriptionResponse, PlanView, InvoiceView, OnboardingSubmission, UploadInput, UploadedFile, PipelineRun, ...`
-- **Typed errors** — `from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError, PipelineExecuteTimeoutError, RunFailedError, RunTimeoutError, RunLifecycleUnavailableError, RunStillRunningError`
+- **Validation verdict types** — `from pipelex_sdk.validation_models import PipelexValidationResult, PipelexValidationReport, PipelexInvalidReport, ValidationErrorItem, SuggestedFix, VALIDATION_VIEW_INPUT_FORM, ...`
+- **Typed errors** — `from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError, PipelineExecuteTimeoutError, PagingNotTerminatingError, RunFailedError, RunTimeoutError, RunLifecycleUnavailableError, RunStillRunningError, ...`
 - **Version** — `from pipelex_sdk.version import __version__`
-- **Protocol surface** (the MTHDS standard's wire types) comes from the `mthds` dependency — e.g. `from mthds.protocol.exceptions import PipelineRequestError`, `from mthds.runners.api.models import PipelexValidationResult`.
+- **Protocol surface** (the MTHDS standard's wire types) comes from the `mthds` dependency — e.g. `from mthds.protocol.exceptions import PipelineRequestError`, `from mthds.protocol.models import ValidationResult` (the neutral verdict union that `PipelexValidationResult` narrows).
 
 ## Development
 
