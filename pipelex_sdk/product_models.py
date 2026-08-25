@@ -17,11 +17,13 @@ not in `mthds`. `PipelineRun.status` reuses the run-lifecycle `RunStatus`.
 
 from __future__ import annotations
 
+import json
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_serializer, field_validator
 
+from pipelex_sdk._pydantic_utils import empty_list_factory_of
 from pipelex_sdk.runs import RunStatus
 
 # ── User profile (`/v1/me`) ─────────────────────────────────────────────
@@ -42,6 +44,88 @@ class UserProfile(BaseModel):
 # ── Methods catalog (`/v1/methods`) ──────────────────────────────────────
 
 
+class MethodDeletionState(StrEnum):
+    """Where a method is in the erasure cascade; absent on a normal method."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    FAILED = "failed"
+
+
+class MethodFile(BaseModel):
+    """One named source file of a stored method — the at-rest catalog form.
+
+    This is the shape the hosted platform persists for a method's custom PipeFunc Python:
+    a JSON `[{name, content}]` array in one wire string. It is deliberately distinct from
+    two neighbours that look similar and are not: `MthdsFile` (`client.py`) is the *validate*
+    input, content plus an optional provenance URI; `MthdsFileItem` (`build_models.py`) is
+    the *build* closure entry. Three shapes for three surfaces — do not merge them.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    #: Bundle-relative path, e.g. `"funcs/price.py"`.
+    name: str
+    #: The file's UTF-8 text content.
+    content: str
+
+
+_METHOD_FILES_ADAPTER: TypeAdapter[list[MethodFile]] = TypeAdapter(list[MethodFile])
+"""Built once at import — TypeAdapter construction is expensive."""
+
+_METHOD_FILES_SHAPE = "a JSON array of {name, content} entries"
+
+
+def _is_blank(content: str) -> bool:
+    """A file carries no source when its content is empty or whitespace-only."""
+    return not content.strip()
+
+
+def parse_method_files(source: str | None) -> list[MethodFile]:
+    """Parse the catalog wire string into method files.
+
+    A blank source (`None`, `""`, whitespace) and an empty JSON array both yield `[]`.
+    A JSON `[{name, content}]` array yields those files, with blank-content entries
+    dropped so the round-trip with `serialize_method_files` is stable.
+
+    Raises:
+        ValueError: For anything else — a non-array JSON value, an entry that is not a
+            `{name: str, content: str}` object, or unparseable text. Reached through
+            `MethodData`'s validator, this surfaces as a `pydantic.ValidationError`, the
+            same way any other malformed response body fails here.
+    """
+    if source is None or _is_blank(source):
+        return []
+
+    try:
+        parsed = json.loads(source)
+    except json.JSONDecodeError as exc:
+        msg = f"Method file source is not valid JSON; expected {_METHOD_FILES_SHAPE}."
+        raise ValueError(msg) from exc
+
+    try:
+        files = _METHOD_FILES_ADAPTER.validate_python(parsed)
+    except ValidationError as exc:
+        msg = f"Method file source must be {_METHOD_FILES_SHAPE}."
+        raise ValueError(msg) from exc
+
+    return [file for file in files if not _is_blank(file.content)]
+
+
+def serialize_method_files(files: list[MethodFile]) -> str:
+    """Serialize method files to the catalog wire string.
+
+    Blank-content entries are dropped (a zero-source file is not persisted), and an empty
+    result serializes to `""` — the platform's "no source" / "clear the field" sentinel —
+    never to the literal `"[]"`. Only `name` and `content` cross the wire; anything an
+    extension-open `MethodFile` picked up on the way in is not written back.
+    """
+    kept = [file for file in files if not _is_blank(file.content)]
+    if not kept:
+        return ""
+    return json.dumps([{"name": file.name, "content": file.content} for file in kept])
+
+
 class MethodData(BaseModel):
     """One saved method record."""
 
@@ -51,11 +135,34 @@ class MethodData(BaseModel):
     name: str
     #: The `.mthds` bundle source.
     mthds: str
+    org_id: str
+    created_by_user_id: str
+    description: str | None = None
+    deletion_state: MethodDeletionState | None = None
     input_data: dict[str, Any] | None = None
     #: Legacy persisted output spec; optional.
     pipe_output: dict[str, Any] | None = None
+    python: list[MethodFile] = Field(default_factory=empty_list_factory_of(MethodFile))
+    """The method's custom PipeFunc source files.
+
+    On the wire this is one string — the JSON text of a `[{name, content}]` array, or `""`
+    for a method with no custom Python. The validator below converts at the boundary so
+    callers never see that string."""
+
     created_at: str
     updated_at: str
+
+    @field_validator("python", mode="before")
+    @classmethod
+    def _parse_python_files(cls, value: object) -> object:
+        """Convert the catalog wire string into `MethodFile` entries.
+
+        A `str` or `None` is the wire form and goes through `parse_method_files`; anything
+        else (a list, from programmatic construction) passes through to normal validation.
+        """
+        if value is None or isinstance(value, str):
+            return parse_method_files(value)
+        return value
 
 
 class MethodWriteInput(BaseModel):
@@ -64,6 +171,67 @@ class MethodWriteInput(BaseModel):
     name: str
     mthds: str
     input_data: dict[str, Any] | None = None
+    python: list[MethodFile] | None = None
+    """The custom PipeFunc source files to write, with a deliberate three-way contract.
+
+    The write body is dumped with `exclude_none=True`, so `None` (the default) leaves the key
+    out entirely and a `PUT` **preserves** the stored Python. An empty list serializes to `""`,
+    the platform's clear sentinel, which **erases** it. A non-empty list **replaces** it."""
+
+    @field_serializer("python")
+    def _serialize_python_files(self, value: list[MethodFile] | None) -> str | None:
+        """Render the file list as the catalog wire string, leaving `None` for `exclude_none`."""
+        if value is None:
+            return None
+        return serialize_method_files(value)
+
+
+class MethodSummary(BaseModel):
+    """One row of the paged method index — `GET /v1/methods`.
+
+    Deliberately **not** a `MethodData`: no `mthds`, no `python`, no `updated_at`, because
+    none of them is in the index projection. Putting `mthds` back is exactly what restored
+    the truncation bug paging was introduced to fix. A method mid-deletion still appears
+    here — so a UI can render "Deleting…" — while `get_method` refuses it with a `409`.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    method_id: str
+    name: str
+    description: str | None = None
+    created_at: str
+    deletion_state: MethodDeletionState | None = None
+
+
+class MethodPage(BaseModel):
+    """One page of the method index — `{items, next_cursor}`.
+
+    The cursor is opaque: pass it straight back as `cursor` to get the next page, and treat
+    a `None` as the last page. There is no total by design — counting a catalog costs a full
+    scan, and no caller needs one.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    items: list[MethodSummary]
+    next_cursor: str | None = None
+
+
+class MethodDeletionAccepted(BaseModel):
+    """The `202` acceptance of `DELETE /v1/methods/{id}`.
+
+    Returned the moment the erasure is CLAIMED and handed off, not when it completes.
+    Nothing in this body means "done": completion is the method's row disappearing from
+    `list_methods`. What the body buys a caller is a claim it can log and correlate
+    (`deletion_job_id`) plus the state the cascade started in.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    method_id: str
+    deletion_state: MethodDeletionState
+    deletion_job_id: str
 
 
 # ── Organizations (`/v1/organizations`) ──────────────────────────────────
@@ -320,10 +488,11 @@ class UploadedFile(BaseModel):
     filename: str
 
 
-# ── Runs list / update (`/v1/runs`) ──────────────────────────────────────
+# ── Run records (`/v1/runs`) ─────────────────────────────────────────────
 #
 # The run-lifecycle status/results/start routes already live on the client
-# (`runs.py`); these are the remaining catalog-style list + admin-update routes.
+# (`runs.py`); these are the remaining catalog-style paged list, the single-run
+# detail read, and the admin-update route.
 
 
 class PipeStatus(StrEnum):
@@ -336,20 +505,67 @@ class PipeStatus(StrEnum):
     SKIPPED = "skipped"
 
 
+class RunErrorReport(BaseModel):
+    """A failed run's error, narrowed to the two fields a consumer may rely on.
+
+    The runner's own report is considerably more verbose; only these two are contractual.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    message: str | None = None
+    error_type: str | None = None
+
+
 class PipelineRun(BaseModel):
     """One run record in a method's run list — `GET /v1/runs?method_id=…`."""
 
     model_config = ConfigDict(extra="allow")
 
     pipeline_run_id: str
-    method_id: str
-    pipe_code: str
+    method_id: str | None = None
+    """The stored method this run is linked to, when there is one. An ad-hoc run from an
+    inline bundle belongs to no stored method, so the platform serves this as null."""
+
+    pipe_code: str | None = None
+    """The pipe that ran, when it was named. A run that let the bundle's `main_pipe` decide
+    has none to report, so the platform serves this as null."""
+
+    org_id: str | None = None
+    created_by_user_id: str | None = None
     workflow_id: str | None = None
     status: RunStatus
     result_url: str | None = None
+    error: RunErrorReport | None = None
     pipe_statuses: dict[str, PipeStatus] | None = None
     created_at: str
     finished_at: str | None = None
+
+
+class RunDetail(PipelineRun):
+    """One run read on its own — `GET /v1/runs/{id}`.
+
+    Adds the two heavy fields the list and the polled status deliberately leave out (their
+    cost scales with page size and poll rate respectively). `mthds_contents` is what the run
+    actually executed, and the only record of it: a method edited since the run no longer
+    describes what happened.
+    """
+
+    mthds_contents: list[str] | None = None
+    inputs: dict[str, Any] | None = None
+
+
+class RunPage(BaseModel):
+    """One page of a method's run list — `{items, next_cursor}`.
+
+    Same opaque-cursor contract as `MethodPage`: pass `next_cursor` straight back, and a
+    `None` means the last page.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    items: list[PipelineRun]
+    next_cursor: str | None = None
 
 
 class UpdateRunInput(BaseModel):
