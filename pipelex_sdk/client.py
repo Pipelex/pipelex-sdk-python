@@ -134,8 +134,8 @@ _VALIDATE_MARKDOWN_RENDER_FORMAT = "markdown"
 # Reserved on `extra` for the same reason the protocol args are: one argument must not arrive
 # by two paths with different validation. The guard is deliberately PER LAYER — it lives here
 # and must never be pushed down into `mthds`, because a protocol client talking to another
-# vendor's server has no business rejecting that vendor's arguments. See the workspace spec
-# `docs/specs/pipelex-platform-api.md` -> "Layered extension policy" (Rule 5).
+# vendor's server has no business rejecting that vendor's arguments. This is the layered
+# extension policy: a hosted client types its own platform's arguments and guards them per layer.
 _HOSTED_RUN_ARGS: frozenset[str] = frozenset({"method_id"})
 
 

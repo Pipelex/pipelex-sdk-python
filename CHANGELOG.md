@@ -25,6 +25,12 @@
 
 - **`too-many-statements-in-try-clause` is now ignored explicitly, ahead of ever having a finding.** Every repo in the workspace that runs `select = ["ALL"]` with `preview` has settled on ignoring this rule, because shrinking a `try` clause changes which statements its handlers cover — an error-handling refactor rather than lint cleanup. This repo happened to have no findings, so the decision was never written down here, which meant whoever wrote the first long `try` clause would have had to reach it again on their own. The reasoning now sits inline next to the ignore. No code changes; the rule fires nowhere today.
 
+
+### Fixed
+
+- **Documentation: `TokensUsageRecord` is attributed to the right brand.** The module and class docstrings in `pipelex_sdk/runs.py`, `docs/run-usage.md`, and `docs/architecture.md` said the record was "specified in the MTHDS protocol spec". It is not: inference accounting is a Pipelex runtime extension the MTHDS Protocol does not model, so the hosted API is what pins the wire contract and this SDK mirrors the runtime's own record. Getting the attribution wrong on a public package misplaces the brand boundary the rest of the architecture is organized around. No behaviour changed.
+- **Documentation: no more citations a reader cannot open.** Several docstrings, comments and doc passages cited internal specs and the conformance suite by bare repo-relative path — paths that resolve to nothing for anyone who clones this public package, so they read as rot rather than as a deliberate boundary. Each site now states the rule it was citing instead: the layered extension policy behind the hosted run extensions and the reserved-`extra` guard, and the locked category vocabulary shared with the conformance corpus. References to the sibling public `pipelex-sdk-js` repo are kept where they explain a port. No behaviour changed.
+
 ## [v0.5.0] - 2026-07-22
 
 ### Added

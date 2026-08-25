@@ -8,8 +8,8 @@ from pydantic import TypeAdapter
 from pipelex_sdk.runs import RunResults, RunStatus, TokensUsageRecord
 
 # A record in the shape the current runtime emits: every contract field present, absent values
-# sent as explicit nulls. Mirrors the conformance seed corpus
-# (conformance/conformance/usage_records.py), which is what the platform arm asserts on the wire.
+# sent as explicit nulls. Mirrors the shared conformance corpus of usage records, which is what
+# the platform arm asserts on the wire.
 _RATED_RECORD: dict[str, Any] = {
     "model_type": "llm",
     "inference_model_name": "test-model",

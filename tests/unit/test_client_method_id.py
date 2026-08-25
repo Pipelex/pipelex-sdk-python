@@ -1,9 +1,9 @@
 """Tests for the hosted `method_id` run option — the layer-3 extension this SDK names itself.
 
 Mirrors `pipelex-sdk-js/tests/client.test.ts` "hosted method_id option". The doctrine the
-assertions pin is normative in the workspace spec `docs/specs/pipelex-platform-api.md` ->
-"Layered extension policy": a hosted client types its own platform's arguments (Rule 5), and
-`extra` stays the escape hatch for extensions it does not know about.
+assertions pin is the layered extension policy: a hosted client types its own platform's
+arguments and guards them per layer, and `extra` stays the escape hatch for the extensions it
+does not know about.
 """
 
 import asyncio
