@@ -158,6 +158,33 @@ class TestClientPaging:
         assert [pipeline_run.pipeline_run_id for pipeline_run in runs] == ["r1", "r2"]
         assert _cursors_sent(send) == [None, "c1"]
 
+    def test_iterate_runs_raises_on_a_cursor_cycle_over_non_empty_pages(
+        self,
+        api_client: PipelexAPIClient,
+        wire_response: ResponseBuilder,
+        patch_send: SendPatcher,
+        mocker: MockerFixture,
+    ) -> None:
+        """A cursor cycling across two values trips neither the empty-page nor the adjacent check.
+
+        `c1 → c2 → c1 → …` with every page non-empty would loop forever re-yielding the same
+        runs; the shared page ceiling is what bounds it.
+        """
+        mocker.patch("pipelex_sdk.client._MAX_LIST_PAGES", 4)
+        cycle = [
+            wire_response(200, json_body={"items": [_run("r1")], "next_cursor": "c1"}),
+            wire_response(200, json_body={"items": [_run("r2")], "next_cursor": "c2"}),
+            wire_response(200, json_body={"items": [_run("r1")], "next_cursor": "c1"}),
+            wire_response(200, json_body={"items": [_run("r2")], "next_cursor": "c2"}),
+            wire_response(200, json_body={"items": [_run("r1")], "next_cursor": "c1"}),
+        ]
+        patch_send(api_client, *cycle)
+
+        with pytest.raises(PagingNotTerminatingError) as exc_info:
+            asyncio.run(_drain_runs(api_client, "m1"))
+
+        assert exc_info.value.page_limit == 4
+
     def test_iterate_runs_stops_on_an_unchanged_cursor_without_re_yielding(
         self,
         api_client: PipelexAPIClient,

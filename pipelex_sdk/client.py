@@ -114,9 +114,10 @@ DEFAULT_API_BASE_URL = "https://api.pipelex.com"
 
 _POLL_REQUEST_TIMEOUT_SECONDS = 30.0  # single status/result/product GETs; the hosted gateway caps responses at ~30s.
 
-# A runaway backstop for the paged-list iterators, set far beyond any real catalog — never a
+# A runaway backstop for both paged-list iterators, set far beyond any real catalog — never a
 # coverage cap. Reaching it means the server kept minting cursors, which is a fault to raise on,
-# not a limit to truncate at.
+# not a limit to truncate at. It is what bounds a cursor that CYCLES (`c1 -> c2 -> c1`) over
+# non-empty pages: neither iterator's adjacent-cursor check sees a non-adjacent repeat.
 _MAX_LIST_PAGES: int = 10_000
 _DEFAULT_DEGRADED_RETRY_SECONDS = 5  # matches the platform's `_DEGRADE_RETRY_AFTER_SECONDS`.
 
@@ -1065,10 +1066,19 @@ class PipelexAPIClient(MthdsAPIClient):
         The same loop as `iterate_methods` with one deliberate difference: an **empty page ends
         it**. The date bounds are index key conditions rather than a post-read filter, so a run
         page is never empty-with-a-cursor. The difference is in the server, not in the client.
-        That stop rule also removes the need for a page ceiling here — a server minting fresh
-        cursors while returning nothing is caught by it.
+
+        The page ceiling applies here too. The empty-page stop only catches a server minting
+        fresh cursors while returning *nothing*; a cursor that cycles across two or more values
+        while every page is non-empty (`c1 → c2 → c1`) trips neither that check nor the
+        adjacent-cursor one, and would loop forever re-yielding the same runs. The ceiling is
+        the cheap guard against the whole family — tracking every cursor seen would cost
+        unbounded memory for the same protection.
+
+        Raises:
+            PagingNotTerminatingError: If the server never stops handing out cursors.
         """
         cursor: str | None = None
+        pages_seen = 0
         while True:
             page = await self.list_runs(method_id, created_from=created_from, created_to=created_to, limit=limit, cursor=cursor)
             if cursor is not None and page.next_cursor == cursor:
@@ -1080,6 +1090,10 @@ class PipelexAPIClient(MthdsAPIClient):
                 yield pipeline_run
             if page.next_cursor is None:
                 return
+            pages_seen += 1
+            if pages_seen >= _MAX_LIST_PAGES:
+                msg = f"Run paging did not terminate after {_MAX_LIST_PAGES} pages; this is a server-side fault, not a coverage limit."
+                raise PagingNotTerminatingError(msg, _MAX_LIST_PAGES)
             cursor = page.next_cursor
 
     async def get_run_detail(self, run_id: str) -> RunDetail:
