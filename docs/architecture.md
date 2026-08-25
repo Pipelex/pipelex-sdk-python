@@ -1,6 +1,6 @@
 # pipelex-sdk architecture
 
-The design reference for the package. It covers the full `0.1.0` surface and records the parity audit against the TypeScript `@pipelex/sdk` reference (see "Parity with `@pipelex/sdk`" at the end).
+The design reference for the package. It covers the shipped surface and records where it stands against the TypeScript `@pipelex/sdk` reference, gaps included (see "Parity with `@pipelex/sdk`" at the end).
 
 ## What this is
 
@@ -151,14 +151,28 @@ The hosted catalog/account routes the webapp drives (`pipelex_sdk/product_models
 The wire models are snake_case Pydantic v2. Response models are extension-open (`extra="allow"`) so a newly-added server field is preserved, not rejected; input models name exactly what each route accepts. `PipelineRun.status` reuses the run-lifecycle `RunStatus`; `OrgRole`, `PipeStatus`, and the onboarding fields are `StrEnum`s.
 
 - **User profile** — `get_me()` → `UserProfile` (`GET /v1/me`).
-- **Methods catalog** — `list_methods()` / `get_method(id)` / `create_method(MethodWriteInput)` / `update_method(id, MethodWriteInput)` (a rename is a changed `name`) / `delete_method(id)`. The id is path-encoded; an absent `input_data` is dropped from the write body. **`delete_method` is asynchronous and its return type says so:** the route answers `202` with a `MethodDeletionAccepted` (`method_id`, `deletion_state`, `deletion_job_id`) the moment the platform has claimed the method and terminated its in-flight workflows — the rest of the cascade (runs, events, S3 objects) is enqueued. A returned value means "accepted", never "gone"; completion is the row disappearing from `list_methods`, not any field of that body. It used to be annotated `-> None` with a docstring promising an empty synchronous delete, which is a misleading contract around a destructive operation. The claim is a conditional write, so a double-clicked delete is a `409 conflict` rather than a second cascade over the same runs.
+- **Methods catalog** — `list_methods()` / `iterate_methods()` / `get_method(id)` / `create_method(MethodWriteInput)` / `update_method(id, MethodWriteInput)` (a rename is a changed `name`) / `delete_method(id)`. The id is path-encoded; an absent `input_data` is dropped from the write body.
+
+  **The index is paged.** `list_methods(q=…, limit=…, cursor=…)` returns one `MethodPage` — `items: list[MethodSummary]` plus an opaque `next_cursor` you pass straight back, `None` on the last page, and no total by design. A `MethodSummary` is deliberately **not** a `MethodData`: no `mthds`, no `python`, no `updated_at`, because none of them is in the index projection, and putting `mthds` back is exactly what restored the truncation bug paging removed. A method mid-deletion still appears in the list — so a UI can render "Deleting…" — while `get_method` refuses it with a `409`. Query parameters are kept on **presence**, never truthiness: an explicit empty `q` or `cursor` is bad input the API should reject, not something to drop silently into an unfiltered query that reads as working.
+
+  **`iterate_methods(q=…, limit=…)` is the idiom for the whole catalog**, and there is deliberately no `list_all_methods()`: an all-at-once helper needs a cap, and a cap is the silent truncation paging removed. It **keeps going through an empty page that carries a live cursor**, because `q` is a post-read filter over a bounded index slice per request, so `{items: [], next_cursor: "…"}` means "keep going". It stops on a `None` cursor, and also when the server hands back the cursor it was just sent — checked *before* yielding, so a stuck cursor never double-counts a page. Past a runaway backstop set far beyond any real catalog it **raises** `PagingNotTerminatingError` rather than returning what it has, because a silently truncated list is the bug being fixed.
+
+  **`MethodData.python` is a typed `list[MethodFile]`, converted at the boundary.** On the wire it is one string: the JSON text of a `[{name, content}]` array, or `""` for a method with no custom Python. `parse_method_files` / `serialize_method_files` (in `product_models.py`) carry the rules — a blank source or `"[]"` yields `[]`, blank-content entries are dropped in both directions, and an empty list serializes to `""` rather than `"[]"` because `""` is the platform's clear sentinel. `MethodData` applies the parser through a `field_validator(mode="before")` and `MethodWriteInput` the serializer through a `field_serializer`, which is what makes the platform's three-way write contract fall out of `exclude_none=True`: **`None` → key absent → the stored Python is preserved; `[]` → `""` → cleared; a non-empty list → replaced.** `MethodFile` is distinct from `MthdsFile` (the validate input) and `MthdsFileItem` (the build closure) — three shapes for three surfaces.
+
+  **`delete_method` is asynchronous and its return type says so:** the route answers `202` with a `MethodDeletionAccepted` (`method_id`, `deletion_state`, `deletion_job_id`) the moment the platform has claimed the method and terminated its in-flight workflows — the rest of the cascade (runs, events, S3 objects) is enqueued. A returned value means "accepted", never "gone"; completion is the row disappearing from `list_methods`, not any field of that body. It used to be annotated `-> None` with a docstring promising an empty synchronous delete, which is a misleading contract around a destructive operation. The claim is a conditional write, so a double-clicked delete is a `409 conflict` rather than a second cascade over the same runs.
 - **Organizations** — `list_memberships()` → `MembershipsResponse` (memberships + active-org feature flags); `create_organization(name)` / `rename_organization(org_id, name)` → `Membership`. Organization *switch* is out of scope (a WorkOS session op, not a `/v1` route).
 - **Billing** — `get_subscription()`, `list_plans()`, `list_invoices()`, `create_checkout(plan)`. `change_plan(plan)` and `get_billing_portal()` surface a **409 `conflict`** (`ApiResponseError.code`) when there is no subscription yet — start one via `create_checkout` first.
 - **Pipelex API keys** — `list_pipelex_api_keys()`; `create_pipelex_api_key(label)` and `rotate_pipelex_api_key(id)` return the plaintext `api_key` **once**; `revoke_pipelex_api_key(id)`. Creation surfaces a **409 `pipelex_api_key_limit_reached`** when the per-account limit is hit. Rotation sends no body.
 - **Gateway (LLM inference) key** — `create_gateway_api_key(promo_code)` **always sends a JSON body** (even with `promo_code=None` → `{"promo_code": null}`); the server 422s an empty body. `get_gateway_api_key()` → status (`gateway_api_key` is `None` until provisioned).
 - **Onboarding** — `submit_onboarding(OnboardingSubmission)` (`POST /v1/onboarding/submit`, empty 2xx body); absent optional fields are dropped.
 - **Storage** — `resolve_storage_url(uri)` → presigned URL; `upload(UploadInput)` → the stored file handle. The higher-level `upload_file` / `prepare_inputs` preparation surface built on top of `upload` is now available — see [input-preparation.md](./input-preparation.md).
-- **Run records** — `list_runs(method_id)` → `list[PipelineRun]` (the catalog-style list, distinct from the lifecycle status/result routes); `update_run(run_id, UpdateRunInput)` (admin/manual status patch, empty 2xx body).
+- **Run records** — `list_runs(method_id, …)` / `iterate_runs(method_id, …)` / `get_run_detail(run_id)` (the catalog-style reads, distinct from the lifecycle status/result routes); `update_run(run_id, UpdateRunInput)` (admin/manual status patch, empty 2xx body).
+
+  **This list is paged too.** `list_runs(method_id, created_from=…, created_to=…, limit=…, cursor=…)` returns a `RunPage` with the same opaque-cursor contract as `MethodPage`. `created_from` / `created_to` are **instants** — ISO-8601 with a UTC offset — and inclusive; they are index key conditions rather than filters, so a bare date or a naive timestamp is a platform `400` surfaced as `ApiResponseError`. Worth knowing and not obvious from the route: every `/v1/runs*` product route sits behind the platform's surface-access gate, which for API-key auth demands the `ff_api_keys` feature flag and fails closed with a `403` — so a `403` here means "flag", not "wrong key".
+
+  **The two iterators stop on different signals, and the difference is in the server.** `iterate_methods` continues through an empty page with a live cursor; `iterate_runs` treats an **empty page as the end**, because the run date bounds are index key conditions and so a run page is never empty-with-a-cursor. That stop rule also removes the need for a page ceiling on the run side — a server minting fresh cursors while returning nothing is already caught by it.
+
+  **`PipelineRun` fields the platform genuinely serves as null are typed nullable.** `method_id` is `None` for an ad-hoc run from an inline bundle, which belongs to no stored method; `pipe_code` is `None` for a run that let the bundle's `main_pipe` decide. `org_id`, `created_by_user_id`, and a narrowed `error: RunErrorReport | None` (`message`, `error_type` — the two fields a consumer may rely on out of the runner's verbose report) join them. `RunDetail`, returned only by `get_run_detail`, adds `mthds_contents` and `inputs`: what the run actually executed, and the only record of it, since a method edited since the run no longer describes what happened. Both are left out of the list and the polled status on purpose — their cost scales with page size and poll rate respectively.
 
 ## Health probe
 
@@ -166,7 +180,7 @@ The wire models are snake_case Pydantic v2. Response models are extension-open (
 
 ## Out of scope for v0.1
 
-- `/v1/build/*` helpers (the TS clients carry them; recorded as a conscious deferral).
+- The remaining `/v1/build/*` authoring helpers — `build_output`, `build_runner`, `concept`, `pipe_spec`. `build_inputs` shipped in 0.5.0 and is no longer deferred.
 - Organization *switch* (a WorkOS session operation, not a `/v1` route).
 - A `~/.pipelex/config` file reader (env-only for now, matching the JS SDK).
 - A synchronous client facade.
@@ -177,13 +191,19 @@ The wire models are snake_case Pydantic v2. Response models are extension-open (
 
 ## Parity with `@pipelex/sdk`
 
-This SDK is a faithful port of the TypeScript `@pipelex/sdk` (`PipelexApiClient`). The Checkpoint-5 parity audit walked the JS `src/client.ts`, `src/index.ts` (the public barrel), and `docs/architecture.md`, plus a field-by-field sweep of `runs.ts` / `product-models.ts` / `models.ts` against their Python counterparts. Result: **surface-complete, with no silent gaps** — every JS method, model, and error has a Python equivalent or a consciously-recorded exclusion.
+This SDK is a port of the TypeScript `@pipelex/sdk` (`PipelexApiClient`) and tracks it closely, but it is **not surface-complete, and this section is where the gaps are named.** The Checkpoint-5 parity audit walked the JS `src/client.ts`, `src/index.ts` (the public barrel), and `docs/architecture.md`, plus a field-by-field sweep of `runs.ts` / `product-models.ts` / `models.ts`; it concluded surface-completeness, and that conclusion went stale as the JS SDK grew. The honest list of what has no Python counterpart today:
+
+- **Tooling routes** — `lint`, `format`, `resolve`, `codegen`.
+- **Authoring helpers** — `build_output`, `build_runner`, `concept`, `pipe_spec` (`build_inputs` shipped in 0.5.0 and is **not** a gap).
+- **Offline helpers** — `run_codegen_check` (the codegen drift check) and `get_method_closure` (client-side sugar that parses the polymorphic `mthds` source into a run-ready closure).
+
+None of them is moved by the releases this SDK last tracked, and each stays deferred rather than silently missing. Everything else — the protocol routes, the durable lifecycle, the whole product surface, and the errors — does have a Python equivalent.
 
 **Methods** — full coverage: protocol (`execute`, `start`, `validate`, `validate_files`, `models`, `version`), durable lifecycle (`get_run_status`, `get_run_result`, `wait_for_result`, `start_and_wait`, the private `_supports_run_lifecycle` / `_execute_blocking`), the whole product surface (profile, methods CRUD, organizations, billing, Pipelex API keys, gateway key, onboarding, storage, run records), and `health`.
 
 **Models** — full field-for-field match across the run-lifecycle types and the product wire models. Deliberate idiomatic ports (not gaps): milliseconds → seconds (`interval_seconds` / `timeout_seconds` / `elapsed_seconds`); the JS `AbortSignal` → Python `asyncio` cancellation (no `signal` field); JS inline string-unions promoted to `StrEnum`s (`OrgRole`, `PipeStatus`, the onboarding fields) with identical wire values; response models are `extra="allow"` for forward-compat. The Pipelex validation narrowing is **owned here** (`pipelex_sdk.validation_models`), narrowing `mthds`'s neutral verdict bases (the resolved follow-up #9); the brand-neutral `Dict*` wire concretes (`DictRunResultExecute`) are reused from `mthds` by inheritance — they are a shared wire contract the `pipelex` runtime also builds on — rather than duplicated as `pipelex-sdk-js` does.
 
-**Errors** — `ApiResponseError`, `ApiUnreachableError`, `PipelineExecuteTimeoutError`, `RunFailedError`, `RunTimeoutError`, `RunLifecycleUnavailableError` are owned here; `RunStillRunningError` is re-exported from `mthds`. `ClientAuthenticationError` is **not** ported: it is a dormant export in the JS barrel (defined and exported but never raised by the client), and in Python it already lives in `mthds.runners.api.exceptions` — importable directly if ever needed, with no barrel here to re-export it through.
+**Errors** — `ApiResponseError`, `ApiUnreachableError`, `PipelineExecuteTimeoutError`, `RunFailedError`, `RunTimeoutError`, `RunLifecycleUnavailableError`, `PagingNotTerminatingError` are owned here; `RunStillRunningError` is re-exported from `mthds`. `ClientAuthenticationError` is **not** ported: it is a dormant export in the JS barrel (defined and exported but never raised by the client), and in Python it already lives in `mthds.runners.api.exceptions` — importable directly if ever needed, with no barrel here to re-export it through.
 
 **Resolved parity flags (Checkpoint 5):**
 
@@ -191,6 +211,6 @@ This SDK is a faithful port of the TypeScript `@pipelex/sdk` (`PipelexApiClient`
 - **`health` error regime** (decision #5) — **kept** the plainer `PipelineRequestError` regime; already matches JS, needs no `code` taxonomy.
 - **`validate` error regime** (Phase-3 flag) — **deferred**; keeps the inherited `httpx.HTTPStatusError` regime for consistency with the other Python protocol routes (see "`validate` override" above).
 
-**Conscious exclusions:** the `/v1/build/*` authoring helpers (decision #8 — a future follow-up if a consumer needs them) and the organization *switch* (a WorkOS session op, not a `/v1` route).
+**Conscious exclusions:** the surfaces listed at the top of this section, and the organization *switch* (a WorkOS session op, not a `/v1` route).
 
 **Intentional divergences from the JS SDK** (Python house style / clean inheritance): no barrel (`__init__.py` stays empty; import via full paths); inheritance on `MthdsAPIClient` rather than the JS composition-of-types; async-only; `__version__` derived from installed metadata rather than a hand-synced constant.

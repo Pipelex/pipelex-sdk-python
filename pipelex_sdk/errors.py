@@ -12,6 +12,8 @@ protocol base. Both derive from the protocol base `PipelineRequestError`
   a consumer branches on (decoupled from the HTTP status).
 - `PipelineExecuteTimeoutError` — a blocking `execute()` killed by the hosted gateway's
   ~30s synchronous-request ceiling; points the caller at the durable start+poll path.
+- `PagingNotTerminatingError` — a paged-list iterator hit its runaway backstop, meaning
+  the server never stopped handing out cursors.
 
 The run-lifecycle errors (`RunFailedError`, `RunTimeoutError`,
 `RunLifecycleUnavailableError`) are owned here (ported from `mthds-python` in
@@ -161,6 +163,20 @@ class RunLifecycleUnavailableError(PipelineRequestError):
     def __init__(self, message: str, api_url: str) -> None:
         super().__init__(message)
         self.api_url = api_url
+
+
+class PagingNotTerminatingError(PipelineRequestError):
+    """Raised when a paged-list iterator refuses to keep following cursors.
+
+    The ceiling sits far beyond any real catalog, so reaching it is a server-side fault —
+    an endpoint minting a fresh cursor forever — not a coverage limit the caller can raise.
+    Raising beats returning, because a silently truncated list is exactly the bug paging
+    was introduced to remove.
+    """
+
+    def __init__(self, message: str, page_limit: int) -> None:
+        super().__init__(message)
+        self.page_limit = page_limit
 
 
 class InputPreparationError(PipelineRequestError):

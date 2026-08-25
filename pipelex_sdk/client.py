@@ -23,7 +23,7 @@ import os
 import re
 from time import monotonic
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 from mthds.protocol.exceptions import PipelineRequestError
@@ -37,6 +37,7 @@ from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
     MissingMainStuffError,
+    PagingNotTerminatingError,
     PipelineExecuteTimeoutError,
     RunFailedError,
     RunLifecycleUnavailableError,
@@ -56,11 +57,15 @@ from pipelex_sdk.product_models import (
     MembershipsResponse,
     MethodData,
     MethodDeletionAccepted,
+    MethodPage,
+    MethodSummary,
     PipelexApiKeyCreated,
     PipelexApiKeyList,
     PipelineRun,
     PlanView,
     ResolvedStorageUrl,
+    RunDetail,
+    RunPage,
     SubscriptionResponse,
     UploadedFile,
     UserProfile,
@@ -80,6 +85,8 @@ from pipelex_sdk.upload import upload_file as _upload_file_impl
 from pipelex_sdk.validation_models import PipelexValidationResultAdapter, ValidationErrorItem
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mthds.protocol.models import RunResultStart
     from mthds.protocol.pipe_output import VariableMultiplicity
     from mthds.protocol.pipeline_inputs import PipelineInputs
@@ -106,6 +113,11 @@ _RUNS = "runs"
 DEFAULT_API_BASE_URL = "https://api.pipelex.com"
 
 _POLL_REQUEST_TIMEOUT_SECONDS = 30.0  # single status/result/product GETs; the hosted gateway caps responses at ~30s.
+
+# A runaway backstop for the paged-list iterators, set far beyond any real catalog — never a
+# coverage cap. Reaching it means the server kept minting cursors, which is a fault to raise on,
+# not a limit to truncate at.
+_MAX_LIST_PAGES: int = 10_000
 _DEFAULT_DEGRADED_RETRY_SECONDS = 5  # matches the platform's `_DEGRADE_RETRY_AFTER_SECONDS`.
 
 # The hosted gateway caps synchronous requests at ~30s. A blocking-`execute` failure at/after
@@ -163,7 +175,9 @@ class PipelexAPIClient(MthdsAPIClient):
       durable polling extension (added in Phase 2).
     - **product** (`/v1/me`, `/v1/methods`, `/v1/billing/*`, …) — the hosted product
       surface (added in Phase 3), reached through `_request_product` so callers branch
-      on the structured `ApiResponseError.code`, not the HTTP status.
+      on the structured `ApiResponseError.code`, not the HTTP status. The two list routes
+      are paged: `list_methods` / `list_runs` answer one `{items, next_cursor}` page, and
+      `iterate_methods` / `iterate_runs` follow the cursors for the whole catalog.
 
     Construction is Pipelex-only — it never reads the `mthds` resolver (`MTHDS_API_KEY` /
     `MTHDS_BASE_URL`, `~/.mthds/config`), whose values are a credential pair for whatever
@@ -783,10 +797,54 @@ class PipelexAPIClient(MthdsAPIClient):
         """The authenticated user's profile — `GET /v1/me`."""
         return UserProfile.model_validate(await self._request_product("GET", "me"))
 
-    async def list_methods(self) -> list[MethodData]:
-        """List the caller's saved methods — `GET /v1/methods`."""
-        result = await self._request_product("GET", "methods")
-        return [MethodData.model_validate(item) for item in result]
+    async def list_methods(self, *, q: str | None = None, limit: int | None = None, cursor: str | None = None) -> MethodPage:
+        """List one page of the caller's saved methods — `GET /v1/methods`.
+
+        Args:
+            q: Server-side case-insensitive substring match over name and description,
+                applied across the whole catalog rather than within the returned page.
+            limit: Page size. The API supplies the default and caps the maximum.
+            cursor: The `next_cursor` of the previous page, passed back opaquely.
+
+        Returns:
+            A `MethodPage` of `MethodSummary` rows, ordered by creation, newest first.
+            `next_cursor` is `None` on the last page. For the whole catalog, prefer
+            `iterate_methods`, which follows the cursors and cannot truncate.
+        """
+        query = _product_query({"q": q, "limit": limit, "cursor": cursor})
+        return MethodPage.model_validate(await self._request_product("GET", f"methods{query}"))
+
+    async def iterate_methods(self, *, q: str | None = None, limit: int | None = None) -> AsyncIterator[MethodSummary]:
+        """Yield every saved method, following the cursors — `GET /v1/methods`.
+
+        There is deliberately no `list_all_methods()`: an all-at-once helper needs a cap, and
+        a cap is the silent truncation paging was introduced to remove.
+
+        The loop keeps going **through an empty page that carries a live cursor**, because `q`
+        is a post-read filter over a bounded index slice per request, so `{items: [], next_cursor: "…"}`
+        means "keep going", not "done". It stops when `next_cursor` is `None`, and also when the
+        server hands back the cursor it was just sent — checked *before* yielding, so a stuck
+        cursor never double-counts a page.
+
+        Raises:
+            PagingNotTerminatingError: If the server never stops handing out cursors.
+        """
+        cursor: str | None = None
+        pages_seen = 0
+        while True:
+            page = await self.list_methods(q=q, limit=limit, cursor=cursor)
+            if cursor is not None and page.next_cursor == cursor:
+                # The server did not advance. Stop before yielding, or this page is counted twice.
+                return
+            for method_summary in page.items:
+                yield method_summary
+            if page.next_cursor is None:
+                return
+            pages_seen += 1
+            if pages_seen >= _MAX_LIST_PAGES:
+                msg = f"Method paging did not terminate after {_MAX_LIST_PAGES} pages; this is a server-side fault, not a coverage limit."
+                raise PagingNotTerminatingError(msg, _MAX_LIST_PAGES)
+            cursor = page.next_cursor
 
     async def get_method(self, method_id: str) -> MethodData:
         """Fetch one method by id — `GET /v1/methods/{id}`."""
@@ -962,10 +1020,76 @@ class PipelexAPIClient(MthdsAPIClient):
         """
         return await _prepare_inputs_impl(self, files=files, pipe_ref=pipe_ref, inputs=inputs)
 
-    async def list_runs(self, method_id: str) -> list[PipelineRun]:
-        """List a method's runs — `GET /v1/runs?method_id={methodId}`."""
-        result = await self._request_product("GET", f"{_RUNS}?method_id={quote(method_id, safe='')}")
-        return [PipelineRun.model_validate(item) for item in result]
+    async def list_runs(
+        self,
+        method_id: str,
+        *,
+        created_from: str | None = None,
+        created_to: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> RunPage:
+        """List one page of a method's runs — `GET /v1/runs?method_id={methodId}`.
+
+        Args:
+            method_id: The method whose runs to list.
+            created_from: Inclusive lower bound on creation, an **instant**: ISO-8601 with a
+                UTC offset. These are index key conditions rather than filters, so a bare date
+                or a naive timestamp is a platform `400` surfaced as `ApiResponseError`.
+            created_to: Inclusive upper bound, same instant-only rule.
+            limit: Page size. The API supplies the default and caps the maximum.
+            cursor: The `next_cursor` of the previous page, passed back opaquely.
+
+        Returns:
+            A `RunPage` of `PipelineRun` rows. For the whole history, prefer `iterate_runs`.
+
+        Raises:
+            ApiResponseError: On any non-2xx. Note that every `/v1/runs*` product route sits
+                behind the platform's surface-access gate, which for API-key auth demands the
+                `ff_api_keys` feature flag and fails closed — so a `403` here means "flag", not
+                "wrong key".
+        """
+        query = _product_query({"method_id": method_id, "created_from": created_from, "created_to": created_to, "limit": limit, "cursor": cursor})
+        return RunPage.model_validate(await self._request_product("GET", f"{_RUNS}{query}"))
+
+    async def iterate_runs(
+        self,
+        method_id: str,
+        *,
+        created_from: str | None = None,
+        created_to: str | None = None,
+        limit: int | None = None,
+    ) -> AsyncIterator[PipelineRun]:
+        """Yield every run of a method, following the cursors — `GET /v1/runs`.
+
+        The same loop as `iterate_methods` with one deliberate difference: an **empty page ends
+        it**. The date bounds are index key conditions rather than a post-read filter, so a run
+        page is never empty-with-a-cursor. The difference is in the server, not in the client.
+        That stop rule also removes the need for a page ceiling here — a server minting fresh
+        cursors while returning nothing is caught by it.
+        """
+        cursor: str | None = None
+        while True:
+            page = await self.list_runs(method_id, created_from=created_from, created_to=created_to, limit=limit, cursor=cursor)
+            if cursor is not None and page.next_cursor == cursor:
+                # The server did not advance. Stop before yielding, or this page is counted twice.
+                return
+            if not page.items:
+                return
+            for pipeline_run in page.items:
+                yield pipeline_run
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
+
+    async def get_run_detail(self, run_id: str) -> RunDetail:
+        """Fetch one run record with what it executed — `GET /v1/runs/{id}`.
+
+        Distinct from the two lifecycle reads: `get_run_status` polls `/status`, `get_run_result`
+        fetches `/results`. This is the catalog-style record, and the only read that carries
+        `mthds_contents` and `inputs`.
+        """
+        return RunDetail.model_validate(await self._request_product("GET", f"{_RUNS}/{quote(run_id, safe='')}"))
 
     async def update_run(self, run_id: str, update_input: UpdateRunInput) -> None:
         """Patch a run's status (admin/manual) — `PUT /v1/runs/{id}` (empty body)."""
@@ -1037,6 +1161,19 @@ def _with_validate_markdown_render(render: list[str] | None) -> list[str]:
 def _timeout_message(run_id: str, timeout_seconds: float) -> str:
     """The shared `RunTimeoutError` message — the run survives and is resumable by id."""
     return f"Run {run_id} did not reach a terminal state within {timeout_seconds}s; it is still executing server-side and can be resumed by id."
+
+
+def _product_query(params: dict[str, str | int | None]) -> str:
+    """Build the query string of a product list route, keeping entries on **presence**.
+
+    Presence (`is not None`), never truthiness: an explicit empty `q` or cursor is bad input
+    the API should reject, not something to silently drop into an unfiltered query that reads
+    as working. Returns `""` for no parameters, otherwise a leading `?`.
+    """
+    kept = {key: value for key, value in params.items() if value is not None}
+    if not kept:
+        return ""
+    return "?" + urlencode(kept)
 
 
 def _is_gateway_timeout(exc: httpx.HTTPStatusError | httpx.TimeoutException, elapsed_seconds: float) -> bool:
