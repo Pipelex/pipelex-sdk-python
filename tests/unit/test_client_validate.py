@@ -1,4 +1,4 @@
-"""Tests for the `validate` override + `validate_files` — render injection, `mthds_sources`, the union round-trip."""
+"""Tests for the `validate` override + `validate_files` — render injection, `mthds_sources`, `views`, the union round-trip."""
 
 import asyncio
 import json
@@ -10,7 +10,7 @@ from mthds.protocol.exceptions import PipelineRequestError
 from pytest_mock import MockerFixture, MockType
 
 from pipelex_sdk.client import MthdsFile, PipelexAPIClient
-from pipelex_sdk.validation_models import PipelexInvalidReport, PipelexValidationReport
+from pipelex_sdk.validation_models import VALIDATION_VIEW_INPUT_FORM, PipelexInvalidReport, PipelexValidationReport
 
 _BASE_URL = "http://localhost:8081"
 
@@ -90,6 +90,54 @@ class TestClientValidate:
         assert result.is_valid is False
         assert result.rendered_markdown == "## errors"
         assert result.validation_errors[0].message == "boom"
+
+    # ── views ────────────────────────────────────────────────────────
+
+    def test_views_absent_from_body_by_default(self, mocker: MockerFixture) -> None:
+        client = self._client()
+        send = self._mock_send(mocker, client, json_body=_VALID_BODY)
+
+        asyncio.run(client.validate(["bundle"]))
+
+        # The opt-in stays opt-in: no `views` key at all, so the response is byte-identical
+        # for consumers that never asked for a view.
+        assert "views" not in self._sent_body(send)
+
+    def test_views_sent_verbatim(self, mocker: MockerFixture) -> None:
+        client = self._client()
+        send = self._mock_send(mocker, client, json_body=_VALID_BODY)
+
+        asyncio.run(client.validate(["bundle"], views=[VALIDATION_VIEW_INPUT_FORM, "future_view", VALIDATION_VIEW_INPUT_FORM]))
+
+        # Unlike `render`, nothing is injected and nothing is de-duplicated — the server
+        # resolves the tokens as a set and lenient-ignores the ones it does not know.
+        assert self._sent_body(send)["views"] == ["input_form", "future_view", "input_form"]
+
+    def test_explicit_empty_views_is_sent_as_empty_list(self, mocker: MockerFixture) -> None:
+        client = self._client()
+        send = self._mock_send(mocker, client, json_body=_VALID_BODY)
+
+        asyncio.run(client.validate(["bundle"], views=[]))
+
+        assert self._sent_body(send)["views"] == []
+
+    def test_views_rides_alongside_render_injection(self, mocker: MockerFixture) -> None:
+        client = self._client()
+        send = self._mock_send(mocker, client, json_body=_VALID_BODY)
+
+        asyncio.run(client.validate(["bundle"], render=["html"], views=[VALIDATION_VIEW_INPUT_FORM]))
+
+        body = self._sent_body(send)
+        assert body["render"] == ["html", "markdown"]
+        assert body["views"] == ["input_form"]
+
+    def test_validate_files_threads_views_through(self, mocker: MockerFixture) -> None:
+        client = self._client()
+        send = self._mock_send(mocker, client, json_body=_VALID_BODY)
+
+        asyncio.run(client.validate_files([MthdsFile(content="a")], views=[VALIDATION_VIEW_INPUT_FORM]))
+
+        assert self._sent_body(send)["views"] == ["input_form"]
 
     # ── validate_files ───────────────────────────────────────────────
 

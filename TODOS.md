@@ -16,9 +16,9 @@ Suggested order is the order below. Phase 3 is the most urgent fix (a crash agai
 
 ## Phase 0 — preflight
 
-- [ ] `make install` and confirm the pinned `mthds` base is the one the code was written against (`uv pip show mthds`; the floor is `>=0.8.1` and the workspace copy is 0.8.2). Nothing in this plan needs a newer `mthds`.
-- [ ] Run `make agent-check` and `make agent-test` before touching anything, so a later failure is attributable to this work and not to the starting point.
-- [ ] Re-read `wip/updates.md` §6 and §7 once; if anything there contradicts this file, this file is the stale one.
+- [x] `make install` and confirm the pinned `mthds` base is the one the code was written against (`uv pip show mthds`; the floor is `>=0.8.1` and the workspace copy is 0.8.2). Nothing in this plan needs a newer `mthds`. Confirmed: 0.8.2.
+- [x] Run `make agent-check` and `make agent-test` before touching anything, so a later failure is attributable to this work and not to the starting point. Both green at the starting point.
+- [x] Re-read `wip/updates.md` §6 and §7 once; if anything there contradicts this file, this file is the stale one. No contradiction found.
 
 ## Phase 1 — the `/v1/validate` surface (`wip/updates.md` §1)
 

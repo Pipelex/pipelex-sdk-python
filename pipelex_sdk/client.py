@@ -452,6 +452,7 @@ class PipelexAPIClient(MthdsAPIClient):
         allow_signatures: bool = False,
         mthds_sources: list[str] | None = None,
         render: list[str] | None = None,
+        views: list[str] | None = None,
     ) -> PipelexValidationResult:
         """Parse, validate, and dry-run an MTHDS bundle — `POST /v1/validate`.
 
@@ -461,9 +462,10 @@ class PipelexAPIClient(MthdsAPIClient):
         means no verdict could be produced (request shape, auth, server fault) and surfaces as
         `httpx.HTTPStatusError` (the inherited protocol error regime).
 
-        This override differs from the inherited protocol `validate` in two Pipelex-API ways:
+        This override differs from the inherited protocol `validate` in three Pipelex-API ways:
         it always injects `render: ["markdown"]` (so both valid and invalid verdicts carry
-        `rendered_markdown`), and it accepts `mthds_sources` as a named parameter.
+        `rendered_markdown`), it accepts `mthds_sources` as a named parameter, and it carries
+        the `views` opt-in for the server's structured views.
 
         Args:
             mthds_contents: MTHDS contents to load (always a list, even for one file).
@@ -473,15 +475,24 @@ class PipelexAPIClient(MthdsAPIClient):
                 `source: null`). The server 422s a length mismatch.
             render: Optional Pipelex-API presentation hints; `"markdown"` is always added.
                 Unknown tokens are server-side lenient-ignored (never a 422).
+            views: Optional opt-in for the server's structured views. `input_form` — named by
+                `VALIDATION_VIEW_INPUT_FORM` — is the only token today; unknown tokens are
+                server-side lenient-ignored (never a 422). Unlike `render`, the list is sent
+                **verbatim**: nothing is injected and nothing is de-duplicated, and an explicit
+                `[]` is sent as `[]`. Left at `None` the key is not sent at all, which is what
+                keeps the default response byte-identical for consumers that discard views.
 
         Returns:
             The 200-diagnostic union: `PipelexValidationReport` (`is_valid: true`) or
             `PipelexInvalidReport` (`is_valid: false`, with `validation_errors`), each
-            carrying `rendered_markdown`.
+            carrying `rendered_markdown`. A valid report also carries `warnings` and
+            `liftable_pipes`, plus `input_form` when `views` asked for it.
         """
         extra: dict[str, Any] = {"render": _with_validate_markdown_render(render)}
         if mthds_sources is not None:
             extra["mthds_sources"] = mthds_sources
+        if views is not None:
+            extra["views"] = views
         # Reuse the inherited transport seam (`_post_validate`) for body-building + the wire call,
         # then parse the 200-diagnostic body into this SDK's Pipelex-branded narrowing. The base's
         # own `validate` parses the same body into the neutral `mthds` `ValidationResult`.
@@ -493,12 +504,20 @@ class PipelexAPIClient(MthdsAPIClient):
         files: list[MthdsFile],
         allow_signatures: bool = False,
         render: list[str] | None = None,
+        views: list[str] | None = None,
     ) -> PipelexValidationResult:
         """Validate paired MTHDS files while preserving URI attribution for diagnostics.
 
         Decomposes the files into the low-level `validate(...)` payload. When any file carries
         a URI, every content gets a parallel source label (a deterministic `inline://` label
         for the ones without), so the server never sees a length-mismatched `mthds_sources`.
+
+        Args:
+            files: The MTHDS files to validate, each content plus an optional provenance URI.
+            allow_signatures: Tolerate unimplemented pipe signatures (strict by default).
+            render: Optional Pipelex-API presentation hints, threaded to `validate`.
+            views: Optional structured-view opt-in, threaded to `validate` unchanged — see
+                `validate` for the semantics.
 
         Raises:
             PipelineRequestError: If `files` is empty.
@@ -517,7 +536,7 @@ class PipelexAPIClient(MthdsAPIClient):
         else:
             mthds_sources = None
 
-        return await self.validate(mthds_contents, allow_signatures, mthds_sources, render)
+        return await self.validate(mthds_contents, allow_signatures, mthds_sources, render, views)
 
     # ── Hosted extension: durable run lifecycle (NOT part of the protocol) ──
     #

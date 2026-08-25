@@ -28,13 +28,17 @@ The client is **async-only** (httpx `AsyncClient`) and is an async context manag
 
 ```python
 from pipelex_sdk.client import PipelexAPIClient
+from pipelex_sdk.validation_models import VALIDATION_VIEW_INPUT_FORM
 
 
 async def main() -> None:
     async with PipelexAPIClient() as client:
         # 1. Validate an MTHDS bundle. The verdict is always returned (never raised):
         #    a 200 discriminated on `is_valid`, carrying `rendered_markdown`.
-        report = await client.validate([bundle_text])
+        #    Structured views are opt-in: asking for `input_form` here is what populates
+        #    `report.input_form` (the per-pipe input-form descriptors); omit `views` and the
+        #    request body carries no `views` key at all.
+        report = await client.validate([bundle_text], views=[VALIDATION_VIEW_INPUT_FORM])
         print(report.rendered_markdown)
         if not report.is_valid:
             return
