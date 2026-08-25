@@ -169,11 +169,27 @@ The 2026-08-25 decision in `pipelex-sdk-js/wip/boundary-option-type-validation.m
 - [x] Re-read `docs/architecture.md` end to end for any remaining claim the code no longer supports (parity, `Out of scope`, the validate section, the product section). Three further corrections beyond the ones §3.5 named: the intro line claiming "the full `0.1.0` surface", the parity section's "**Methods** — full coverage" (which contradicted the gap list directly above it), and the "**Models** — full field-for-field match" claim; the Models paragraph now also names the two deliberate divergences (snake_case `next_cursor`, the converter's home).
 - [x] Re-read `CHANGELOG.md` `[Unreleased]`: every breaking item is labelled "breaking", no counts, no WIP-doc mentions, the version line untouched (still `0.5.0`).
 - [x] `wip/updates.md` stays where it is, with its §7 decisions; this file stays too. Neither is deleted or emptied as part of finishing the work.
-- [ ] Open the PR against `dev`, then follow `/review-pr-agents` for the Greptile / Codex loop (compare SHAs, not notifications; reply and resolve each thread in one pass).
+- [x] Open the PR against `dev`, then follow `/review-pr-agents` for the Greptile / Codex loop (compare SHAs, not notifications; reply and resolve each thread in one pass). **PR [#14](https://github.com/Pipelex/pipelex-sdk-python/pull/14).**
 
 ### Checkpoint 3
 
-- [ ] Update this file with the final commit SHAs, the PR number, and anything deferred out of the plan with the reason.
+- [x] Update this file with the final commit SHAs, the PR number, and anything deferred out of the plan with the reason.
+
+**PR [#14](https://github.com/Pipelex/pipelex-sdk-python/pull/14), against `dev`.** The five implementation commits, in order:
+
+| SHA | What |
+|---|---|
+| `434b2e3` | Phase 1 — the validate surface: the `views` opt-in and the typed 0.17/0.18 contract |
+| `2a8c589` | Phase 2 — the `TokensUsageRecord` attribution and the unopenable citations |
+| `5e01c1b` | Phase 3 — paged method and run lists, nullable run fields, the `python` converter |
+| `cb70fbe` | Phase 4 — the non-string `method_id` boundary guard |
+| `a857d02` | Phase 5 — the remaining untrue parity claims in `docs/architecture.md` |
+
+Deferred out of the plan, with the reason:
+
+- **`RemapValueOp.mapping` is not constrained to be non-empty**, where the runtime and the OpenAPI artifact both say `minProperties: 1`. Reader models should not fail a whole verdict over an op that is merely a no-op. Recorded at Checkpoint 1.
+- **Migrating `test_client_product.py` onto the new `tests/unit/conftest.py` fixtures** was explicitly optional in §3.4 and was not done; the module keeps its own equivalent private helpers.
+- **`pipelex_sdk/runs.py`'s "Wire contract mirrors `pipelex-platform`" line** was left alone. It names a service, not a file path, so it is not one of the unopenable citations Phase 2 was about, and widening that phase's scope on my own judgement was not warranted.
 
 ## Known gaps left open on purpose
 
