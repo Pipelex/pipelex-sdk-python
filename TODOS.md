@@ -191,6 +191,23 @@ Deferred out of the plan, with the reason:
 - **Migrating `test_client_product.py` onto the new `tests/unit/conftest.py` fixtures** was explicitly optional in §3.4 and was not done; the module keeps its own equivalent private helpers.
 - **`pipelex_sdk/runs.py`'s "Wire contract mirrors `pipelex-platform`" line** was left alone. It names a service, not a file path, so it is not one of the unopenable citations Phase 2 was about, and widening that phase's scope on my own judgement was not warranted.
 
+### Corrections found on PR review
+
+Cubic's pass on `fa8d62a` reported findings against files this plan touched. Three were real and are fixed; the rest were judged not worth acting on, and the reasons are recorded here rather than only in the resolved GitHub threads.
+
+Fixed:
+
+- **The `TokensUsageRecord` attribution in `docs/architecture.md` was missed.** Phase 2's first checkbox names that site explicitly, and `CHANGELOG.md` asserts it was corrected, but `2a8c589` only touched the `method_id` citation in that file. `pipelex_sdk/runs.py` and `docs/run-usage.md` were correct. The bullet now carries the same wording as the other two.
+- **`CHANGELOG.md` still cited `docs/specs/pipelex-platform-api.md`.** The changelog was outside Phase 2's enumerated citation sites, so the sweep did not reach it — leaving the `[Unreleased]` section claiming "no more citations a reader cannot open" a few entries below a citation a reader cannot open. The sentence now states the rule and points at the sibling public JS SDK instead.
+- **The `validate` override intro in `docs/architecture.md` still said "two Pipelex-API extensions"** after Phase 1 added the third. The client docstring was updated at the time; the doc's intro sentence was not.
+
+Not acted on, with the reason:
+
+- **Hoisting the `method_id` type guard above `start_and_wait`'s lifecycle handshake.** The claim that a handshake failure can mask the guard is wrong: `_supports_run_lifecycle` swallows its errors and every downstream path still reaches `_merge_hosted_run_extensions`, so no wrong-typed value escapes. The real cost is one probe request, memoized for the client's lifetime. Hoisting would mean either calling the merge helper twice or duplicating the check outside the single documented guard site.
+- **A claimed 194-character line in `tests/unit/test_client_validate.py`.** Measured at 127, under the configured 150, and no line in that file is longer; `ruff check` passes. The measurement was simply wrong.
+- **Rewriting Checkpoint 2's parenthetical to match the two divergences the note beneath it records.** The parenthetical is the expectation the plan set out with, and the note is the finding; editing the prediction to match the outcome removes the only evidence that the plan's expectation was slightly off.
+- **Replacing the two `# type: ignore[arg-type]` comments in `tests/unit/test_client_method_id.py` with `cast()`.** A cast would assert to the reader that the value *is* a `str | None`, which is the exact falsehood that test exists to disprove at runtime; the ignore states the truth that this is a deliberate type error, which is the last resort the coding standard permits.
+
 ## Known gaps left open on purpose
 
 - No e2e suite exists in this repo (`tests/` holds only `unit/`), so the live `views` gate and the live paging envelope are pinned only by mocked bodies here; the JS suite pins both live. Adding an e2e suite is separate work.
