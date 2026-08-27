@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **The input-form descriptor and the pipe I/O contracts are typed by import, not carried opaquely.** `PipelexValidationReport.input_form` is now `InputForm | None` and `PipelexValidationReport.pipe_io_contracts` is now `PipeIOContracts`, both imported from the standard's own client (`mthds.protocol.input_form`, `mthds.protocol.pipe_io_contracts`). A field descriptor narrows on its `kind` (`match node: case ListField(): …`) and an input slot's `presence` and `multiplicity` read as `PresenceMarker` / `IOMultiplicity` enums instead of coming out of a bare mapping. This retires the earlier ruling that the descriptor stays opaque, and the reason that ruling gave — a second copy of a vocabulary owned elsewhere would be free to drift — is precisely why it is retired: no published Python package declared these artifacts when the call was made, so typing them could only have meant copying them, whereas `mthds` 0.9.0 declares both, and importing is what makes drift impossible. The SDK still does not own these types: they are used, never re-exported, so `mthds.protocol` stays the one import path for the vocabulary. `bundle_blueprint` and `graph_spec` stay opaque, for the reason that used to cover all four — nothing published declares them. (Breaking)
+- **A validate report whose contracts predate the presence/multiplicity reshape no longer parses.** The imported artifacts are closed shapes: a member this version of the standard does not define is version drift and fails the parse. An input contract carrying the old boolean `optional`, or missing `multiplicity` / `item_count`, is refused where it used to ride through untyped. There is no compatibility shim; the hosted API emits the reshaped contracts. The report **envelope** is unaffected and stays extension-open, so an unrelated field a future server adds to the report still parses and still rides `model_extra` — the two strictness regimes nest rather than spread, and a test pins that. (Breaking)
+- Bumped the `mthds` dependency floor from `>=0.8.2` to `>=0.9.0`, the release that publishes both artifacts as normative pages with client models.
+- Ruff's `runtime-evaluated-base-classes` now names the `mthds` report and diagnostic models beside `pydantic.BaseModel`. The validate narrowings extend those rather than `BaseModel` directly, and ruff matches only the bases named in a class statement, so without this an annotation imported from `mthds.protocol` is misread as type-only and moved into a `TYPE_CHECKING` block — where pydantic cannot resolve it when it builds the model.
+
+No release is cut from this entry: it lands under the workspace input-form program, whose Stage 3 repos record their warrants here and cut versions together in a later release cascade.
+
 ## [v0.6.0] - 2026-08-25
 
 ### Added

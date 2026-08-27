@@ -15,6 +15,24 @@ types carry the `Pipelex` prefix; the supporting types (`DryRunStatus`, `Validat
 not the field names inside it. Fixes and lints are language-level concepts, and the runtime
 names them brand-neutrally too.
 
+Two members of the valid arm are deliberately **not** Pipelex's to declare. `pipe_io_contracts`
+and `input_form` are the standard's own recommended extension fields of the validate report, each
+with a normative page and a client model since `mthds` v0.9.0, so they are narrowed here **by
+import** — `PipeIOContracts` from `mthds.protocol.pipe_io_contracts`, `InputForm` from
+`mthds.protocol.input_form`. That keeps the "this SDK is transport, it does not own these types"
+principle intact while the payloads stop being opaque: there is one declaration per language, and
+an import cannot drift from it the way a restatement could. The types are used, never re-exported —
+a consumer that wants to name a node's type (`ListField`, `PresenceMarker`, …) imports it from
+`mthds.protocol` directly, where it belongs. `bundle_blueprint` and `graph_spec` stay opaque for
+the reason that used to cover all four: no published package declares them, so a type here could
+only be a copy.
+
+Strictness composes rather than spreads. The imported artifacts are **closed** shapes
+(`extra="forbid"`) — a member this `mthds` version does not define is version drift, refused at the
+parse — while the report envelope around them stays extension-open (`extra="allow"`, inherited from
+`ValidationReport`), so an unrelated field a future server adds to the report still parses and still
+rides `model_extra`.
+
 `PipelexAPIClient.validate()` returns this `PipelexValidationResult` (parsed via
 `PipelexValidationResultAdapter`); the protocol base `MthdsAPIClient.validate()` returns the
 neutral `mthds` `ValidationResult`.
@@ -25,7 +43,9 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Any, Final, Literal, TypeAlias
 
+from mthds.protocol.input_form import InputForm
 from mthds.protocol.models import InvalidValidationReport, ValidationDiagnostic, ValidationReport
+from mthds.protocol.pipe_io_contracts import PipeIOContracts
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pipelex_sdk._pydantic_utils import empty_list_factory_of
@@ -276,8 +296,31 @@ class PipelexValidationReport(ValidationReport):
     """The valid arm narrowed with pipelex's structural artifacts (`is_valid: true`)."""
 
     bundle_blueprint: dict[str, Any] = Field(default_factory=dict)
-    pipe_io_contracts: dict[str, Any] = Field(default_factory=dict)
+    """The parsed bundle, carried opaquely: no published package declares its shape, so a type
+    here could only be a copy free to drift from the runtime that emits it."""
+
+    pipe_io_contracts: PipeIOContracts = Field(default_factory=dict)
+    """The per-pipe I/O contracts, typed by importing the standard's own client models.
+
+    `PipeIOContracts` is `dict[pipe_ref, PipeIOContract]` (`mthds.protocol.pipe_io_contracts`), so a
+    declared input slot reads as typed members — `concept_ref`, a three-valued `presence`
+    (`PresenceMarker`), a `multiplicity` (`IOMultiplicity`), the `item_count` that is non-null exactly
+    on the fixed arm, and its `json_schema` — and the output side reads its own asymmetric shape
+    (a two-valued `optional`, because `!` is rejected on an output). The artifact belongs to the
+    standard, so it is imported rather than restated: one declaration per language is what makes
+    drift impossible, which is precisely what keeping it opaque used to buy.
+
+    Contracts are **closed** shapes: a member this `mthds` version does not define is version drift
+    and fails the parse. That closure is scoped to the artifact — the report around it stays
+    extension-open — and it is the reason a contract from a runner predating the presence/multiplicity
+    reshape no longer parses.
+
+    Defaults to an empty map rather than `None`: the Pipelex valid arm always states the artifact, so
+    no caller has to test for its absence."""
+
     graph_spec: Any = None
+    """The execution graph, carried opaquely for the same reason as `bundle_blueprint`."""
+
     validated_pipes: list[ValidatedPipeEntry] = Field(default_factory=empty_list_factory_of(ValidatedPipeEntry))
     pending_signatures: list[str] = Field(default_factory=list)
     is_runnable: bool = True
@@ -295,14 +338,19 @@ class PipelexValidationReport(ValidationReport):
 
     Defaults empty for the same reason as `warnings`: an older runner's body must keep parsing."""
 
-    input_form: dict[str, Any] | None = None
-    """Per-pipe input-form descriptors, keyed exactly like `pipe_io_contracts`.
+    input_form: InputForm | None = None
+    """Per-pipe input-form descriptors, keyed exactly like `pipe_io_contracts`, typed by importing
+    the standard's own client models.
+
+    `InputForm` is `dict[pipe_ref, PipeInputFormDescriptor]` (`mthds.protocol.input_form`), whose
+    `fields` are the recursive `InputFormField` union discriminated on `kind`: narrow a node with
+    `match node: case ListField(): ...` or an `isinstance` check, importing the per-kind models from
+    `mthds.protocol.input_form`. Imported rather than restated, for the same reason as the contracts,
+    and closed the same way.
 
     Optional on purpose: it is present only when the request named the `input_form` view
-    (`VALIDATION_VIEW_INPUT_FORM`), and an older runner emitted it unconditionally — `None`
-    by default is the one typing that reads a body from either runner correctly. Kept opaque
-    like `bundle_blueprint`, `pipe_io_contracts` and `graph_spec`, because the descriptor
-    vocabulary is owned elsewhere and a second copy here would be free to drift."""
+    (`VALIDATION_VIEW_INPUT_FORM`), and an older runner emitted it unconditionally — `None` by
+    default is the one typing that reads a body from either runner correctly."""
 
     rendered_markdown: str | None = None
     """Opt-in Pipelex-API presentation extra: the server-rendered Markdown view of the verdict,
