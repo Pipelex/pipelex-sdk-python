@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from mthds.protocol.input_form import DocumentField, ListField, TextField
+from mthds.protocol.input_form import DocumentField, DocumentItem, ListField, TextField
 from mthds.protocol.pipe_io_contracts import IOMultiplicity, PresenceMarker
 from pydantic import ValidationError
 
@@ -402,8 +402,12 @@ class TestValidationContract:
         assert list_node.gating is False
         # No `item_count`: the slot is variable-length, not a fixed `[N]`.
         assert list_node.item_count is None
-        # The recursion is typed through: the item is itself a narrowed node.
-        assert isinstance(list_node.item, DocumentField)
+        # The recursion is typed through: the item is itself a narrowed node — but on the
+        # nameless layer. A list's item parses into the `*Item` union, never the `*Field` one.
+        assert isinstance(list_node.item, DocumentItem)
+        # `DocumentField` is `DocumentItem` plus `name`, so the negative is what pins the split:
+        # narrowing to the item layer alone would still admit a named node.
+        assert not isinstance(list_node.item, DocumentField)
         assert list_node.item.concept_ref == "native.Document"
         # Pipe-slot facts live on the top-level field only, never on a list's item.
         assert list_node.item.presence is None

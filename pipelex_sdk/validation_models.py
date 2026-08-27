@@ -348,6 +348,13 @@ class PipelexValidationReport(ValidationReport):
     `mthds.protocol.input_form`. Imported rather than restated, for the same reason as the contracts,
     and closed the same way.
 
+    The recursion changes layer, and a consumer narrowing it has to follow. Since `mthds` v0.10.0 the
+    union is split in two by whether the node names itself: a top-level field is the **named** union
+    (`TextField`, `DocumentField`, …, each requiring `name: str`), while a `ListField.item` is the
+    **nameless** counterpart (`TextItem`, `DocumentItem`, …), which refuses a `name` at the parse. So
+    a list's item narrows to `DocumentItem`, never `DocumentField` — and since each `*Field` derives
+    from its `*Item`, only the item layer is a safe narrowing target at that position.
+
     Optional on purpose: it is present only when the request named the `input_form` view
     (`VALIDATION_VIEW_INPUT_FORM`), and an older runner emitted it unconditionally — `None` by
     default is the one typing that reads a body from either runner correctly."""
