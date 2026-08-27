@@ -13,6 +13,10 @@
 
 No release is cut from this entry: it lands under the workspace input-form program, whose Stage 3 repos record their warrants here and cut versions together in a later release cascade.
 
+### Fixed
+
+- The publish workflow's Sigstore signing step is pinned to `sigstore/gh-action-sigstore-python@790bc6befb9d733738f18d8f895854b453640ec9` (v3.5.0), replacing the `v3.0.0` tag. The `sigstore-python` bundled in v3.0.0 predates the Sigstore TUF trust-root rotation and now fails deterministically with `tuf.api.exceptions.UnsignedMetadataError: root was signed by 0/3 keys`, which would have failed the `github-release` job at the next release — PyPI publication is a separate job and would have succeeded, leaving a published package with no GitHub release and no tag, exactly what happened to `mthds-python` v0.9.0. That SHA is the one the enterprise Actions allowlist already carries, so it is the only version this repo can move to without an allowlist change.
+
 ## [v0.6.0] - 2026-08-25
 
 ### Added
