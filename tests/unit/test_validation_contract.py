@@ -11,6 +11,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from mthds.protocol.input_form import DocumentField, DocumentItem, ListField, TextField
+from mthds.protocol.pipe_io_contracts import IOMultiplicity, PresenceMarker
 from pydantic import ValidationError
 
 from pipelex_sdk.validation_models import (
@@ -38,8 +40,28 @@ VALID_BODY: dict[str, Any] = {
     "bundle_blueprint": {"source": "contracts.mthds", "domain": "legal_contracts"},
     "pipe_io_contracts": {
         "legal_contracts.summarize": {
-            "inputs": {"contract": {"concept_ref": "legal_contracts.Contract", "json_schema": {}}},
-            "output": {"concept_ref": "legal_contracts.Summary", "multiplicity": "single"},
+            "inputs": {
+                "contract": {
+                    "concept_ref": "legal_contracts.Contract",
+                    "presence": "plain",
+                    "multiplicity": "single",
+                    "item_count": None,
+                    "json_schema": {"type": "object"},
+                },
+                "attachments": {
+                    "concept_ref": "native.Document",
+                    "presence": "plain",
+                    "multiplicity": "variable",
+                    "item_count": None,
+                    "json_schema": {"type": "array", "items": {"type": "object"}},
+                },
+            },
+            "output": {
+                "concept_ref": "legal_contracts.Summary",
+                "multiplicity": "single",
+                "item_count": None,
+                "optional": False,
+            },
         }
     },
     "validated_pipes": [{"pipe_ref": "legal_contracts.summarize", "status": "SUCCESS"}],
@@ -128,7 +150,35 @@ VALID_BODY_WITH_VIEWS: dict[str, Any] = {
             "absence_source": "optional input `profile` of legal_contracts.summarize",
         }
     ],
-    "input_form": {"legal_contracts.summarize": {"fields": [{"name": "contract", "kind": "text"}]}},
+    "input_form": {
+        "legal_contracts.summarize": {
+            "fields": [
+                {
+                    "kind": "text",
+                    "name": "contract",
+                    "title": "Contract",
+                    "concept_ref": "legal_contracts.Contract",
+                    "required": True,
+                    "presence": "plain",
+                    "gating": True,
+                    "max_length": 20000,
+                },
+                {
+                    "kind": "list",
+                    "name": "attachments",
+                    "concept_ref": "native.Document",
+                    "required": True,
+                    "presence": "plain",
+                    # A variable-length list is required yet never gates: the empty list is a
+                    # legitimate value, which is why the wire states gating instead of deriving it.
+                    "gating": False,
+                    # The item states `required` like any node — only `presence` and `gating` are
+                    # pipe-slot facts a nested node must not carry.
+                    "item": {"kind": "document", "concept_ref": "native.Document", "required": True},
+                },
+            ]
+        }
+    },
 }
 
 # The 0.17+ invalid arm: the new `missing_pipe_code` locator and a structured repair proposal.
@@ -158,6 +208,39 @@ INVALID_BODY_WITH_FIX: dict[str, Any] = {
     "is_runnable": False,
     "message": "Validation found errors.",
 }
+
+
+# The contracts as a runner predating the presence/multiplicity reshape emitted them: a boolean
+# `optional` on the input side, no `presence`, no `multiplicity`, no `item_count`. Typing the field
+# by import is what makes this body a parse failure rather than an untyped passenger — the one
+# behavioural break of the narrowing, and the shape that documents it.
+PRE_RESHAPE_CONTRACTS_BODY: dict[str, Any] = {
+    **VALID_BODY,
+    "pipe_io_contracts": {
+        "legal_contracts.summarize": {
+            "inputs": {"contract": {"concept_ref": "legal_contracts.Contract", "optional": False, "json_schema": {}}},
+            "output": {"concept_ref": "legal_contracts.Summary", "multiplicity": "single"},
+        }
+    },
+}
+
+
+def _body_with_contracts(input_contract: dict[str, Any]) -> dict[str, Any]:
+    """A valid body whose one pipe declares exactly `input_contract` as its single input slot."""
+    return {
+        **VALID_BODY,
+        "pipe_io_contracts": {
+            "legal_contracts.summarize": {
+                "inputs": {"contract": input_contract},
+                "output": {"concept_ref": "legal_contracts.Summary", "multiplicity": "single", "item_count": None, "optional": False},
+            }
+        },
+    }
+
+
+def _body_with_descriptor_field(field: dict[str, Any]) -> dict[str, Any]:
+    """A valid body whose one pipe's input form holds exactly `field`."""
+    return {**VALID_BODY, "input_form": {"legal_contracts.summarize": {"fields": [field]}}}
 
 
 def _parse(body: dict[str, Any]) -> PipelexValidationResult:
@@ -190,6 +273,31 @@ class TestValidationContract:
         assert report.validated_pipes[0].pipe_ref == "legal_contracts.summarize"
         assert report.validated_pipes[0].status is DryRunStatus.SUCCESS
         assert report.mthds_contents == ["<verbatim submitted source>"]
+
+    def test_pipe_io_contracts_read_as_the_standards_models(self) -> None:
+        """The contracts are typed by import: presence, multiplicity and the output asymmetry read as members."""
+        report = _parse(VALID_BODY)
+        assert isinstance(report, PipelexValidationReport)
+        contract = report.pipe_io_contracts["legal_contracts.summarize"]
+
+        single = contract.inputs["contract"]
+        assert single.concept_ref == "legal_contracts.Contract"
+        assert single.presence is PresenceMarker.PLAIN
+        assert single.presence.is_optional is False
+        assert single.multiplicity is IOMultiplicity.SINGLE
+        assert single.multiplicity.is_plural is False
+        assert single.item_count is None
+        assert single.json_schema == {"type": "object"}
+
+        plural = contract.inputs["attachments"]
+        assert plural.multiplicity is IOMultiplicity.VARIABLE
+        assert plural.multiplicity.is_plural is True
+
+        # The output side is deliberately asymmetric: a two-valued `optional`, no schema.
+        assert contract.output.concept_ref == "legal_contracts.Summary"
+        assert contract.output.multiplicity is IOMultiplicity.SINGLE
+        assert contract.output.item_count is None
+        assert contract.output.optional is False
 
     def test_invalid_arm_carries_structured_errors_without_artifacts(self) -> None:
         """The invalid arm carries typed `validation_errors[]` and no structural artifacts."""
@@ -267,8 +375,113 @@ class TestValidationContract:
         assert liftable.skipped_when_absent == ["profile"]
         assert liftable.absence_source == "optional input `profile` of legal_contracts.summarize"
         assert report.input_form is not None
-        # Keyed exactly like `pipe_io_contracts`, and opaque on purpose.
+        # Keyed exactly like `pipe_io_contracts` — the same `pipe_ref` set addresses both artifacts.
         assert set(report.input_form) == set(report.pipe_io_contracts)
+
+    def test_input_form_reads_as_the_standards_models(self) -> None:
+        """The descriptor is typed by import: nodes narrow on `kind`, and the recursion is typed through."""
+        report = _parse(VALID_BODY_WITH_VIEWS)
+        assert isinstance(report, PipelexValidationReport)
+        assert report.input_form is not None
+        descriptor = report.input_form["legal_contracts.summarize"]
+
+        text_node, list_node = descriptor.fields
+        # A node narrows to its per-kind model, which is what carries that kind's own slots.
+        assert isinstance(text_node, TextField)
+        assert text_node.name == "contract"
+        assert text_node.title == "Contract"
+        assert text_node.required is True
+        assert text_node.presence is PresenceMarker.PLAIN
+        assert text_node.gating is True
+        assert text_node.max_length == 20000
+
+        assert isinstance(list_node, ListField)
+        assert list_node.name == "attachments"
+        assert list_node.required is True
+        # Required yet non-gating, stated rather than re-derived from `required`.
+        assert list_node.gating is False
+        # No `item_count`: the slot is variable-length, not a fixed `[N]`.
+        assert list_node.item_count is None
+        # The recursion is typed through: the item is itself a narrowed node — but on the
+        # nameless layer. A list's item parses into the `*Item` union, never the `*Field` one.
+        assert isinstance(list_node.item, DocumentItem)
+        # `DocumentField` is `DocumentItem` plus `name`, so the negative is what pins the split:
+        # narrowing to the item layer alone would still admit a named node.
+        assert not isinstance(list_node.item, DocumentField)
+        assert list_node.item.concept_ref == "native.Document"
+        # Pipe-slot facts live on the top-level field only, never on a list's item.
+        assert list_node.item.presence is None
+        assert list_node.item.gating is None
+
+    def test_typed_artifacts_do_not_close_the_report_envelope(self) -> None:
+        """An unrelated future extension field on the report still parses and still rides `model_extra`.
+
+        This is the guard that keeps the two strictness regimes composed the way the standard
+        intends: the imported artifacts are closed shapes, while the report envelope around them
+        stays extension-open. A future edit that reached for `extra="forbid"` on the report — or a
+        narrowing that somehow propagated the artifacts' closure outward — fails here.
+        """
+        report = _parse({**VALID_BODY_WITH_VIEWS, "cost_estimate": {"usd": 0.01}, "some_future_view": ["anything"]})
+        assert isinstance(report, PipelexValidationReport)
+        extra = report.model_extra or {}
+        assert extra["cost_estimate"] == {"usd": 0.01}
+        assert extra["some_future_view"] == ["anything"]
+        # And the typed artifacts parsed all the same.
+        assert report.input_form is not None
+        assert "legal_contracts.summarize" in report.pipe_io_contracts
+
+    @pytest.mark.parametrize(
+        "drifted_body",
+        [
+            pytest.param(
+                _body_with_contracts(
+                    {
+                        "concept_ref": "legal_contracts.Contract",
+                        "presence": "plain",
+                        "multiplicity": "single",
+                        "item_count": None,
+                        "json_schema": {"type": "object"},
+                        "tolerance": "lenient",
+                    }
+                ),
+                id="undefined-member-inside-an-input-contract",
+            ),
+            pytest.param(
+                _body_with_contracts(
+                    {
+                        "concept_ref": "legal_contracts.Contract",
+                        "presence": "plain",
+                        "multiplicity": "fixed",
+                        "item_count": None,
+                        "json_schema": {"type": "array", "items": {"type": "object"}},
+                    }
+                ),
+                id="fixed-multiplicity-missing-its-item-count",
+            ),
+            pytest.param(
+                _body_with_descriptor_field(
+                    {"kind": "text", "name": "contract", "required": True, "presence": "plain", "gating": True, "widget": "textarea"}
+                ),
+                id="undefined-member-inside-a-field-descriptor",
+            ),
+            pytest.param(
+                _body_with_descriptor_field({"kind": "text", "name": "contract", "required": True}),
+                id="top-level-field-stating-no-pipe-slot-facts",
+            ),
+            pytest.param(PRE_RESHAPE_CONTRACTS_BODY, id="pre-reshape-contract-carrying-the-boolean-optional"),
+        ],
+    )
+    def test_artifact_drift_fails_the_parse(self, drifted_body: dict[str, Any]) -> None:
+        """Inside an artifact, an undefined member or a violated invariant is version drift and is refused.
+
+        Deliberate, and the standard's own rule (both artifacts are closed shapes) rather than this
+        SDK's invention: the artifact is a view of one version of the standard and does not grow,
+        where the report is the envelope and does. The pre-reshape case is the one behavioural break
+        of typing these fields — a runner older than the presence/multiplicity reshape emits an input
+        contract this package refuses, where it used to ride through untyped.
+        """
+        with pytest.raises(ValidationError):
+            _parse(drifted_body)
 
     def test_valid_arm_warning_reads_every_explicit_null_as_none(self) -> None:
         """Every explicitly-null locator on a warning reads as `None`.
@@ -291,8 +504,12 @@ class TestValidationContract:
         assert warning.declared_concepts is None
         assert warning.suggested_fix is None
 
-    def test_pre_0_52_valid_body_still_parses_with_empty_defaults(self) -> None:
-        """A body from a runner predating the fields parses: both lists empty, `input_form` None."""
+    def test_valid_body_without_the_view_fields_parses_with_empty_defaults(self) -> None:
+        """A verdict that carries none of the opt-in members parses: both lists empty, `input_form` None.
+
+        That is what a caller who never asked for a view reads, and also what a runner predating
+        those members emits — the defaults make the two indistinguishable, on purpose.
+        """
         report = _parse(VALID_BODY)
         assert isinstance(report, PipelexValidationReport)
         assert report.warnings == []
