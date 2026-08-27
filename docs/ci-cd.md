@@ -28,6 +28,7 @@ The lint and test matrices use the repo `Makefile` targets, which honor `PYTHON_
 
 - **PyPI Trusted Publishing**: register `Pipelex/pipelex-sdk-python` as a trusted publisher for the `pipelex-sdk` project, environment `pypi`. No API token secret is needed.
 - **CLA secrets** (org-level, shared with the other `Pipelex` Python repos): `CLA_GH_APP_ID`, `CLA_GH_APP_PRIVATE_KEY`. The GitHub App must have access to `cla-signatures` and this repo.
+- **Actions allowlist**: third-party actions are allowlisted at the *enterprise* level, above both the `Pipelex` and `mthds-ai` organizations, and the allowlist keys on the exact commit SHA. `sigstore/gh-action-sigstore-python` is allowlisted at `790bc6befb9d733738f18d8f895854b453640ec9` (v3.5.0), which is why the publish workflow pins that SHA rather than a tag. Moving it to any other version needs an enterprise admin to add the new SHA first, or the `github-release` job fails before it runs.
 
 ## Release flow (summary)
 
