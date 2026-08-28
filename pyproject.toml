@@ -1,6 +1,6 @@
 [project]
 name = "pipelex-sdk"
-version = "0.6.0"
+version = "0.7.0"
 description = "The Python client for the Pipelex hosted API — the MTHDS Protocol surface plus the durable run lifecycle and the Pipelex product surface, built on the `mthds` protocol base."
 authors = [{ name = "Evotis S.A.S.", email = "oss@pipelex.com" }]
 maintainers = [{ name = "Pipelex staff", email = "oss@pipelex.com" }]
@@ -18,7 +18,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "mthds>=0.8.2",
+  "mthds==0.11.1",
   "pydantic>=2.10.6,<3.0.0",
   "typing-extensions>=4.0.0",
   "httpx>=0.23.0,<1.0.0",
@@ -190,121 +190,121 @@ target-version = "py311"
 preview = true
 select = ["ALL"]
 ignore = [
-  "missing-return-type-undocumented-public-function",   # Missing return type annotation for public function `my_func`
-  "missing-return-type-private-function",   # Missing return type annotation for private function `my_func`
-  "missing-return-type-special-method",   # Missing return type annotation for special method `my_func`
-  "missing-return-type-class-method",   #  Missing return type annotation for classmethod `my_func`
-  "any-type",   # Dynamically typed expressions (typing.Any) are disallowed in `...`
-  "blocking-open-call-in-async-function", # Async functions should not open files with blocking methods like `open`
-  "blocking-path-method-in-async-function", # Async functions should not use pathlib.Path methods, use trio.Path or anyio.path
+  "missing-return-type-undocumented-public-function", # Missing return type annotation for public function `my_func`
+  "missing-return-type-private-function",             # Missing return type annotation for private function `my_func`
+  "missing-return-type-special-method",               # Missing return type annotation for special method `my_func`
+  "missing-return-type-class-method",                 #  Missing return type annotation for classmethod `my_func`
+  "any-type",                                         # Dynamically typed expressions (typing.Any) are disallowed in `...`
+  "blocking-open-call-in-async-function",             # Async functions should not open files with blocking methods like `open`
+  "blocking-path-method-in-async-function",           # Async functions should not use pathlib.Path methods, use trio.Path or anyio.path
 
   "class-as-data-structure", # Class could be dataclass or namedtuple
 
-  "complex-structure",   # Is to complex
+  "complex-structure",      # Is to complex
   "missing-trailing-comma", # Checks for the absence of trailing commas.
 
   "missing-copyright-notice", # Missing copyright notice at top of file
 
-  "undocumented-public-module", # Missing docstring in public module
-  "undocumented-public-class", # Missing docstring in public class
-  "undocumented-public-method", # Missing docstring in public method
-  "undocumented-public-function", # Missing docstring in public function
-  "undocumented-public-package", # Missing docstring in public package
-  "undocumented-magic-method", # Missing docstring in magic method
-  "undocumented-public-init", # Missing docstring in __init__
+  "undocumented-public-module",       # Missing docstring in public module
+  "undocumented-public-class",        # Missing docstring in public class
+  "undocumented-public-method",       # Missing docstring in public method
+  "undocumented-public-function",     # Missing docstring in public function
+  "undocumented-public-package",      # Missing docstring in public package
+  "undocumented-magic-method",        # Missing docstring in magic method
+  "undocumented-public-init",         # Missing docstring in __init__
   "missing-blank-line-after-summary", # 1 blank line required between summary line and description
-  "missing-trailing-period", # First line should end with a period
-  "non-imperative-mood", # First line of docstring should be in imperative mood: "My docstring...."
-  "docstring-starts-with-this", # First word of the docstring should not be "This"
-  "missing-terminal-punctuation", # First line should end with a period, question mark, or exclamation point
+  "missing-trailing-period",          # First line should end with a period
+  "non-imperative-mood",              # First line of docstring should be in imperative mood: "My docstring...."
+  "docstring-starts-with-this",       # First word of the docstring should not be "This"
+  "missing-terminal-punctuation",     # First line should end with a period, question mark, or exclamation point
 
-  "docstring-missing-returns", # `return` is not documented in docstring
-  "docstring-extraneous-returns", # Docstring should not have a returns section because the function doesn't return anything
-  "docstring-missing-yields", # `yield` is not documented in docstring
+  "docstring-missing-returns",      # `return` is not documented in docstring
+  "docstring-extraneous-returns",   # Docstring should not have a returns section because the function doesn't return anything
+  "docstring-missing-yields",       # `yield` is not documented in docstring
   "docstring-extraneous-exception", # Raised exception is not explicitly raised: `FileNotFoundError`
-  "docstring-missing-exception", # Raised exception `ModuleFileError` missing from docstring
+  "docstring-missing-exception",    # Raised exception `ModuleFileError` missing from docstring
 
-  "call-datetime-without-tzinfo", # `datetime.datetime()` called without a `tzinfo` argument
+  "call-datetime-without-tzinfo",     # `datetime.datetime()` called without a `tzinfo` argument
   "call-datetime-now-without-tzinfo", # `datetime.datetime.now()` called without a `tz` argument
 
   "commented-out-code", # Found commented-out code
 
-  "boolean-type-hint-positional-argument", # Boolean-typed positional argument in function definition
+  "boolean-type-hint-positional-argument",     # Boolean-typed positional argument in function definition
   "boolean-default-value-positional-argument", # Boolean default positional argument in function definition
-  "boolean-positional-value-in-call", #Boolean positional value in function call
+  "boolean-positional-value-in-call",          #Boolean positional value in function call
 
   "line-contains-todo", # Line contains TODO, consider resolving the issue
 
   "read-whole-file", # `open` and `read` should be replaced by `Path(file_path.path).read_text(encoding="utf-8")`
   "repeated-append", # Checks for consecutive calls to append.
-  "math-constant", # Checks for literals that are similar to constants in math module.
+  "math-constant",   # Checks for literals that are similar to constants in math module.
 
   "log-exception-outside-except-handler", # `.exception()` call outside exception handlers
 
   "type-name-incorrect-variance", # `TypeVar` name "SomethingType" does not reflect its covariance; consider renaming it to "SomethingType_co"
-  "compare-to-empty-string", # Checks for comparisons to empty strings.
+  "compare-to-empty-string",      # Checks for comparisons to empty strings.
 
-  "too-many-public-methods", # Too many public methods ( > 20)
-  "too-many-return-statements", # Too many return statements (/6)
-  "too-many-branches", # Too many branches (/12)
-  "too-many-arguments", # Too many arguments in function definition (/5)
-  "too-many-locals", # Too many local variables ( /15)
-  "too-many-statements", # Too many statements (/50)
+  "too-many-public-methods",       # Too many public methods ( > 20)
+  "too-many-return-statements",    # Too many return statements (/6)
+  "too-many-branches",             # Too many branches (/12)
+  "too-many-arguments",            # Too many arguments in function definition (/5)
+  "too-many-locals",               # Too many local variables ( /15)
+  "too-many-statements",           # Too many statements (/50)
   "too-many-positional-arguments", # Too many positional arguments ( /5)
-  "magic-value-comparison", # Magic value used in comparison, consider replacing `2` with a constant variable
-  "no-self-use", # Too many return statements in `for` loop
-  "too-many-nested-blocks", # Too many nested blocks ( > 5)
+  "magic-value-comparison",        # Magic value used in comparison, consider replacing `2` with a constant variable
+  "no-self-use",                   # Too many return statements in `for` loop
+  "too-many-nested-blocks",        # Too many nested blocks ( > 5)
 
   "pytest-incorrect-pytest-import", # Incorrect import of `pytest`; use `import pytest` instead
 
-  "os-path-abspath", # `os.path.abspath()` should be replaced by `Path.resolve()`
-  "os-makedirs", # `os.makedirs()` should be replaced by `Path.mkdir(parents=True)`
-  "os-remove", # `os.remove()` should be replaced by `Path.unlink()`
-  "os-getcwd", # `os.getcwd()` should be replaced by `Path.cwd()`
-  "os-path-join", # `os.path.join()` should be replaced by `Path` with `/` operator
-  "os-path-dirname", # `os.path.dirname()` should be replaced by `Path.parent`
-  "os-path-exists", # `os.path.exists()` should be replaced by `Path.exists()`
-  "os-path-isdir", # `os.path.isdir()` should be replaced by `Path.is_dir()`
+  "os-path-abspath",  # `os.path.abspath()` should be replaced by `Path.resolve()`
+  "os-makedirs",      # `os.makedirs()` should be replaced by `Path.mkdir(parents=True)`
+  "os-remove",        # `os.remove()` should be replaced by `Path.unlink()`
+  "os-getcwd",        # `os.getcwd()` should be replaced by `Path.cwd()`
+  "os-path-join",     # `os.path.join()` should be replaced by `Path` with `/` operator
+  "os-path-dirname",  # `os.path.dirname()` should be replaced by `Path.parent`
+  "os-path-exists",   # `os.path.exists()` should be replaced by `Path.exists()`
+  "os-path-isdir",    # `os.path.isdir()` should be replaced by `Path.is_dir()`
   "os-path-basename", # `os.path.basename()` should be replaced by `Path.name`
-  "builtin-open", # `open()` should be replaced by `Path.open()`
-  "os-listdir", # Use `pathlib.Path.iterdir()` instead.
+  "builtin-open",     # `open()` should be replaced by `Path.open()`
+  "os-listdir",       # Use `pathlib.Path.iterdir()` instead.
 
   "redundant-literal-union", # `Literal["auto"]` is redundant in a union with `str`
 
   "superfluous-else-return", # superfluous-else-return
 
-  "ambiguous-unicode-character-string", # String contains ambiguous `′` (PRIME). Did you mean ``` (GRAVE ACCENT)?
+  "ambiguous-unicode-character-string",  # String contains ambiguous `′` (PRIME). Did you mean ``` (GRAVE ACCENT)?
   "ambiguous-unicode-character-comment", # Comment contains ambiguous `’` (RIGHT SINGLE QUOTATION MARK). Did you mean ``` (GRAVE ACCENT)?
-  "unsorted-dunder-all", # Checks for __all__ definitions that are not ordered according to an "isort-style" sort.
+  "unsorted-dunder-all",                 # Checks for __all__ definitions that are not ordered according to an "isort-style" sort.
 
-  "suppressible-exception", # Use `contextlib.suppress(ValueError)` instead of `try`-`except`-`pass`
+  "suppressible-exception",          # Use `contextlib.suppress(ValueError)` instead of `try`-`except`-`pass`
   "if-else-block-instead-of-if-exp", # Use ternary operator `description = func.__doc__.strip().split("\n")[0] if func.__doc__ else func.__name__` instead of `if`-`else`-block
 
-  "assert", # Use of `assert` detected
-  "exec-builtin", # Use of `exec` detected
+  "assert",                      # Use of `assert` detected
+  "exec-builtin",                # Use of `exec` detected
   "hardcoded-password-func-arg", # Possible hardcoded password assigned to argument: "secret"
-  "hardcoded-password-string", # Possible hardcoded password assigned to: "child_secret"
+  "hardcoded-password-string",   # Possible hardcoded password assigned to: "child_secret"
 
   "suspicious-non-cryptographic-random-usage", # Cryptographically weak pseudo-random number generator
 
   "missing-todo-author", # Missing author in TODO; try: `# TODO(<author_name>): ...` or `# TODO @<author_name>: ...`
-  "missing-todo-link", # Missing issue link for this TODO
+  "missing-todo-link",   # Missing issue link for this TODO
 
   "print", # `print` found
 
   # TODO: stop ignoring these rules
-  "blind-except",  # Do not catch blind exception: `Exception`
-  "empty-method-without-abstract-decorator",    # Checks for empty methods in abstract base classes without an abstract decorator.
-  "non-pep604-annotation-union",   # Use `X | Y` for type annotations
-  "outdated-version-block",   # Version block is outdated for minimum Python version
-  "collapsible-if",  # Use a single `if` statement instead of nested `if` statements
-  "jinja2-autoescape-false",    # Using jinja2 templates with `autoescape=False` is dangerous and can lead to XSS. Ensure `autoescape=True` or use the `select_autoescape` function.
-  "raise-within-try",  # Abstract `raise` to an inner function
-  "manual-list-comprehension", # Use a list comprehension to create a transformed list
-  "redefined-loop-name", # `for` loop variable `line` overwritten by assignment target
-  "try-consider-else",  # Consider moving this statement to an `else` block
-  "deprecated-import",   # `typing.List` is deprecated, use `list` instead
-  "implicit-return",  # Missing explicit `return` at the end of function able to return non-`None` value
+  "blind-except",                            # Do not catch blind exception: `Exception`
+  "empty-method-without-abstract-decorator", # Checks for empty methods in abstract base classes without an abstract decorator.
+  "non-pep604-annotation-union",             # Use `X | Y` for type annotations
+  "outdated-version-block",                  # Version block is outdated for minimum Python version
+  "collapsible-if",                          # Use a single `if` statement instead of nested `if` statements
+  "jinja2-autoescape-false",                 # Using jinja2 templates with `autoescape=False` is dangerous and can lead to XSS. Ensure `autoescape=True` or use the `select_autoescape` function.
+  "raise-within-try",                        # Abstract `raise` to an inner function
+  "manual-list-comprehension",               # Use a list comprehension to create a transformed list
+  "redefined-loop-name",                     # `for` loop variable `line` overwritten by assignment target
+  "try-consider-else",                       # Consider moving this statement to an `else` block
+  "deprecated-import",                       # `typing.List` is deprecated, use `list` instead
+  "implicit-return",                         # Missing explicit `return` at the end of function able to return non-`None` value
 
   # Shrinking a `try` clause changes which statements its handlers cover, so satisfying
   # this rule is an error-handling refactor rather than lint cleanup. Ignored across the
@@ -314,22 +314,33 @@ ignore = [
 ]
 
 [tool.ruff.lint.flake8-type-checking]
-runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+# Ruff matches only the base classes named in the class statement, so it cannot see that the
+# `/v1/validate` narrowings in `validation_models.py` are pydantic models: they extend `mthds`'s
+# report/diagnostic models rather than `BaseModel` directly. Without these entries, an annotation
+# imported from `mthds.protocol` (the input-form descriptor, the pipe I/O contracts) is misread as
+# type-only and pushed into a `TYPE_CHECKING` block, where pydantic cannot resolve it when it
+# builds the model — a runtime failure the linter would have introduced.
+runtime-evaluated-base-classes = [
+  "pydantic.BaseModel",
+  "mthds.protocol.models.ValidationReport",
+  "mthds.protocol.models.InvalidValidationReport",
+  "mthds.protocol.models.ValidationDiagnostic",
+]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = [
-  "implicit-namespace-package",  # Allow test files to not have __init__.py in their directories (avoids namespace collisions)
-  "private-member-access",  # Unit tests legitimately probe private transport/error helpers (e.g. _request_product, _request_json)
-  "import-private-name", # Unit tests legitimately import private module helpers under test (e.g. _parse_error_body)
-  "unused-method-argument",  # Test-double methods match a Protocol signature; an unused param (e.g. a fake build_inputs ignoring `request`) is intentional
-  "float-equality-comparison", # Tests assert exact float literals that round-trip exactly; `pytest.approx` would only add noise
+  "implicit-namespace-package", # Allow test files to not have __init__.py in their directories (avoids namespace collisions)
+  "private-member-access",      # Unit tests legitimately probe private transport/error helpers (e.g. _request_product, _request_json)
+  "import-private-name",        # Unit tests legitimately import private module helpers under test (e.g. _parse_error_body)
+  "unused-method-argument",     # Test-double methods match a Protocol signature; an unused param (e.g. a fake build_inputs ignoring `request`) is intentional
+  "float-equality-comparison",  # Tests assert exact float literals that round-trip exactly; `pytest.approx` would only add noise
 ]
 "examples/**/*.py" = [
   "implicit-namespace-package", # Runnable demo scripts, not an importable package
-  "print",   # print() is the whole point of a demo script
+  "print",                      # print() is the whole point of a demo script
 ]
 
 [tool.uv]

@@ -1,5 +1,25 @@
 # Changelog
 
+## [v0.7.0] - 2026-08-28
+
+### Added
+
+- **Automation:** New Claude skill (`bump-mthds`) and companion script (`upstream_notes.py`) to automate bumping the `mthds` dependency, regenerating locks, and adapting the codebase to upstream protocol changes.
+
+### Changed
+
+- **Dependency:** Pinned `mthds` to an exact version (`mthds==0.11.1`) instead of a floor (`>=0.8.2`), ensuring the SDK and its strict `extra="forbid"` protocol models are always tested against the exact upstream version and preventing runtime parse failures from uncoordinated resolutions. `pipelex` pins the same version, so the two co-install; the two pins must now move in step, because two exact pins on different versions do not resolve at all. (Breaking)
+- **Typing:** `PipelexValidationReport.input_form` and `pipe_io_contracts` are now strictly typed via the standard's own client models (`mthds.protocol.input_form.InputForm` and `mthds.protocol.pipe_io_contracts.PipeIOContracts`) rather than opaque dictionaries. As a result, reports with older contracts (e.g. boolean `optional` instead of `presence`, or missing `multiplicity`/`item_count`) no longer parse; the hosted API emits the reshaped contracts and there is intentionally no compatibility shim for older runners. The types are used, never re-exported — `mthds.protocol` stays the one import path for the vocabulary — and `bundle_blueprint` / `graph_spec` stay opaque, since nothing published declares them. (Breaking)
+- **Parsing:** List items in input forms now parse into nameless unions (e.g. `DocumentItem` instead of `DocumentField`), so code narrowing a list's item must target the item layer (the named layer silently fails `isinstance` checks). Input-form parsing is also tightened to reject contradictory `required`/`presence` combinations, `gating` on optional slots, and explicit `null`s on wire slots (except `default_value`). (Breaking)
+- **Strictness:** The imported artifacts are closed shapes, but the report envelope around them stays extension-open — an unrelated field a future server adds to the report still parses and still rides `model_extra`. The two regimes nest rather than spread, and a test pins both halves.
+- **Linting:** Updated Ruff to include `mthds` models (`ValidationReport`, `InvalidValidationReport`, `ValidationDiagnostic`) in `runtime-evaluated-base-classes`, preventing Pydantic resolution errors from annotations mistakenly moved into `TYPE_CHECKING` blocks.
+- **Documentation:** Updated `README.md` and `docs/architecture.md` to reflect the move from opaque dictionaries to typed MTHDS imports, detailing strictness boundaries and narrowing strategies, and `docs/ci-cd.md` to record that third-party actions are allowlisted at the enterprise level by exact commit SHA.
+
+### Fixed
+
+- **Serialization:** Generating a serialization-mode JSON Schema from `PipelexValidationReport` now outputs the real input-form field shapes instead of an opaque object (resolved via the bump to `mthds` 0.11.1).
+- **CI/CD:** Fixed the GitHub Actions publish workflow by pinning `sigstore/gh-action-sigstore-python` to an enterprise-allowlisted SHA for v3.5.0 (`790bc6befb9d733738f18d8f895854b453640ec9`), resolving a deterministic `UnsignedMetadataError` caused by a Sigstore TUF trust-root rotation that broke the previous `v3.0.0` tag.
+
 ## [v0.6.0] - 2026-08-25
 
 ### Added

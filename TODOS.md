@@ -2,6 +2,8 @@
 
 This is the implementation tracker for the design in [`wip/updates.md`](wip/updates.md). The design answers *what* and *why*; this file is the *how*, broken into phases with checkboxes. Tick a box when the item is done and verified, not when it is started. Every design choice that was open has been decided (see `wip/updates.md` §7) and is treated here as settled: `input_form` stays opaque, `MethodData.python` is a typed `list[MethodFile]` with the converter in this repo, the `method_id` type guard lands now, and an unknown `FixOp.kind` raises.
 
+One of those settled choices has since been superseded: `input_form` is no longer opaque, and neither is `pipe_io_contracts` — both are typed by importing the standard's client models now that `mthds` publishes them. The record of that change, and why it honours rather than overrides the ownership argument the opaque ruling rested on, is [`wip/input-form-typed-narrowing.md`](wip/input-form-typed-narrowing.md). Everything else below stands as written.
+
 Ground rules for every phase, from `CLAUDE.md`:
 
 - Branch: `feature/Typed-method-id-run-option` (already carries the typed `method_id` option and the `delete_method` contract fix). The PR targets `dev`.

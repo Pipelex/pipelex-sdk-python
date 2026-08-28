@@ -503,7 +503,10 @@ class PipelexAPIClient(MthdsAPIClient):
             The 200-diagnostic union: `PipelexValidationReport` (`is_valid: true`) or
             `PipelexInvalidReport` (`is_valid: false`, with `validation_errors`), each
             carrying `rendered_markdown`. A valid report also carries `warnings` and
-            `liftable_pipes`, plus `input_form` when `views` asked for it.
+            `liftable_pipes`, plus `input_form` when `views` asked for it. `input_form` and
+            `pipe_io_contracts` are typed by the standard's own models (`mthds.protocol`),
+            so a field descriptor narrows on its `kind` and a slot's presence and multiplicity
+            read as enums; import the per-kind types from `mthds.protocol.input_form`.
         """
         extra: dict[str, Any] = {"render": _with_validate_markdown_render(render)}
         if mthds_sources is not None:
