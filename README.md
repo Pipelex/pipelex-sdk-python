@@ -55,6 +55,20 @@ async def main() -> None:
         print(result.main_stuff)
 ```
 
+### Run a published method by address
+
+A method reaches every method-taking call in exactly one of three forms: inline source, a `method_ref` address (`github.com/<owner>/<repo>[/<selector>][@<tag>]`, resolved by the server — pipelex-api >= 0.21.0; on `api.pipelex.com` availability follows the platform deploy that forwards it), or a hosted `method_id` (`mt_…`, resolved by the platform). A `method_ref` pairs with nothing — it is a complete run source — and its runs carry typed provenance:
+
+```python
+ack = await client.start(method_ref="github.com/Pipelex/methods/documents@v0.1.0", inputs={...})
+print(ack.method_provenance.commit_sha)  # the SHA actually fetched — stable even if the tag moves
+result = await client.wait_for_result(ack.pipeline_run_id)
+
+# The tooling routes take the same selectors under a strict XOR (exactly one, no pairing):
+report = await client.validate(method_ref="github.com/Pipelex/methods/documents@v0.1.0")
+report = await client.validate(method_id="mt_123")
+```
+
 ### Long runs: start + poll explicitly
 
 Behind the hosted gateway, a synchronous `execute()` is cut off at ~30s and surfaces a `PipelineExecuteTimeoutError` pointing here. For long methods, drive the durable lifecycle yourself — the run survives client disconnects and is resumable by `pipeline_run_id`:

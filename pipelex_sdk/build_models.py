@@ -4,6 +4,8 @@ reads to resolve a pipe's declared inputs.
 The Python SDK had no `/v1/build/*` coverage; `prepare_inputs` needs the explicit
 inputs template, so this adds the `build_inputs` counterpart of `pipelex-sdk-js`'s
 `buildInputs` (only this route — the other build projections are not needed here).
+The crate routes (`/v1/resolve`, `/v1/codegen`) share this module's `CrateRequestBase`
+envelope and `CrateInvalidReport` arm through `crate_models.py`.
 A produced verdict is a `200` discriminated on `is_valid`; a no-verdict condition
 (unknown `pipe_ref`, auth, server fault) throws `ApiResponseError`.
 """
@@ -28,13 +30,63 @@ class MthdsFileItem(BaseModel):
     source: str | None = None
 
 
-class BuildInputsRequest(BaseModel):
-    """Request for `POST /v1/build/inputs`. The closure is supplied as inline `files`."""
+class CrateRequestBase(BaseModel):
+    """The closure selector every crate-family route shares — `/v1/resolve`,
+    `/v1/codegen`, and `/v1/build/*` (mirror of the server's `MthdsFilesRequest` and
+    of `pipelex-sdk-js`'s `CrateRequestBase`).
 
-    files: list[MthdsFileItem]
+    Supply the closure EITHER as inline `files` OR as a `method_ref` — never both, and
+    never neither. An **address-form** `method_ref`
+    (`github.com/<owner>/<repo>[/<selector>][@<tag>]`) is resolved by the server
+    (pipelex-api >= 0.21.0): the repository is fetched at the tag, the package is
+    located by manifest identity, and its `.mthds` files feed the closure with their
+    real relative paths as per-file sources. The **registry form** (any non-address
+    reference) stays reserved and answers `501` until a method registry exists.
+
+    The subclasses own the exclusivity validator, because the crate routes add a third
+    selector (the hosted `method_id`) that the build projections deliberately refuse.
+    """
+
+    files: list[MthdsFileItem] | None = None
+    method_ref: str | None = None
+
+
+class BuildInputsRequest(CrateRequestBase):
+    """Request for `POST /v1/build/inputs`. The closure is inline `files` XOR a
+    `method_ref` address; there is NO by-id form — the `/v1/build/*` projections are
+    deliberately excluded from the hosted tooling selector (`method_id` covers
+    `validate` / `resolve` / `codegen` only), so a stored method is expanded first
+    (fetch it with `get_method` and pass its source as `files`).
+    """
+
     pipe_ref: str | None = None
     format: InputsTemplateFormat = "json"
     explicit: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_method_id(cls, data: Any) -> Any:
+        # A teaching error beats pydantic's default extra="ignore" silently dropping the
+        # key: a caller migrating from the by-id habit must learn the build routes have
+        # no by-id form (mirrors the JS `method_id: never` pin + runtime guard).
+        raw: Any = data
+        if isinstance(data, dict) and "method_id" in data:
+            msg = (
+                "build_inputs takes no method_id — the /v1/build/* projections are excluded from the "
+                "hosted tooling selector (it covers validate/resolve/codegen only). Expand the stored "
+                "method first: fetch it with get_method and pass its MTHDS source as files."
+            )
+            raise ValueError(msg)
+        return raw
+
+    @model_validator(mode="after")
+    def _exactly_one_closure_selector(self) -> Self:
+        # Mirrors the server's own XOR so an illegal shape fails at construction, before
+        # anything hits the wire.
+        if (self.files is None) == (self.method_ref is None):
+            msg = "provide exactly one of `files` or `method_ref`"
+            raise ValueError(msg)
+        return self
 
 
 class BuildInputsValidReport(BaseModel):

@@ -105,3 +105,55 @@ class TestBuildInputs:
         with pytest.raises(ApiResponseError) as exc_info:
             asyncio.run(client.build_inputs(BuildInputsRequest(files=[MthdsFileItem(content="x")], pipe_ref="demo.nope")))
         assert exc_info.value.status == 422
+
+    # ── the closure selector (files XOR method_ref, NO method_id) ────
+
+    def test_method_ref_closure_rides_the_body_with_the_fetch_budget(self, mocker: MockerFixture) -> None:
+        """An address closure may make the server clone before answering, so the request gets
+        the fetch-sized budget instead of the 30s management one.
+        """
+        client = self._client()
+        valid: dict[str, object] = {
+            "is_valid": True,
+            "pipe_ref": "documents.summarize",
+            "message": "ok",
+            "format": "json",
+            "explicit": False,
+            "inputs": {},
+        }
+        send = self._mock_send(mocker, client, _response(200, json_body=valid))
+
+        report = asyncio.run(client.build_inputs(BuildInputsRequest(method_ref="github.com/Pipelex/methods/documents@v0.1.0")))
+
+        call = send.call_args
+        body = json.loads(call.kwargs["content"])
+        assert body == {"method_ref": "github.com/Pipelex/methods/documents@v0.1.0", "format": "json", "explicit": False}
+        assert call.kwargs["request_timeout"] == 180.0
+        assert isinstance(report, BuildInputsValidReport)
+
+    def test_inline_files_keep_the_management_budget(self, mocker: MockerFixture) -> None:
+        client = self._client()
+        valid: dict[str, object] = {"is_valid": True, "pipe_ref": "demo.main", "message": "ok", "format": "json", "explicit": False, "inputs": {}}
+        send = self._mock_send(mocker, client, _response(200, json_body=valid))
+
+        asyncio.run(client.build_inputs(BuildInputsRequest(files=[MthdsFileItem(content="x")])))
+
+        assert send.call_args.kwargs["request_timeout"] == 30.0
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {},
+            {"files": [MthdsFileItem(content="x")], "method_ref": "github.com/x/y@v1"},
+        ],
+    )
+    def test_request_construction_enforces_files_xor_method_ref(self, kwargs: dict[str, object]) -> None:
+        with pytest.raises(ValidationError, match="exactly one"):
+            BuildInputsRequest.model_validate(kwargs)
+
+    def test_method_id_is_refused_with_a_teaching_error(self) -> None:
+        """The `/v1/build/*` projections take no `method_id` — a teaching error beats pydantic
+        silently ignoring the unknown key for a caller migrating off the by-id habit.
+        """
+        with pytest.raises(ValidationError, match="build_inputs takes no method_id"):
+            BuildInputsRequest.model_validate({"method_id": "mt_1"})

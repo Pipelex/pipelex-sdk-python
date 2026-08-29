@@ -11,6 +11,7 @@ from typing import Any
 from mthds.runners.api.models import DictRunResultExecute
 
 from pipelex_sdk.errors import MissingMainStuffError
+from pipelex_sdk.runs import MethodProvenance
 
 
 class PipelexExecuteResult(DictRunResultExecute):
@@ -29,6 +30,12 @@ class PipelexExecuteResult(DictRunResultExecute):
     #: (pipelex >= 0.37 always sends it). `None` only if a runner omits it, in which case
     #: `.main_stuff` raises `MissingMainStuffError`.
     main_stuff_name: str | None = None
+
+    #: Provenance of a `method_ref` run — the resolved address, the requested tag, and the
+    #: commit SHA that was actually fetched (a Pipelex-API extension, pipelex-api >= 0.21.0).
+    #: `None` for inline-source and `method_id` runs, mirroring `PipelexRunResultStart` on
+    #: the durable path.
+    method_provenance: MethodProvenance | None = None
 
     @property
     def main_stuff(self) -> Any:
