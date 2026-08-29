@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
 
+from mthds.protocol.models import RunResultStart
 from mthds.runners.api.models import DictPipeOutputAbstract
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -90,6 +91,35 @@ class RunStatus(StrEnum):
 
 
 # ── Responses ───────────────────────────────────────────────────────
+
+
+class MethodProvenance(BaseModel):
+    """Provenance of a `method_ref` run — a Pipelex-API extension on the run acks.
+
+    The package's resolved full address, the requested tag (`None` for a bare address,
+    which resolves the default branch at HEAD), and the commit SHA that was actually
+    fetched — the SHA is what keeps the run explainable when a tag moves. Attached to
+    the `POST /v1/start` 202 ack (`PipelexRunResultStart.method_provenance`) and the
+    blocking execute response (`PipelexExecuteResult.method_provenance`) for
+    `method_ref` runs, absent (or `None`) otherwise. Extension-open (`extra="allow"`)
+    like every wire model here, so a future server field is preserved.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    address: str
+    tag: str | None = None
+    commit_sha: str
+
+
+class PipelexRunResultStart(RunResultStart):
+    """The `POST /v1/start` 202 ack as the Pipelex API returns it — the protocol's
+    `RunResultStart` plus the server's `method_provenance` extension, populated for
+    `method_ref` runs and absent (`None`) otherwise. The base is extension-open, so
+    any other implementation field still rides `model_extra`.
+    """
+
+    method_provenance: MethodProvenance | None = None
 
 
 class RunPublic(BaseModel):
