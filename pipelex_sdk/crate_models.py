@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Self, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from pipelex_sdk.build_models import CrateInvalidReport, CrateRequestBase
 
@@ -35,14 +35,28 @@ class CrateToolingRequest(CrateRequestBase):
     source before the runner sees the request — nothing is expanded client-side, and it
     is meaningless off-platform. An unknown or foreign-org id is a `404`
     (indistinguishable by design); a stored method with no MTHDS source is a `422`.
+
+    An EMPTY selector is normalized to absent before the XOR counts (the base normalizes
+    `files` / `method_ref`; `method_id` follows the same rule here), so an unusable value
+    never counts as the sole selector and never reaches the wire.
     """
 
     method_id: str | None = None
 
+    @field_validator("method_id")
+    @classmethod
+    def _blank_method_id_is_absent(cls, value: str | None) -> str | None:
+        # A blank id selects nothing — same empty-as-absent rule as the run routes'
+        # `_normalized_selector` boundary. A real value is passed through untouched.
+        if value is None or not value.strip():
+            return None
+        return value
+
     @model_validator(mode="after")
     def _exactly_one_selector(self) -> Self:
         # The strict tooling XOR, enforced at construction so an illegal shape fails
-        # before anything hits the wire (the server 422s the same shapes).
+        # before anything hits the wire (the server 422s the same shapes). Runs after
+        # the field-level empty-as-absent normalization, so it counts real selectors.
         selector_count = sum(1 for selector in (self.files, self.method_ref, self.method_id) if selector is not None)
         if selector_count != 1:
             msg = "provide exactly one of `files`, `method_ref`, or `method_id`"

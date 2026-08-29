@@ -137,6 +137,40 @@ class TestCrateRoutes:
         with pytest.raises(ValidationError, match="exactly one"):
             CodegenRequest.model_validate({**kwargs, "target": "python-pydantic"})
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"files": []},
+            {"method_ref": ""},
+            {"method_ref": "   "},
+            {"method_id": ""},
+            {"method_id": "  \t"},
+            {"files": [], "method_ref": "", "method_id": ""},
+        ],
+    )
+    def test_empty_selectors_are_absent_and_fail_the_xor(self, kwargs: dict[str, object]) -> None:
+        """`files=[]` and blank strings select nothing — the same empty-as-absent rule as the
+        run routes — so an empty selector never counts as the sole one and never reaches the
+        wire as an unusable value: alone it is zero selectors, refused at construction.
+        """
+        with pytest.raises(ValidationError, match="exactly one"):
+            ResolveRequest.model_validate(kwargs)
+        with pytest.raises(ValidationError, match="exactly one"):
+            CodegenRequest.model_validate({**kwargs, "target": "python-pydantic"})
+
+    def test_empty_selector_beside_a_real_one_is_simply_absent(self, mocker: MockerFixture) -> None:
+        """An empty selector beside a real one is absent, not a conflict — exactly-one
+        semantics stay coherent with the run boundary, and the empty key is not sent.
+        """
+        request = ResolveRequest(files=[MthdsFileItem(content="x")], method_ref="", method_id="  ")
+        assert request.method_ref is None
+        assert request.method_id is None
+
+        client = self._client()
+        send = self._mock_send(mocker, client, _response(200, json_body=_RESOLVE_VALID))
+        asyncio.run(client.resolve(request))
+        assert json.loads(send.call_args.kwargs["content"]) == {"files": [{"content": "x"}]}
+
     # ── the fetch-sized budget ───────────────────────────────────────
 
     def test_method_ref_closure_gets_the_fetch_budget(self, mocker: MockerFixture) -> None:

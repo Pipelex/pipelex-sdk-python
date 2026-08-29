@@ -151,6 +151,38 @@ class TestBuildInputs:
         with pytest.raises(ValidationError, match="exactly one"):
             BuildInputsRequest.model_validate(kwargs)
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"files": []},
+            {"method_ref": ""},
+            {"method_ref": "   "},
+            {"files": [], "method_ref": "  "},
+        ],
+    )
+    def test_empty_closure_selectors_are_absent_and_fail_the_xor(self, kwargs: dict[str, object]) -> None:
+        """`files=[]` and a blank `method_ref` select nothing — normalized to absent before the
+        XOR, so an unusable value is refused at construction instead of reaching the wire.
+        """
+        with pytest.raises(ValidationError, match="exactly one"):
+            BuildInputsRequest.model_validate(kwargs)
+
+    def test_blank_method_ref_beside_files_is_simply_absent(self, mocker: MockerFixture) -> None:
+        """Same rule as the run boundary: an empty selector beside a real one is absent, not a
+        conflict — the closure is `files`, the empty key is not sent, the budget stays 30s.
+        """
+        request = BuildInputsRequest(files=[MthdsFileItem(content="x")], method_ref="")
+        assert request.method_ref is None
+
+        client = self._client()
+        valid: dict[str, object] = {"is_valid": True, "pipe_ref": "demo.main", "message": "ok", "format": "json", "explicit": False, "inputs": {}}
+        send = self._mock_send(mocker, client, _response(200, json_body=valid))
+        asyncio.run(client.build_inputs(request))
+
+        body = json.loads(send.call_args.kwargs["content"])
+        assert "method_ref" not in body
+        assert send.call_args.kwargs["request_timeout"] == 30.0
+
     def test_method_id_is_refused_with_a_teaching_error(self) -> None:
         """The `/v1/build/*` projections take no `method_id` — a teaching error beats pydantic
         silently ignoring the unknown key for a caller migrating off the by-id habit.

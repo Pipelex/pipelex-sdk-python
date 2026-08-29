@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Self, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from pipelex_sdk.validation_models import ValidationErrorItem
 
@@ -43,12 +43,32 @@ class CrateRequestBase(BaseModel):
     real relative paths as per-file sources. The **registry form** (any non-address
     reference) stays reserved and answers `501` until a method registry exists.
 
+    An EMPTY selector is normalized to absent before the exclusivity check — `files=[]`
+    selects no closure and `method_ref=""` (or whitespace-only) no address, the same
+    empty-as-absent rule the run routes apply — so an unusable value never counts as the
+    sole selector and never reaches the wire.
+
     The subclasses own the exclusivity validator, because the crate routes add a third
     selector (the hosted `method_id`) that the build projections deliberately refuse.
     """
 
     files: list[MthdsFileItem] | None = None
     method_ref: str | None = None
+
+    @field_validator("files")
+    @classmethod
+    def _empty_files_are_absent(cls, value: list[MthdsFileItem] | None) -> list[MthdsFileItem] | None:
+        # `files=[]` is not a closure — normalize to absent so the XOR counts real selectors only.
+        return value or None
+
+    @field_validator("method_ref")
+    @classmethod
+    def _blank_method_ref_is_absent(cls, value: str | None) -> str | None:
+        # A blank address selects nothing — same empty-as-absent rule as the run routes'
+        # `_normalized_selector` boundary. A real value is passed through untouched.
+        if value is None or not value.strip():
+            return None
+        return value
 
 
 class BuildInputsRequest(CrateRequestBase):
