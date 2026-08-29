@@ -167,3 +167,84 @@ class TestClientValidate:
         client = self._client()
         with pytest.raises(PipelineRequestError):
             asyncio.run(client.validate_files([]))
+
+    # ── method selectors (the strict tooling three-way XOR) ──────────
+
+    def test_method_ref_selector_rides_the_body_without_mthds_contents(self, mocker: MockerFixture) -> None:
+        """A selector validation must NOT carry the `mthds_contents` key at all — the server
+        XORs on presence, and an empty list is a request-shape 422.
+        """
+        client = self._client()
+        send = self._mock_send(mocker, client, json_body=_VALID_BODY)
+
+        asyncio.run(client.validate(method_ref="github.com/Pipelex/methods/documents@v0.1.0"))
+
+        body = self._sent_body(send)
+        assert send.call_args.args[1] == f"{_BASE_URL}/v1/validate"
+        assert body["method_ref"] == "github.com/Pipelex/methods/documents@v0.1.0"
+        assert "mthds_contents" not in body
+        assert "method_id" not in body
+        assert body["allow_signatures"] is False
+        # The markdown render injection holds on the selector path too.
+        assert body["render"] == ["markdown"]
+
+    def test_method_id_selector_is_a_pure_pass_through(self, mocker: MockerFixture) -> None:
+        client = self._client()
+        send = self._mock_send(mocker, client, json_body=_INVALID_BODY)
+
+        result = asyncio.run(client.validate(method_id="mt_1", allow_signatures=True, views=[VALIDATION_VIEW_INPUT_FORM]))
+
+        body = self._sent_body(send)
+        assert body["method_id"] == "mt_1"
+        assert body["allow_signatures"] is True
+        assert body["views"] == ["input_form"]
+        assert "mthds_contents" not in body
+        # A produced invalid verdict still parses into the union's invalid arm.
+        assert isinstance(result, PipelexInvalidReport)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {},
+            {"mthds_contents": []},
+            {"mthds_contents": ["bundle"], "method_ref": "github.com/x/y@v1"},
+            {"mthds_contents": ["bundle"], "method_id": "mt_1"},
+            {"method_ref": "github.com/x/y@v1", "method_id": "mt_1"},
+            {"method_ref": ""},
+        ],
+    )
+    def test_exactly_one_selector_is_enforced(self, mocker: MockerFixture, kwargs: dict[str, object]) -> None:
+        """The tooling routes are stateless, so there is NO linkage exception (unlike the run
+        routes' inline+method_id): zero selectors and every pairing are refused client-side.
+        """
+        client = self._client()
+        send = self._mock_send(mocker, client, json_body=_VALID_BODY)
+
+        with pytest.raises(PipelineRequestError, match="exactly one method selector"):
+            asyncio.run(client.validate(**kwargs))  # type: ignore[arg-type]
+
+        send.assert_not_called()
+
+    def test_mthds_sources_is_rejected_beside_a_selector(self, mocker: MockerFixture) -> None:
+        """Source labels for a selector validation come from the package's (or the stored
+        method's) real file names — `mthds_sources` labels inline contents only.
+        """
+        client = self._client()
+        send = self._mock_send(mocker, client, json_body=_VALID_BODY)
+
+        with pytest.raises(PipelineRequestError, match="mthds_sources labels inline mthds_contents"):
+            asyncio.run(client.validate(method_ref="github.com/x/y@v1", mthds_sources=["a.mthds"]))
+
+        send.assert_not_called()
+
+    @pytest.mark.parametrize("wrong_typed_selector", [0, 123, [], {}, 1.5, True])
+    def test_non_string_selector_raises_before_any_request(self, mocker: MockerFixture, wrong_typed_selector: object) -> None:
+        client = self._client()
+        send = self._mock_send(mocker, client, json_body=_VALID_BODY)
+
+        with pytest.raises(PipelineRequestError, match="method_ref must be a string"):
+            asyncio.run(client.validate(method_ref=wrong_typed_selector))  # type: ignore[arg-type]
+        with pytest.raises(PipelineRequestError, match="method_id must be a string"):
+            asyncio.run(client.validate(method_id=wrong_typed_selector))  # type: ignore[arg-type]
+
+        send.assert_not_called()

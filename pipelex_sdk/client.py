@@ -33,6 +33,14 @@ from pydantic_core import to_json
 from typing_extensions import override
 
 from pipelex_sdk.build_models import BuildInputsRequest, BuildInputsResponse, BuildInputsResponseAdapter, MthdsFileItem
+from pipelex_sdk.crate_models import (
+    CodegenRequest,
+    CodegenResponse,
+    CodegenResponseAdapter,
+    ResolveRequest,
+    ResolveResponse,
+    ResolveResponseAdapter,
+)
 from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
@@ -71,6 +79,7 @@ from pipelex_sdk.product_models import (
     UserProfile,
 )
 from pipelex_sdk.runs import (
+    PipelexRunResultStart,
     PollInfo,
     RunRead,
     RunResultCompleted,
@@ -87,7 +96,6 @@ from pipelex_sdk.validation_models import PipelexValidationResultAdapter, Valida
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from mthds.protocol.models import RunResultStart
     from mthds.protocol.pipe_output import VariableMultiplicity
     from mthds.protocol.pipeline_inputs import PipelineInputs
     from mthds.protocol.stuff import StuffType
@@ -139,6 +147,13 @@ _BARE_RUNNER_IMPLEMENTATION = "pipelex-api"
 # produced validation-error verdict carry `rendered_markdown`; callers may add more tokens.
 _VALIDATE_MARKDOWN_RENDER_FORMAT = "markdown"
 
+# The PIPELEX API's own run args — the layer-2 extension the RUNNER resolves itself
+# (`method_ref`, a run source in its own right). A named parameter here, travelling to the
+# base client through its generic `extra` passthrough exactly like the hosted args below.
+# Reserved on `extra` for the same reason: a smuggled copy would arrive by a second path
+# with different validation and bypass the selector-exclusivity checks.
+_PIPELEX_API_RUN_ARGS: frozenset[str] = frozenset({"method_ref"})
+
 # The HOSTED API's own run args — the layer-3 extensions this client names itself, on top of
 # the MTHDS Protocol's basic run args. They are named parameters here and travel to the base
 # client through its generic `extra` passthrough, which is exactly the layering: the protocol
@@ -150,6 +165,20 @@ _VALIDATE_MARKDOWN_RENDER_FORMAT = "markdown"
 # vendor's server has no business rejecting that vendor's arguments. This is the layered
 # extension policy: a hosted client types its own platform's arguments and guards them per layer.
 _HOSTED_RUN_ARGS: frozenset[str] = frozenset({"method_id"})
+
+# Every request arg this client names itself and therefore guards on `extra` — the union of
+# the layer-2 and layer-3 sets above.
+_RESERVED_RUN_ARGS: frozenset[str] = _PIPELEX_API_RUN_ARGS | _HOSTED_RUN_ARGS
+
+# `method_ref` resolution can make the server CLONE a repository before it answers, and the
+# server-side clone timeout runs well past the 30s management budget on a cold cache — an
+# abort there would report a healthy, still-cloning server as unreachable. So a
+# `method_ref`-carrying crate/build request gets this internal fetch-sized budget instead of
+# `_POLL_REQUEST_TIMEOUT_SECONDS` (no new caller-facing parameter, and inert behind the
+# hosted gateway's own cap). The run routes and `validate` need no such override: they
+# already ride `request_timeout_seconds` (the 20-min blocking-execute ceiling), which clears
+# any clone. Mirrors the JS SDK's `METHOD_REF_FETCH_TIMEOUT_MS`.
+_METHOD_REF_FETCH_TIMEOUT_SECONDS = 180.0
 
 
 class MthdsFile(BaseModel):
@@ -276,16 +305,19 @@ class PipelexAPIClient(MthdsAPIClient):
             msg = f"Could not reach Pipelex API at {self.base_url} ({code})"
             raise ApiUnreachableError(msg, api_url=self.base_url, code=code) from exc
 
-    async def _request_product(self, method: str, endpoint: str, *, body: object | None = None) -> Any:
+    async def _request_product(self, method: str, endpoint: str, *, body: object | None = None, request_timeout: float | None = None) -> Any:
         """Issue a Pipelex-product request (`/v1/me`, `/v1/methods`, `/v1/billing/*`, …)
         and parse its JSON body, mapping a non-2xx response to the typed `ApiResponseError`
         so callers branch on the structured `code` discriminant, not the HTTP status.
 
         Empty-body tolerant — DELETE / onboarding / update routes answer 2xx with no body,
-        returned as `None`. Uses the management-call timeout, not the blocking ceiling.
+        returned as `None`. Uses the management-call timeout, not the blocking ceiling;
+        `request_timeout` overrides it for the crate/build calls whose `method_ref` closure
+        the server may have to fetch first (see `_METHOD_REF_FETCH_TIMEOUT_SECONDS`).
         """
         content = to_json(body) if body is not None else None
-        response = await self._send_or_unreachable(method, self._url(endpoint), content=content, request_timeout=_POLL_REQUEST_TIMEOUT_SECONDS)
+        effective_timeout = request_timeout if request_timeout is not None else _POLL_REQUEST_TIMEOUT_SECONDS
+        response = await self._send_or_unreachable(method, self._url(endpoint), content=content, request_timeout=effective_timeout)
         if not 200 <= response.status_code < 300:
             self._raise_api_response_error(method=method, endpoint=endpoint, response=response)
         if not response.content:
@@ -352,25 +384,31 @@ class PipelexAPIClient(MthdsAPIClient):
         dynamic_output_concept_ref: str | None = None,
         extra: dict[str, Any] | None = None,
         *,
+        method_ref: str | None = None,
         method_id: str | None = None,
     ) -> PipelexExecuteResult:
         """Execute a method synchronously and wait for its completion — `POST /v1/execute`.
 
         Returns a `PipelexExecuteResult` — the protocol's raw execute response enriched with a
         resolved `.main_stuff` accessor, so a blocking result reads its output the same way as a
-        durable one (`result.main_stuff`) instead of digging through `pipe_output`.
+        durable one (`result.main_stuff`) instead of digging through `pipe_output`. A
+        `method_ref` run's result additionally carries `method_provenance` — the address, the
+        tag, and the commit SHA that was actually fetched.
 
-        Identical to the inherited protocol `execute`, except for two things. First, `method_id`
-        — the hosted platform's own run arg (see below). Second, a failure consistent with the
-        hosted gateway's ~30s synchronous ceiling — a gateway `503`/`504`, or a client-side
-        request timeout, after at least ~28s have elapsed — is translated into a clear
-        `PipelineExecuteTimeoutError` pointing at the durable start+poll path, matching the JS
-        SDK. The protocol's optional 202 async-degrade still raises `RunStillRunningError`
-        (from the inherited `execute`), and every other non-2xx keeps the inherited
-        `httpx.HTTPStatusError` regime (consistent with the other inherited protocol routes).
+        Identical to the inherited protocol `execute`, except for three things. First,
+        `method_ref` — the Pipelex API's own run source, resolved by the RUNNER (see below).
+        Second, `method_id` — the hosted platform's own run arg (see below). Third, a failure
+        consistent with the hosted gateway's ~30s synchronous ceiling — a gateway `503`/`504`,
+        or a client-side request timeout, after at least ~28s have elapsed — is translated into
+        a clear `PipelineExecuteTimeoutError` pointing at the durable start+poll path, matching
+        the JS SDK. The protocol's optional 202 async-degrade still raises
+        `RunStillRunningError` (from the inherited `execute`), and every other non-2xx keeps
+        the inherited `httpx.HTTPStatusError` regime (consistent with the other inherited
+        protocol routes).
 
         Args:
-            pipe_code: The code identifying the pipe to execute.
+            pipe_code: The code identifying the pipe to execute. Beside a `method_ref` it
+                overrides the fetched manifest's `main_pipe`.
             mthds_contents: List of MTHDS bundle contents to load.
             inputs: Inputs passed to the method.
             output_name: Name of the output slot to write to.
@@ -378,8 +416,17 @@ class PipelexAPIClient(MthdsAPIClient):
             dynamic_output_concept_ref: Override for the dynamic output concept ref.
             extra: Server-specific extension args this client does not know about, merged into
                 the request body as top-level properties. Protocol args and this client's own
-                hosted args (`method_id`) must be passed as named parameters, not through
-                `extra` (raises `PipelineRequestError`).
+                named args (`method_ref`, `method_id`) must be passed as named parameters, not
+                through `extra` (raises `PipelineRequestError`).
+            method_ref: A published method's address —
+                `github.com/<owner>/<repo>[/<selector>][@<tag>]` (e.g.
+                `github.com/Pipelex/methods/documents@v0.1.0`) — a layer-2 Pipelex-API
+                extension the RUNNER resolves (git fetch at the tag, package located by
+                manifest identity; pipelex-api >= 0.21.0). A complete run source of its own,
+                so it pairs with NOTHING: exclusive with inline `mthds_contents` and with
+                `method_id` (an address run has its own provenance and needs no linkage id) —
+                the illegal pairings are rejected client-side, mirroring the server's 422s.
+                `pipe_code` beside it is fine. An empty string is treated as absent.
             method_id: A stored method's hosted catalog id (`mt_…`) — a pure PASS-THROUGH the
                 platform resolves against the org's catalog; nothing is expanded client-side,
                 and it is meaningless off-platform (an open-source runner answers a `422`
@@ -392,12 +439,15 @@ class PipelexAPIClient(MthdsAPIClient):
         Raises:
             PipelineExecuteTimeoutError: The blocking request hit the hosted gateway's ~30s
                 synchronous ceiling — use `start_and_wait` (or `start` + `wait_for_result`).
-            PipelineRequestError: `extra` carries a protocol arg or a hosted arg, or `method_id`
-                is present and is not a string.
+            PipelineRequestError: `extra` carries a protocol arg or a reserved named arg, a
+                selector is present and is not a string, or `method_ref` is combined with
+                inline `mthds_contents` or with `method_id`.
             RunStillRunningError: The server answered 202 (the protocol's optional async
                 degrade) — the run continues server-side; resume by `pipeline_run_id`.
             httpx.HTTPStatusError: Any other non-2xx response (the inherited regime).
         """
+        merged_extra = _merge_run_extensions(extra, method_ref=method_ref, method_id=method_id)
+        _assert_method_ref_pairs_with_nothing(mthds_contents=mthds_contents, merged_extra=merged_extra)
         started_at = monotonic()
         try:
             result = await super().execute(
@@ -407,7 +457,7 @@ class PipelexAPIClient(MthdsAPIClient):
                 output_name=output_name,
                 output_multiplicity=output_multiplicity,
                 dynamic_output_concept_ref=dynamic_output_concept_ref,
-                extra=_merge_hosted_run_extensions(extra, method_id),
+                extra=merged_extra,
             )
         except (httpx.HTTPStatusError, httpx.TimeoutException) as exc:
             elapsed_seconds = monotonic() - started_at
@@ -431,45 +481,63 @@ class PipelexAPIClient(MthdsAPIClient):
         dynamic_output_concept_ref: str | None = None,
         extra: dict[str, Any] | None = None,
         *,
+        method_ref: str | None = None,
         method_id: str | None = None,
-    ) -> RunResultStart:
+    ) -> PipelexRunResultStart:
         """Start a method asynchronously — `POST /v1/start` (202: `pipeline_run_id` only).
 
-        Identical to the inherited protocol `start`, except for `method_id` — the hosted
-        platform's own run arg, documented on `execute` and carrying the same semantics here —
-        and that a bare-runner missing-route 404 (no run store) is translated into a clear
-        `RunLifecycleUnavailableError` instead of a raw `httpx.HTTPStatusError`, matching the JS
-        SDK and letting `start_and_wait` self-heal to the blocking-execute fallback. The
+        Identical to the inherited protocol `start`, except for the two method selectors —
+        `method_ref` (the Pipelex API's own run source, resolved by the runner) and
+        `method_id` (the hosted platform's own run arg), both documented on `execute` and
+        carrying the same semantics and exclusivity here — and that a bare-runner
+        missing-route 404 (no run store) is translated into a clear
+        `RunLifecycleUnavailableError` instead of a raw `httpx.HTTPStatusError`, matching the
+        JS SDK and letting `start_and_wait` self-heal to the blocking-execute fallback. The
         platform's structured 404s (run not found) keep their normal `httpx.HTTPStatusError`
         behavior.
 
+        Returns:
+            The 202 ack as `PipelexRunResultStart` — the authoritative `pipeline_run_id`,
+            plus `method_provenance` (`{address, tag, commit_sha}`) for a `method_ref` run
+            (the server fetches the package before the ack, so provenance rides the 202);
+            `None` otherwise.
+
         Raises:
-            PipelineRequestError: `extra` carries a protocol arg or a hosted arg, or `method_id`
-                is present and is not a string.
+            PipelineRequestError: `extra` carries a protocol arg or a reserved named arg, a
+                selector is present and is not a string, or `method_ref` is combined with
+                inline `mthds_contents` or with `method_id`.
             RunLifecycleUnavailableError: The configured server has no run store.
         """
+        merged_extra = _merge_run_extensions(extra, method_ref=method_ref, method_id=method_id)
+        _assert_method_ref_pairs_with_nothing(mthds_contents=mthds_contents, merged_extra=merged_extra)
         try:
-            return await super().start(
+            result = await super().start(
                 pipe_code=pipe_code,
                 mthds_contents=mthds_contents,
                 inputs=inputs,
                 output_name=output_name,
                 output_multiplicity=output_multiplicity,
                 dynamic_output_concept_ref=dynamic_output_concept_ref,
-                extra=_merge_hosted_run_extensions(extra, method_id),
+                extra=merged_extra,
             )
         except httpx.HTTPStatusError as exc:
             self._raise_if_lifecycle_unavailable(exc.response, str(exc.request.url))
             raise
+        # Re-validate the base ack into the Pipelex-branded subtype (types `method_provenance`;
+        # any other implementation extra keeps riding `model_extra`).
+        return PipelexRunResultStart.model_validate(result.model_dump())
 
     @override
     async def validate(  # type: ignore[override]
         self,
-        mthds_contents: list[str],
+        mthds_contents: list[str] | None = None,
         allow_signatures: bool = False,
         mthds_sources: list[str] | None = None,
         render: list[str] | None = None,
         views: list[str] | None = None,
+        *,
+        method_ref: str | None = None,
+        method_id: str | None = None,
     ) -> PipelexValidationResult:
         """Parse, validate, and dry-run an MTHDS bundle — `POST /v1/validate`.
 
@@ -477,19 +545,39 @@ class PipelexAPIClient(MthdsAPIClient):
         body discriminated on `is_valid`, returned verbatim as the `PipelexValidationResult`
         union (an invalid bundle is NOT raised; the caller match/cases `is_valid`). A non-2xx
         means no verdict could be produced (request shape, auth, server fault) and surfaces as
-        `httpx.HTTPStatusError` (the inherited protocol error regime).
+        `httpx.HTTPStatusError` (the inherited protocol error regime). A selector-resolution
+        failure — a fetch failure, no package at the address, an unknown or foreign-org id —
+        is a non-2xx too, never an `is_valid: false` verdict, which is reserved for actual
+        MTHDS content.
+
+        WHAT is validated arrives in exactly one of three forms — the tooling routes' strict
+        three-way XOR (the routes are stateless, so there is no linkage exception; a second
+        selector is rejected client-side, mirroring the server's request-shape `422`):
+
+        - **inline `mthds_contents`** — the protocol's own envelope;
+        - **`method_ref`** — a published method's address, resolved by the server
+          (pipelex-api >= 0.21.0) through the same fetch path as a `method_ref` run, the
+          package's real file names feeding the diagnostics' source labels;
+        - **`method_id`** — a stored method's catalog id, hosted-only: the platform resolves
+          it and injects the stored source before the runner sees the request (a bare runner
+          rejects the request as carrying no source it understands).
 
         This override differs from the inherited protocol `validate` in these Pipelex-API ways:
         it always injects `render: ["markdown"]` (so both valid and invalid verdicts carry
-        `rendered_markdown`), it accepts `mthds_sources` as a named parameter, and it carries
-        the `views` opt-in for the server's structured views.
+        `rendered_markdown`), it accepts `mthds_sources` as a named parameter, it carries the
+        `views` opt-in for the server's structured views, and it takes the two method
+        selectors.
 
         Args:
             mthds_contents: MTHDS contents to load (always a list, even for one file).
+                Exactly one of `mthds_contents` / `method_ref` / `method_id`.
             allow_signatures: Tolerate unimplemented pipe signatures (strict by default).
             mthds_sources: Optional per-content source names, parallel to `mthds_contents`,
                 threaded onto each diagnostic's `source` (an unnamed content yields
-                `source: null`). The server 422s a length mismatch.
+                `source: null`). The server 422s a length mismatch. An inline-contents
+                companion only: a `method_ref` / `method_id` validation gets its source labels
+                from the package's (or the stored method's) real file names, so supplying it
+                beside a selector is rejected client-side.
             render: Optional Pipelex-API presentation hints; `"markdown"` is always added.
                 Unknown tokens are server-side lenient-ignored (never a 422).
             views: Optional opt-in for the server's structured views. `input_form` — named by
@@ -498,6 +586,12 @@ class PipelexAPIClient(MthdsAPIClient):
                 **verbatim**: nothing is injected and nothing is de-duplicated, and an explicit
                 `[]` is sent as `[]`. Left at `None` the key is not sent at all, which is what
                 keeps the default response byte-identical for consumers that discard views.
+            method_ref: A published method's address —
+                `github.com/<owner>/<repo>[/<selector>][@<tag>]` — runner-resolved. An empty
+                string is treated as absent.
+            method_id: A stored method's hosted catalog id (`mt_…`), platform-resolved. An
+                unknown or foreign-org id is a `404` (indistinguishable by design); a stored
+                method with no MTHDS source is a `422`. An empty string is treated as absent.
 
         Returns:
             The 200-diagnostic union: `PipelexValidationReport` (`is_valid: true`) or
@@ -507,16 +601,48 @@ class PipelexAPIClient(MthdsAPIClient):
             `pipe_io_contracts` are typed by the standard's own models (`mthds.protocol`),
             so a field descriptor narrows on its `kind` and a slot's presence and multiplicity
             read as enums; import the per-kind types from `mthds.protocol.input_form`.
+
+        Raises:
+            PipelineRequestError: Zero or several selectors were supplied, a selector is not a
+                string, or `mthds_sources` was supplied beside a selector.
         """
-        extra: dict[str, Any] = {"render": _with_validate_markdown_render(render)}
-        if mthds_sources is not None:
-            extra["mthds_sources"] = mthds_sources
+        selected_method_ref = _normalized_selector(name="method_ref", value=method_ref)
+        selected_method_id = _normalized_selector(name="method_id", value=method_id)
+        selector_count = sum(1 for present in (bool(mthds_contents), selected_method_ref is not None, selected_method_id is not None) if present)
+        if selector_count != 1:
+            msg = "validate() takes exactly one method selector: inline mthds_contents, method_ref, or method_id."
+            raise PipelineRequestError(msg)
+        if mthds_sources is not None and not mthds_contents:
+            msg = (
+                "mthds_sources labels inline mthds_contents; a method_ref / method_id validation gets "
+                "its source labels from the package's (or the stored method's) real file names."
+            )
+            raise PipelineRequestError(msg)
+
+        if mthds_contents:
+            extra: dict[str, Any] = {"render": _with_validate_markdown_render(render)}
+            if mthds_sources is not None:
+                extra["mthds_sources"] = mthds_sources
+            if views is not None:
+                extra["views"] = views
+            # Reuse the inherited transport seam (`_post_validate`) for body-building + the wire
+            # call, then parse the 200-diagnostic body into this SDK's Pipelex-branded narrowing.
+            # The base's own `validate` parses the same body into the neutral `ValidationResult`.
+            response = await self._post_validate(mthds_contents, allow_signatures, extra)
+            return PipelexValidationResultAdapter.validate_python(response.json())
+
+        # A selector validation must NOT carry the `mthds_contents` key at all (the server XORs
+        # on presence, and an empty list is a request-shape 422), so the body is built here
+        # rather than through `_post_validate`, on the same inherited `_send` transport seam.
+        body: dict[str, Any] = {"allow_signatures": allow_signatures, "render": _with_validate_markdown_render(render)}
         if views is not None:
-            extra["views"] = views
-        # Reuse the inherited transport seam (`_post_validate`) for body-building + the wire call,
-        # then parse the 200-diagnostic body into this SDK's Pipelex-branded narrowing. The base's
-        # own `validate` parses the same body into the neutral `mthds` `ValidationResult`.
-        response = await self._post_validate(mthds_contents, allow_signatures, extra)
+            body["views"] = views
+        if selected_method_ref is not None:
+            body["method_ref"] = selected_method_ref
+        if selected_method_id is not None:
+            body["method_id"] = selected_method_id
+        response = await self._send("POST", self._url("validate"), content=to_json(body), request_timeout=self.request_timeout_seconds)
+        response.raise_for_status()
         return PipelexValidationResultAdapter.validate_python(response.json())
 
     async def validate_files(
@@ -700,6 +826,7 @@ class PipelexAPIClient(MthdsAPIClient):
         extra: dict[str, Any] | None = None,
         wait_options: WaitForResultOptions | None = None,
         *,
+        method_ref: str | None = None,
         method_id: str | None = None,
     ) -> RunResults:
         """Start a run and wait for its result — the whole lifecycle in one call, self-healing
@@ -715,8 +842,9 @@ class PipelexAPIClient(MthdsAPIClient):
         from `start`, BEFORE any run is created, so the blocking fallback cannot double-run; the
         negative is cached so later calls skip the durable attempt.
 
-        `method_id` — the hosted platform's own run arg, documented on `execute` — is forwarded
-        on BOTH paths. Dropping it on the blocking fallback would turn a server-side 422 that
+        The method selectors — `method_ref` and `method_id`, documented on `execute` — are
+        forwarded on BOTH paths: a `method_ref` run must run the same fetched package on the
+        blocking fallback, and dropping `method_id` there would turn a server-side 422 that
         names the key into a silently different run.
 
         Raises:
@@ -733,6 +861,7 @@ class PipelexAPIClient(MthdsAPIClient):
                     output_multiplicity=output_multiplicity,
                     dynamic_output_concept_ref=dynamic_output_concept_ref,
                     extra=extra,
+                    method_ref=method_ref,
                     method_id=method_id,
                 )
             except RunLifecycleUnavailableError:
@@ -745,6 +874,7 @@ class PipelexAPIClient(MthdsAPIClient):
                     output_multiplicity=output_multiplicity,
                     dynamic_output_concept_ref=dynamic_output_concept_ref,
                     extra=extra,
+                    method_ref=method_ref,
                     method_id=method_id,
                 )
             return await self.wait_for_result(started.pipeline_run_id, options=wait_options)
@@ -757,6 +887,7 @@ class PipelexAPIClient(MthdsAPIClient):
             output_multiplicity=output_multiplicity,
             dynamic_output_concept_ref=dynamic_output_concept_ref,
             extra=extra,
+            method_ref=method_ref,
             method_id=method_id,
         )
 
@@ -770,15 +901,17 @@ class PipelexAPIClient(MthdsAPIClient):
         output_multiplicity: VariableMultiplicity | None,
         dynamic_output_concept_ref: str | None,
         extra: dict[str, Any] | None,
+        method_ref: str | None = None,
         method_id: str | None = None,
     ) -> RunResults:
         """Blocking `POST /v1/execute` adapted onto `RunResults` — the bare-runner path.
 
-        Forwards every protocol field PLUS both extension surfaces: the hosted `method_id` and
-        the generic `extra` passthrough. An extension-only call (`{extra}` with no pipe_code) or
-        a vendor selector riding `extra` must survive this path, not just the durable one — and
-        a hosted `method_id` must reach the server here too, so a runner that cannot resolve it
-        says so instead of the client silently dropping it.
+        Forwards every protocol field PLUS every extension surface: the runner-resolved
+        `method_ref`, the hosted `method_id`, and the generic `extra` passthrough. An
+        extension-only call (`{extra}` with no pipe_code) or a vendor selector riding `extra`
+        must survive this path, not just the durable one — a `method_ref` run must run the
+        same fetched package here, and a hosted `method_id` must reach the server too, so a
+        runner that cannot resolve it says so instead of the client silently dropping it.
         """
         result = await self.execute(
             pipe_code=pipe_code,
@@ -788,6 +921,7 @@ class PipelexAPIClient(MthdsAPIClient):
             output_multiplicity=output_multiplicity,
             dynamic_output_concept_ref=dynamic_output_concept_ref,
             extra=extra,
+            method_ref=method_ref,
             method_id=method_id,
         )
         return _map_run_result_to_run_results(result)
@@ -986,14 +1120,70 @@ class PipelexAPIClient(MthdsAPIClient):
     async def build_inputs(self, request: BuildInputsRequest) -> BuildInputsResponse:
         """Project a pipe's declared inputs as a fill-in template — `POST /v1/build/inputs`.
 
+        The closure is inline `files` XOR a `method_ref` address (server-resolved,
+        pipelex-api >= 0.21.0; the registry form stays a `501`). There is NO by-id form: the
+        `/v1/build/*` projections take no `method_id` (the hosted tooling selector covers
+        `validate`/`resolve`/`codegen` only) — expand a stored method's source into `files`
+        yourself (fetch it with `get_method`).
+
         Returns a 200 verdict: branch on `is_valid` before reading the arm — an unresolvable
         closure comes back as `is_valid: false` with `validation_errors`, not a thrown error.
-        A no-verdict condition (unknown `pipe_ref`, auth, server fault) raises `ApiResponseError`.
-        This is the signature source `prepare_inputs` reads (with `explicit=True`).
+        A no-verdict condition (unknown `pipe_ref`, a selector-resolution failure, auth, server
+        fault) raises `ApiResponseError`. This is the signature source `prepare_inputs` reads
+        (with `explicit=True`).
         """
         body = request.model_dump(mode="json", exclude_none=True)
-        raw = await self._request_product("POST", "build/inputs", body=body)
+        raw = await self._request_product("POST", "build/inputs", body=body, request_timeout=_crate_request_timeout_seconds(request.method_ref))
         return BuildInputsResponseAdapter.validate_python(raw)
+
+    # ── Crate extensions (Pipelex API — `/v1/resolve`, `/v1/codegen`) ─────
+    #
+    # The second crate-family surface, mirroring the JS SDK: `/v1/resolve` emits the
+    # normalized library crate, `/v1/codegen` projects that crate into stamped typed
+    # artifacts plus their lock. Same envelope family and same 200-verdict discipline as
+    # the build routes, PLUS the hosted `method_id` selector under the tooling routes'
+    # strict three-way XOR (see `crate_models`).
+
+    async def resolve(self, request: ResolveRequest) -> ResolveResponse:
+        """Resolve a closure into its normalized library crate — `POST /v1/resolve`.
+
+        The closure is loaded and statically validated, then emitted as the normalized
+        library crate (fully qualified refs, refinement flattened, natives materialized,
+        fingerprint set) — the MTHDS standard's Library Crate Format. It runs NO dry-run
+        sweep, so a valid verdict here says the library resolves, never that it runs; that
+        is `validate`'s vocabulary.
+
+        The closure arrives in exactly one of three forms — inline `files`, an address-form
+        `method_ref` (server-resolved; registry form `501`), or a hosted `method_id`
+        (platform-resolved) — enforced at request construction and by the server alike.
+
+        Returns a 200 verdict: branch on `is_valid` before reading the arm. A no-verdict
+        condition (a malformed selector, a selector-resolution failure — fetch failure, no
+        package at the address, an unknown or foreign-org id — auth, a server fault) raises
+        `ApiResponseError`, never an `is_valid: false` verdict.
+        """
+        body = request.model_dump(mode="json", exclude_none=True)
+        raw = await self._request_product("POST", "resolve", body=body, request_timeout=_crate_request_timeout_seconds(request.method_ref))
+        return ResolveResponseAdapter.validate_python(raw)
+
+    async def codegen(self, request: CodegenRequest) -> CodegenResponse:
+        """Project a closure's crate into stamped typed artifacts — `POST /v1/codegen`.
+
+        Resolves the closure exactly like `resolve`, then projects the crate through the two
+        explicit axes — `kind` (`types` today) x `target` (`python-pydantic` for Python
+        consumers, `python-structures`, `ts-zod`) — and returns the artifact set plus its
+        `codegen.lock`. Write both verbatim and the tree is byte-identical to a local
+        `pipelex codegen types` run, so the offline `pipelex codegen check` passes on it;
+        the SDK deliberately does not write files for you.
+
+        Same 200-verdict discipline and same three-form closure selector as `resolve`. A
+        no-verdict condition (an unknown `kind`/`target`, a `pipe_ref` on the
+        concept-set-wide `types` kind, a malformed selector, a selector-resolution failure)
+        raises `ApiResponseError`; a registry-form `method_ref` is a `501`.
+        """
+        body = request.model_dump(mode="json", exclude_none=True)
+        raw = await self._request_product("POST", "codegen", body=body, request_timeout=_crate_request_timeout_seconds(request.method_ref))
+        return CodegenResponseAdapter.validate_python(raw)
 
     async def upload_file(
         self,
@@ -1134,50 +1324,107 @@ class PipelexAPIClient(MthdsAPIClient):
 _KNOWN_RUN_STATUS_NAMES: frozenset[str] = frozenset(RunStatus.__members__)
 
 
-def _merge_hosted_run_extensions(extra: dict[str, Any] | None, method_id: object) -> dict[str, Any] | None:
-    """Fold the hosted API's own run args into the generic `extra` passthrough handed to the base client.
+def _normalized_selector(*, name: str, value: object) -> str | None:
+    """Normalize one method-selector argument at the client boundary.
 
-    This is the seam between layer 3 and layer 2: `method_id` is a named parameter on this
-    client (it is the hosted platform's argument, so this client must type it), and it reaches
-    the wire as a top-level body property through the protocol client's extension mechanism —
-    which merges it without knowing what it means. See `_HOSTED_RUN_ARGS`.
+    A **non-string** value is refused rather than dropped or forwarded. A published client
+    validates its request-option types at its own boundary, so that one wrong value gets one
+    answer: a bare truthiness check would silently drop the falsy wrong types (`0`, `[]`) and
+    forward the truthy ones (`123`, `["mt_1"]`) to a server `422` — a different partition of
+    wrong values than the JS client makes for the same argument on the same wire. Typed
+    `object` rather than `str | None` deliberately — this helper *is* the runtime boundary,
+    and the callers it guards against are the untyped ones a type checker never sees.
 
-    A **non-string** `method_id` is refused here rather than dropped or forwarded. A published
-    client validates its request-option types at its own boundary, so that one wrong value gets
-    one answer: a bare truthiness check would silently drop the falsy wrong types (`0`, `[]`)
-    and forward the truthy ones (`123`, `["mt_1"]`) to a server `422` — a different partition of
-    wrong values than the JS client makes for the same argument on the same wire.
+    An absent or **empty** value normalizes to `None`: an empty selector selects nothing, so
+    it is not sent and does not satisfy the base client's "something to run" precondition.
 
-    An absent or empty `method_id` still contributes nothing: `method_id=""` selects no method
-    and links no run, so it is not sent and does not satisfy the base client's "something to
-    run" precondition, and neither does `None`. `None` is returned for an empty result, leaving
-    the base's own handling of an absent `extra` untouched.
+    Raises:
+        PipelineRequestError: If the value is present and is not a string.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        msg = f"{name} must be a string, received {type(value).__name__}."
+        raise PipelineRequestError(msg)
+    return value or None
+
+
+def _merge_run_extensions(extra: dict[str, Any] | None, *, method_ref: object, method_id: object) -> dict[str, Any] | None:
+    """Fold this client's own named run args into the generic `extra` passthrough handed to
+    the base client.
+
+    This is the layering seam: `method_ref` (layer 2 — the Pipelex API's run source, resolved
+    by the runner) and `method_id` (layer 3 — the hosted platform's run arg) are named
+    parameters on this client because it is the client that types its own stack's arguments,
+    and each reaches the wire as a top-level body property through the protocol client's
+    extension mechanism — which merges it without knowing what it means. See
+    `_PIPELEX_API_RUN_ARGS` / `_HOSTED_RUN_ARGS`.
+
+    Both selectors go through `_normalized_selector`: a non-string is refused, an absent or
+    empty value contributes nothing. `None` is returned for an empty result, leaving the
+    base's own handling of an absent `extra` untouched.
 
     Args:
         extra: Server-specific extension args from the caller, or None.
-        method_id: The hosted catalog id, or None. Typed `object` rather than `str | None`
-            deliberately — this helper *is* the runtime boundary, and the callers it guards
-            against are the untyped ones a type checker never sees.
+        method_ref: The published method's address, or None.
+        method_id: The hosted catalog id, or None.
 
     Returns:
         The merged extension mapping to hand to the base client, or None if there is nothing.
 
     Raises:
-        PipelineRequestError: If `extra` carries a hosted arg this client names itself, or if
-            `method_id` is present and is not a string.
+        PipelineRequestError: If `extra` carries a named arg this client reserves, or if a
+            selector is present and is not a string.
     """
     extensions: dict[str, Any] = dict(extra or {})
-    hosted_overlap = extensions.keys() & _HOSTED_RUN_ARGS
-    if hosted_overlap:
-        msg = f"extra carries hosted args {sorted(hosted_overlap)} — pass them as named parameters instead."
+    reserved_overlap = extensions.keys() & _RESERVED_RUN_ARGS
+    if reserved_overlap:
+        msg = f"extra carries reserved request args {sorted(reserved_overlap)} — pass them as named parameters instead."
         raise PipelineRequestError(msg)
-    if method_id is not None:
-        if not isinstance(method_id, str):
-            msg = f"method_id must be a string, received {type(method_id).__name__}."
-            raise PipelineRequestError(msg)
-        if method_id:
-            extensions["method_id"] = method_id
+    selected_method_ref = _normalized_selector(name="method_ref", value=method_ref)
+    if selected_method_ref is not None:
+        extensions["method_ref"] = selected_method_ref
+    selected_method_id = _normalized_selector(name="method_id", value=method_id)
+    if selected_method_id is not None:
+        extensions["method_id"] = selected_method_id
     return extensions or None
+
+
+def _assert_method_ref_pairs_with_nothing(*, mthds_contents: list[str] | None, merged_extra: dict[str, Any] | None) -> None:
+    """Enforce the run routes' `method_ref` exclusivity, mirroring the server's own 422s so an
+    illegal pairing fails before anything hits the wire.
+
+    A `method_ref` is a complete run source (the fetched package carries its `.mthds` and its
+    entry pipe), so it pairs with NOTHING: not with inline `mthds_contents` and not with the
+    hosted `method_id` — an address run has its own provenance and needs no linkage id. Reads
+    the MERGED extensions, so the presence semantics are the normalized ones (an empty selector
+    was already dropped).
+
+    The one documented run-route exception is deliberately NOT here: inline source +
+    `method_id` stays legal (the inline source runs; the id demotes to run-history linkage).
+    `pipe_code` beside a `method_ref` is legal too — it overrides the manifest's `main_pipe`.
+    This SDK names no bundle encodings (`files` / `bundle_b64`), so their arm of the server's
+    exclusivity has no client-side twin here; the server still enforces it.
+    """
+    if merged_extra is None or "method_ref" not in merged_extra:
+        return
+    if mthds_contents:
+        msg = "method_ref and inline mthds_contents are mutually exclusive; send one or the other."
+        raise PipelineRequestError(msg)
+    if "method_id" in merged_extra:
+        msg = (
+            "method_ref and method_id are mutually exclusive: an address run carries its own provenance "
+            "and takes no run-history linkage id. Send exactly one method selector."
+        )
+        raise PipelineRequestError(msg)
+
+
+def _crate_request_timeout_seconds(method_ref: str | None) -> float:
+    """The request budget for a call carrying a crate closure (the crate routes and the build
+    projections alike): the management default, unless the closure is a `method_ref` the
+    server may have to fetch first — see `_METHOD_REF_FETCH_TIMEOUT_SECONDS`.
+    """
+    return _METHOD_REF_FETCH_TIMEOUT_SECONDS if method_ref else _POLL_REQUEST_TIMEOUT_SECONDS
 
 
 def _with_validate_markdown_render(render: list[str] | None) -> list[str]:
