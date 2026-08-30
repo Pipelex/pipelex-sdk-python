@@ -299,6 +299,15 @@ class PipelexValidationReport(ValidationReport):
     """The parsed bundle, carried opaquely: no published package declares its shape, so a type
     here could only be a copy free to drift from the runtime that emits it."""
 
+    default_pipe_ref: str | None = None
+    """The qualified `pipe_ref` a caller gets by omitting the pipe selector, or `None` when the
+    closure declares none or several.
+
+    Manifest-aware for a fetched package, which is what makes it outrank a `bundle_blueprint` read:
+    a published package may name its entry pipe in `METHODS.toml` alone, and the blueprint never
+    carries a manifest. Optional and read leniently — a runner that predates the field simply sends
+    nothing, so a consumer falls back (`prepare_inputs` reads the blueprint's `main_pipe` next)."""
+
     pipe_io_contracts: PipeIOContracts = Field(default_factory=dict)
     """The per-pipe I/O contracts, typed by importing the standard's own client models.
 

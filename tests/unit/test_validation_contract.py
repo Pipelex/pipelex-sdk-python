@@ -378,6 +378,25 @@ class TestValidationContract:
         # Keyed exactly like `pipe_io_contracts` — the same `pipe_ref` set addresses both artifacts.
         assert set(report.input_form) == set(report.pipe_io_contracts)
 
+    def test_default_pipe_ref_is_absent_by_default(self) -> None:
+        """A runner that predates the field simply sends nothing — the report still parses."""
+        report = _parse(VALID_BODY_WITH_VIEWS)
+        assert isinstance(report, PipelexValidationReport)
+        assert report.default_pipe_ref is None
+
+    def test_default_pipe_ref_reads_as_the_qualified_ref_when_served(self) -> None:
+        body = {**VALID_BODY_WITH_VIEWS, "default_pipe_ref": "legal_contracts.summarize"}
+        report = _parse(body)
+        assert isinstance(report, PipelexValidationReport)
+        assert report.default_pipe_ref == "legal_contracts.summarize"
+
+    def test_default_pipe_ref_reads_an_explicit_null(self) -> None:
+        """`null` is how the runner says the closure declares no single default — not a parse failure."""
+        body = {**VALID_BODY_WITH_VIEWS, "default_pipe_ref": None}
+        report = _parse(body)
+        assert isinstance(report, PipelexValidationReport)
+        assert report.default_pipe_ref is None
+
     def test_input_form_reads_as_the_standards_models(self) -> None:
         """The descriptor is typed by import: nodes narrow on `kind`, and the recursion is typed through."""
         report = _parse(VALID_BODY_WITH_VIEWS)
