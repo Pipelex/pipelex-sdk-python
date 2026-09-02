@@ -348,6 +348,22 @@ convention = "google"
 [tool.uv]
 required-version = ">=0.7.2"
 
+# TEMPORARY: resolve `mthds` from its merged `dev`, until the output-form change is
+# published.
+#
+# `dependencies` above pins `mthds==0.11.1`, which predates `mthds.protocol.output_form`
+# entirely, and no published version has that module yet — 0.12.0 is on PyPI but its
+# wheel carries `input_form.py` and nothing beside it, so bumping the pin would not help.
+#
+# `[tool.uv.sources]` is dev-and-CI metadata: it is not part of the published dependency,
+# so `pip install pipelex-sdk` still resolves the pin above. This makes CI honest and does
+# NOT make a release correct — the pin must move to whatever mthds-python publishes the
+# output-form change as, and THIS BLOCK MUST BE DELETED in that same change.
+#
+# Pinned by SHA rather than by branch so the resolution cannot drift while the PR is open.
+[tool.uv.sources]
+mthds = { git = "https://github.com/mthds-ai/mthds-python", rev = "bb534a07e91a4b51dcf16134f517dbb02db70f20" }
+
 [tool.pylint.main]
 py-version = "3.11"
 reports = false

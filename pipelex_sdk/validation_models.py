@@ -44,8 +44,8 @@ from enum import StrEnum
 from typing import Annotated, Any, Final, Literal, TypeAlias
 
 from mthds.protocol.input_form import InputForm
-from mthds.protocol.output_form import OutputForm
 from mthds.protocol.models import InvalidValidationReport, ValidationDiagnostic, ValidationReport
+from mthds.protocol.output_form import OutputForm
 from mthds.protocol.pipe_io_contracts import PipeIOContracts
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
