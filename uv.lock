@@ -212,14 +212,18 @@ wheels = [
 
 [[package]]
 name = "mthds"
-version = "0.12.0"
-source = { git = "https://github.com/mthds-ai/mthds-python?rev=bb534a07e91a4b51dcf16134f517dbb02db70f20#bb534a07e91a4b51dcf16134f517dbb02db70f20" }
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
     { name = "semantic-version" },
     { name = "tomlkit" },
     { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/b6/6c67b86693d01d473444523db0aeadc1afdffaa1748a264dfab9c1c77b1c/mthds-0.13.0.tar.gz", hash = "sha256:ef59ffa94902da72371390cc39d8c0d85dfd2a524dbca2a8909a0a1ba6255607", size = 216142, upload-time = "2026-09-02T15:09:15.937Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/89/26/f73e625b54cfba2e09a29df5e7173e508c25d3f7ce106be69fae6065d76c/mthds-0.13.0-py3-none-any.whl", hash = "sha256:606fef7978bbc8a5b249882c0b9377fed37123f618f8183f29e89b71a4eadac0", size = 85993, upload-time = "2026-09-02T15:09:14.334Z" },
 ]
 
 [[package]]
@@ -322,7 +326,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.23.0,<1.0.0" },
-    { name = "mthds", git = "https://github.com/mthds-ai/mthds-python?rev=bb534a07e91a4b51dcf16134f517dbb02db70f20" },
+    { name = "mthds", specifier = "==0.13.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==1.19.1" },
     { name = "pydantic", specifier = ">=2.10.6,<3.0.0" },
     { name = "pylint", marker = "extra == 'dev'", specifier = "==4.0.4" },
