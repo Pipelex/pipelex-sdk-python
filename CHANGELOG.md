@@ -1,5 +1,19 @@
 # Changelog
 
+## [v0.9.0] - 2026-09-02
+
+### Added
+
+- **The validate report carries both structured views, and `validate` can ask for them.** `PipelexValidationReport` gains `input_form` and `output_form`, and `validate` / `validate_files` gain a `views` parameter with `VALIDATION_VIEW_INPUT_FORM` and `VALIDATION_VIEW_OUTPUT_FORM` beside it. Neither existed here before: `input_form` shipped in `pipelex-api` at 0.18.0 and never reached this SDK, and `output_form` followed it — so a caller had no route to the two artifacts a form or a result renderer needs.
+
+  Both are typed by importing the standard's own models (`InputForm`, `OutputForm` from `mthds.protocol`) rather than restated as opaque dicts, matching what `pipe_io_contracts` already does: one declaration per language is what makes drift impossible.
+
+  Both are `None` rather than an empty map when absent, and that distinction carries weight here where it does not on `pipe_io_contracts` — an opt-in view's absence means the request did not ask for it, not that the method has nothing to describe. `views` is sent **only** when asked, unlike `render` which this client always injects: the point of an opt-in view is that the default response stays byte-identical, and the highest-frequency callers should not pay for bytes they discard.
+
+### Changed
+
+- **Requires `mthds` 0.13.0 (breaking).** The pin moves from 0.11.1, which predated `mthds.protocol.output_form` entirely. The version it moves to makes `json_schema` required on `PipeOutputContract`, and the contracts are CLOSED shapes — so a verdict from a runner that predates the output payload schema now fails the parse rather than being read half-way. That closure is deliberate: version drift should be loud.
+
 ## [v0.8.0] - 2026-08-29
 
 ### Added
