@@ -45,18 +45,25 @@ from typing import Annotated, Any, Final, Literal, TypeAlias
 
 from mthds.protocol.input_form import InputForm
 from mthds.protocol.models import InvalidValidationReport, ValidationDiagnostic, ValidationReport
+from mthds.protocol.output_form import OutputForm
 from mthds.protocol.pipe_io_contracts import PipeIOContracts
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pipelex_sdk._pydantic_utils import empty_list_factory_of
 
 VALIDATION_VIEW_INPUT_FORM: Final[str] = "input_form"
-"""The one `views` token the server supports today — asks for `PipelexValidationReport.input_form`.
+"""A `views` token — asks for `PipelexValidationReport.input_form`.
 
 Deliberately a constant rather than a closed enum: the request boundary is open, the server
 resolves the tokens as a set and lenient-ignores the ones it does not know (never a `422`), so
 a stale token must never fail a call.
 """
+
+VALIDATION_VIEW_OUTPUT_FORM: Final[str] = "output_form"
+"""A `views` token — asks for `PipelexValidationReport.output_form`.
+
+The twin of the above on the other side of the pipe. Named as a constant for the same reason:
+a caller passing the literal string gets no help from a type checker when the token changes."""
 
 
 class DryRunStatus(StrEnum):
@@ -358,6 +365,16 @@ class PipelexValidationReport(ValidationReport):
     Optional on purpose: it is present only when the request named the `input_form` view
     (`VALIDATION_VIEW_INPUT_FORM`), and an older runner emitted it unconditionally — `None` by
     default is the one typing that reads a body from either runner correctly."""
+
+    output_form: OutputForm | None = None
+    """Opt-in structured view: the per-pipe output-form descriptors, the twin of `input_form` on
+    the other side of the pipe, requested through `views: ["output_form"]`.
+
+    One `field` rather than a list of them, and no `presence` or `gating` — those are facts of a
+    slot a caller fills, and a result is not one. Read together with that pipe's
+    `output.json_schema` off `pipe_io_contracts`: the descriptor says what the result IS, the
+    schema names the property its payload arrives under, and a consumer holding one but not the
+    other is back to inferring the other from the value."""
 
     rendered_markdown: str | None = None
     """Opt-in Pipelex-API presentation extra: the server-rendered Markdown view of the verdict,
