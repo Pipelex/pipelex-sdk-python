@@ -337,7 +337,7 @@ convention = "google"
   "implicit-namespace-package", # Allow test files to not have __init__.py in their directories (avoids namespace collisions)
   "private-member-access",      # Unit tests legitimately probe private transport/error helpers (e.g. _request_product, _request_json)
   "import-private-name",        # Unit tests legitimately import private module helpers under test (e.g. _parse_error_body)
-  "unused-method-argument",     # Test-double methods match a Protocol signature; an unused param (e.g. a fake build_inputs ignoring `request`) is intentional
+  "unused-method-argument",     # Test-double methods match a Protocol signature; an unused param (e.g. a fake validate ignoring `render`) is intentional
   "float-equality-comparison",  # Tests assert exact float literals that round-trip exactly; `pytest.approx` would only add noise
 ]
 "examples/**/*.py" = [

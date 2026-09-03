@@ -32,11 +32,11 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import to_json
 from typing_extensions import override
 
-from pipelex_sdk.build_models import BuildInputsRequest, BuildInputsResponse, BuildInputsResponseAdapter, MthdsFileItem
 from pipelex_sdk.crate_models import (
     CodegenRequest,
     CodegenResponse,
     CodegenResponseAdapter,
+    MthdsFileItem,
     ResolveRequest,
     ResolveResponse,
     ResolveResponseAdapter,
@@ -173,7 +173,7 @@ _RESERVED_RUN_ARGS: frozenset[str] = _PIPELEX_API_RUN_ARGS | _HOSTED_RUN_ARGS
 # `method_ref` resolution can make the server CLONE a repository before it answers, and the
 # server-side clone timeout runs well past the 30s management budget on a cold cache — an
 # abort there would report a healthy, still-cloning server as unreachable. So a
-# `method_ref`-carrying crate/build request gets this internal fetch-sized budget instead of
+# `method_ref`-carrying crate request gets this internal fetch-sized budget instead of
 # `_POLL_REQUEST_TIMEOUT_SECONDS` (no new caller-facing parameter, and inert behind the
 # hosted gateway's own cap). The run routes and `validate` need no such override: they
 # already ride `request_timeout_seconds` (the 20-min blocking-execute ceiling), which clears
@@ -1117,25 +1117,6 @@ class PipelexAPIClient(MthdsAPIClient):
         body = upload_input.model_dump(mode="json", exclude_none=True)
         return UploadedFile.model_validate(await self._request_product("POST", "upload", body=body))
 
-    async def build_inputs(self, request: BuildInputsRequest) -> BuildInputsResponse:
-        """Project a pipe's declared inputs as a fill-in template — `POST /v1/build/inputs`.
-
-        The closure is inline `files` XOR a `method_ref` address (server-resolved,
-        pipelex-api >= 0.21.0; the registry form stays a `501`). There is NO by-id form: the
-        `/v1/build/*` projections take no `method_id` (the hosted tooling selector covers
-        `validate`/`resolve`/`codegen` only) — expand a stored method's source into `files`
-        yourself (fetch it with `get_method`).
-
-        Returns a 200 verdict: branch on `is_valid` before reading the arm — an unresolvable
-        closure comes back as `is_valid: false` with `validation_errors`, not a thrown error.
-        A no-verdict condition (unknown `pipe_ref`, a selector-resolution failure, auth, server
-        fault) raises `ApiResponseError`. This is the signature source `prepare_inputs` reads
-        (with `explicit=True`).
-        """
-        body = request.model_dump(mode="json", exclude_none=True)
-        raw = await self._request_product("POST", "build/inputs", body=body, request_timeout=_crate_request_timeout_seconds(request.method_ref))
-        return BuildInputsResponseAdapter.validate_python(raw)
-
     # ── Crate extensions (Pipelex API — `/v1/resolve`, `/v1/codegen`) ─────
     #
     # The second crate-family surface, mirroring the JS SDK: `/v1/resolve` emits the
@@ -1203,7 +1184,9 @@ class PipelexAPIClient(MthdsAPIClient):
     async def prepare_inputs(
         self,
         *,
-        files: list[MthdsFileItem],
+        files: list[MthdsFileItem] | None = None,
+        method_ref: str | None = None,
+        method_id: str | None = None,
         pipe_ref: str | None = None,
         inputs: dict[str, Any],
     ) -> PreparedInputs:
@@ -1211,10 +1194,25 @@ class PipelexAPIClient(MthdsAPIClient):
         assets, and return copy-on-write rewritten inputs (canonical content carrying
         `pipelex-storage://` in `url`) plus one upload record per prepared asset. HTTP(S) URLs
         and existing `pipelex-storage://` URIs pass through unchanged; all failures are raised
-        before any run is created. The caller supplies the method closure as inline `files`.
-        See `docs/input-preparation.md`.
+        before any run is created.
+
+        The method is named exactly one of three ways — inline `files`, a `method_ref` address
+        (runner-resolved) or a stored `method_id` (platform-resolved) — all server-resolved,
+        with nothing expanded client-side. An empty selector is treated as absent. The
+        signature comes from one `POST /v1/validate` asking for the `input_form` view, so the
+        walk is guided by each input's DECLARED kind rather than by the shape of its value.
+
+        `pipe_ref` is qualified-only (`domain.pipe_code`); omit it to default. See
+        `docs/input-preparation.md`.
         """
-        return await _prepare_inputs_impl(self, files=files, pipe_ref=pipe_ref, inputs=inputs)
+        return await _prepare_inputs_impl(
+            self,
+            files=files,
+            method_ref=method_ref,
+            method_id=method_id,
+            pipe_ref=pipe_ref,
+            inputs=inputs,
+        )
 
     async def list_runs(
         self,
@@ -1420,9 +1418,9 @@ def _assert_method_ref_pairs_with_nothing(*, mthds_contents: list[str] | None, m
 
 
 def _crate_request_timeout_seconds(method_ref: str | None) -> float:
-    """The request budget for a call carrying a crate closure (the crate routes and the build
-    projections alike): the management default, unless the closure is a `method_ref` the
-    server may have to fetch first — see `_METHOD_REF_FETCH_TIMEOUT_SECONDS`.
+    """The request budget for a call carrying a crate closure (`/v1/resolve`, `/v1/codegen`):
+    the management default, unless the closure is a `method_ref` the server may have to fetch
+    first — see `_METHOD_REF_FETCH_TIMEOUT_SECONDS`.
     """
     return _METHOD_REF_FETCH_TIMEOUT_SECONDS if method_ref else _POLL_REQUEST_TIMEOUT_SECONDS
 

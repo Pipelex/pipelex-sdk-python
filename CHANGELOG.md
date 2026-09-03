@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`prepare_inputs` takes the method three ways.** Beside inline `files`, it accepts a `method_ref` address (resolved by the runner) or a stored `method_id` (resolved by the hosted platform) — exactly one per call, all three server-resolved, nothing expanded client-side. Empty is absent (`files=[]`, a blank `method_ref` / `method_id`), and none or several raises `InputPreparationError` naming the three forms before any request leaves the process. A method addressed by URL that declares a file input now has an input-preparation path; previously it had none, even though the request beneath accepted the address.
+- **`PipelexValidationReport.default_pipe_ref`** — the qualified `pipe_ref` a caller gets by omitting the pipe selector, or `null` when the closure declares none or several. Optional and read leniently: a runner that predates the field sends nothing, and `prepare_inputs` falls back to the opaque `bundle_blueprint.main_pipe`.
+
+### Changed
+
+- **Breaking: `prepare_inputs` reads its signature from the input-form descriptor, not the inputs template.** It composes one `POST /v1/validate` with `views: ["input_form"]` and `allow_signatures=True`, and walks the standard's `InputForm` artifact — `document` / `image` mark a file position, `object` recurses through `fields`, `list` through `item`, everything else passes through. Source-compatible for every caller passing `files`; the SDK no longer calls `/v1/build/inputs` at runtime. A valid report carrying no descriptor is an error naming the pipelex-api floor, never a silent degrade to "no uploads".
+- **Breaking: `build_inputs` and its models are removed.** `client.build_inputs`, `BuildInputsRequest`, `BuildInputsValidReport`, `BuildInputsResponse`, `BuildInputsResponseAdapter` and `InputsTemplateFormat` are gone — the route wrapper existed only to be the signature source `prepare_inputs` read, and nothing calls it now. This is the Python SDK's step of the workspace program retiring `/v1/build/*`; a caller that still needs a fill-in template projects one from the descriptor.
+- **Breaking: the shared crate envelope moved to `pipelex_sdk.crate_models`.** `MthdsFileItem`, `CrateRequestBase` and `CrateInvalidReport` now live beside the routes that use them (`/v1/resolve`, `/v1/codegen`) and `pipelex_sdk/build_models.py` is deleted — a module named for the build routes could not go on holding the envelope after they left. The models themselves are unchanged; update the import path.
+- **Breaking: a canonical file dict nested inside a `Dynamic` input is no longer uploaded.** Such an input is `kind: "unknown"` in the descriptor — the standard's escape hatch — and the walk does not enter it. Uploading on the strength of a `url` key is the value-shape guess this change removes; a caller with a Dynamic input uploads with `upload_file` first and passes the storage URI, which `docs/input-preparation.md` has always prescribed.
+- **`prepare_inputs` accepts the explicit `{concept, content}` input envelope**, not only compact values, closing a parity gap with the JS SDK. An agent that fills an explicit template — the shape the hosted console and MCP hand out — can now hand it straight back; previously every file-bearing envelope position raised `InputPreparationError: Unsupported value at a file input … got dict`. The envelope's `content` is interpreted identically and preserved on output, so the concept annotation rides through to the run.
+- **The documentation is rewritten around the descriptor.** `docs/input-preparation.md` now describes the three call shapes, the signature call, pipe selection and its manifest-only `main_pipe` gap, the envelope, and why the template was the wrong signature source; `docs/architecture.md` follows the removal.
+
+### Security
+
+- **An optional nested file field is now uploaded.** The required-only inputs template never rendered one, so its file position was invisible and the caller's local path travelled to the runner as a literal string. The descriptor states `required: false` and the walk enters it.
+- **A text field merely *named* `url` is no longer read from disk.** The template marked a file position by rendering a `url`-bearing dict — a side effect of the field's *name*, not of its concept — so a path-shaped text value was uploaded. `kind: "text"` ends that.
+
 ## [v0.8.0] - 2026-08-29
 
 ### Added
