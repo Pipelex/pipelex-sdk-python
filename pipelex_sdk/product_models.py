@@ -58,8 +58,8 @@ class MethodFile(BaseModel):
     This is the shape the hosted platform persists for a method's custom PipeFunc Python:
     a JSON `[{name, content}]` array in one wire string. It is deliberately distinct from
     two neighbours that look similar and are not: `MthdsFile` (`client.py`) is the *validate*
-    input, content plus an optional provenance URI; `MthdsFileItem` (`build_models.py`) is
-    the *build* closure entry. Three shapes for three surfaces — do not merge them.
+    input, content plus an optional provenance URI; `MthdsFileItem` (`crate_models.py`) is
+    the *crate* closure entry. Three shapes for three surfaces — do not merge them.
     """
 
     model_config = ConfigDict(extra="allow")
