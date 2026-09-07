@@ -1,5 +1,5 @@
 ---
-status: active
+status: landed
 item: L-260829-8a25d5
 ---
 
@@ -44,6 +44,14 @@ Round 1 (2026-09-07) confirmed one defect in two threads and one wrong docstring
 - **The `Raises:` section named the wrong exception.** `validate` is 200-diagnostic and stays on the inherited `httpx.HTTPStatusError` regime, not the product routes' `ApiResponseError`, so a caller following the docstring would have missed exactly the no-verdict failures it listed.
 
 Nothing else was raised.
+
+## Landing
+
+PR #21 merged to `dev` as `7b1892f`, closing `L-260829-8a25d5` (kind `fixed`). CI was green across every lint and test job on the reviewed commit; `make agent-check` and `make agent-test` both pass. The merge has not reached `main`, which is the deliberate part — see Release below.
+
+`L-260826-ddd843` was advanced, not closed: the Python half of the two misclassifications is fixed on `dev`, and that item's own bar is a shipped release from **both** SDKs, which neither has cut.
+
+The one thing this landing leaves open for a person: `L-260830-f5b65e` re-points `prepare_inputs` onto `POST /v1/input-form` before the Python release, and it waits on the pipelex-api route `L-260830-352005`.
 
 ## Release
 
