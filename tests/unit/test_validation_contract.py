@@ -61,6 +61,11 @@ VALID_BODY: dict[str, Any] = {
                 "multiplicity": "single",
                 "item_count": None,
                 "optional": False,
+                # Required on the contract since the output side gained a payload
+                # schema. The empty schema rather than a plausible one: this fixture
+                # is about the ENVELOPE parsing, and a shape here would invite an
+                # assertion that belongs in a test about schemas.
+                "json_schema": {},
             },
         }
     },
