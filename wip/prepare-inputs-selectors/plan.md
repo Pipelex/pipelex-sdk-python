@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 item: L-260829-8a25d5
 ---
 
@@ -29,11 +29,21 @@ The JS twin (`L-260829-300c50`) landed as `pipelex-sdk-js` PR #42 (`bea4632`) an
 | `build_inputs` deleted, where JS kept `buildInputs` | JS has a wrapper family (`buildOutput`, `buildRunner`, `concept`, `pipeSpec`) retiring together under `L-260829-eefc3f`. Python only ever had this one, added in 0.5.0 solely to back `prepare_inputs`. |
 | `build_models.py` folded into `crate_models.py` | A module named for the build routes cannot go on owning the crate envelope after those routes leave. |
 | A local `_non_empty_string`, not `client._normalized_selector` | That helper is private to the client boundary and raises `PipelineRequestError`; every failure of this module owes an `InputPreparationError`. |
+| Two helpers, not one: `_caller_selector` beside `_non_empty_string` | Review round 1. The single lenient helper read both a CALLER's selector and the OPAQUE `bundle_blueprint`, and those want opposite answers for a non-string: absent for the payload whose schema is the runtime's, refused for the argument. Raising inside the shared helper — the suggested fix — would have made the defensive blueprint reads throw on a shape they exist to tolerate. |
 | No fetch budget on the signature call | `validate` already rides the 20-minute ceiling; the 3-minute budget exists to *raise* the ~30s poll-ceiling routes. JS implemented this and reverted it — do not re-add. |
 
 ## What this supersedes
 
 `wip/pr-11-review-notes.md` recorded a nested-file limitation of the old template walk: a top-level `url` key caused an early return, so a sibling file field went un-uploaded, and the note explained that shape refinement was ambiguous because the walk dropped the envelope's `concept`. The descriptor walk removes that class of problem structurally — position and kind are stated, never inferred — so the note is history, not open work.
+
+## Review
+
+Round 1 (2026-09-07) confirmed one defect in two threads and one wrong docstring, both fixed on the branch:
+
+- **A non-string selector was read as absent.** `_non_empty_string` coerced any non-string to `None`, so `method_ref=123` beside a real `files` passed the exactly-one check and prepared against a method the caller never named, and a non-string `pipe_ref` was absorbed by the pipe defaulting. Split into `_caller_selector` (refuses, per the decision row above) and the unchanged lenient reader, with `pipe_ref` normalization hoisted so both refusals land on the same pre-request boundary.
+- **The `Raises:` section named the wrong exception.** `validate` is 200-diagnostic and stays on the inherited `httpx.HTTPStatusError` regime, not the product routes' `ApiResponseError`, so a caller following the docstring would have missed exactly the no-verdict failures it listed.
+
+Nothing else was raised.
 
 ## Release
 

@@ -102,6 +102,11 @@ class _PrepareContext:
 def _non_empty_string(value: object) -> str | None:
     """A trimmed non-empty string, or `None` — the "empty is absent" rule.
 
+    Lenient on purpose, because what it reads is OPAQUE server payload — `bundle_blueprint`,
+    whose schema is the runtime's, not ours — where a shape that does not match is genuinely
+    an absent value to fall through on. A CALLER-supplied selector goes through
+    `_caller_selector` instead, which refuses a non-string rather than reading it as absent.
+
     Deliberately local rather than reusing `client.py`'s `_normalized_selector`: that helper
     is private to the client boundary and raises `PipelineRequestError`, where every failure
     of this module owes an `InputPreparationError`.
@@ -110,6 +115,22 @@ def _non_empty_string(value: object) -> str | None:
         return None
     trimmed = value.strip()
     return trimmed or None
+
+
+def _caller_selector(value: object, *, argument: str) -> str | None:
+    """A caller-supplied selector, trimmed — `None` when absent, refused when not a string.
+
+    The "empty is absent" rule of `_non_empty_string`, plus the boundary check that helper
+    must not make. Coercing a non-string to `None` here would read `method_ref=123` as an
+    absent selector and let it fall through to another one — defeating the exactly-one check
+    this whole surface rests on — and would let a non-string `pipe_ref` silently take the
+    default pipe instead of the one the caller named. Both are caller mistakes, and a caller
+    mistake owes an `InputPreparationError` raised before any request.
+    """
+    if value is None or isinstance(value, str):
+        return _non_empty_string(value)
+    msg = f"Cannot prepare inputs: `{argument}` must be a string, got {type(value).__name__}."
+    raise InputPreparationError(msg)
 
 
 def _is_file_content(node: Any) -> bool:
@@ -262,12 +283,14 @@ def _resolve_selector(
 
     Empty is absent — `files=[]`, `method_ref=""`, `method_id="  "` — mirroring the run
     options' rule and the `CrateRequestBase` normalizers, so an empty selector may sit beside
-    a real one without tripping the XOR. The check lives here because this module is what
-    composes the `validate` call, and it runs BEFORE any request.
+    a real one without tripping the XOR. A non-string `method_ref` / `method_id` is NOT absent
+    but refused, so a mistyped selector cannot slip past the XOR as a silent `None`. The check
+    lives here because this module is what composes the `validate` call, and it runs BEFORE
+    any request.
     """
     selected_files = files or None
-    selected_method_ref = _non_empty_string(method_ref)
-    selected_method_id = _non_empty_string(method_id)
+    selected_method_ref = _caller_selector(method_ref, argument="method_ref")
+    selected_method_id = _caller_selector(method_id, argument="method_id")
 
     given: list[str] = []
     if selected_files is not None:
@@ -423,15 +446,21 @@ async def prepare_inputs(
         per uploaded asset.
 
     Raises:
-        InputPreparationError: No selector or several; the closure did not resolve; the
-            report carries no descriptor; the pipe could not be selected; or a value at a
-            file position is unusable. HTTP(S) URLs and existing `pipelex-storage://` URIs
-            pass through unchanged, and every failure is raised BEFORE any run is created.
-        ApiResponseError: A no-verdict condition from `/v1/validate` — a malformed selector,
-            an unknown or foreign-org `method_id` (`404`), a stored method with no source, a
-            fetch failure at the address.
+        InputPreparationError: No selector or several; a selector that is not a string; the
+            closure did not resolve; the report carries no descriptor; the pipe could not be
+            selected; or a value at a file position is unusable. HTTP(S) URLs and existing
+            `pipelex-storage://` URIs pass through unchanged, and every failure is raised
+            BEFORE any run is created.
+        httpx.HTTPStatusError: A no-verdict condition from `/v1/validate` — a malformed
+            selector, an unknown or foreign-org `method_id` (`404`), a stored method with no
+            source, a fetch failure at the address. `validate` is 200-diagnostic and stays on
+            the inherited protocol error regime, so a no-verdict failure arrives as the raw
+            status error rather than the product routes' `ApiResponseError`.
     """
     selected_files, selected_method_ref, selected_method_id = _resolve_selector(files=files, method_ref=method_ref, method_id=method_id)
+    # Normalized here rather than at its use below, so a mistyped `pipe_ref` is refused on the
+    # same pre-request boundary as a mistyped selector — before the `validate` round-trip.
+    requested_pipe_ref = _caller_selector(pipe_ref, argument="pipe_ref")
     report = await _fetch_signature(client, files=selected_files, method_ref=selected_method_ref, method_id=selected_method_id)
 
     input_form = report.input_form
@@ -445,7 +474,7 @@ async def prepare_inputs(
         )
         raise InputPreparationError(msg)
 
-    selected_pipe_ref = _select_pipe_ref(report, input_form, _non_empty_string(pipe_ref))
+    selected_pipe_ref = _select_pipe_ref(report, input_form, requested_pipe_ref)
     declared = {field.name: field for field in input_form[selected_pipe_ref].fields}
 
     ctx = _PrepareContext(client)

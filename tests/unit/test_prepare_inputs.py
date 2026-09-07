@@ -14,7 +14,7 @@ import asyncio
 import base64
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -199,6 +199,37 @@ class TestPrepareInputs:
 
         with pytest.raises(InputPreparationError, match="no method selector"):
             asyncio.run(prepare_inputs(client, files=[], method_ref="", inputs={}))
+
+    @pytest.mark.parametrize(
+        ("kwargs", "argument", "type_name"),
+        [
+            ({"method_ref": 123}, "method_ref", "int"),
+            ({"method_id": ["mt_1"]}, "method_id", "list"),
+            ({"method_ref": True}, "method_ref", "bool"),
+        ],
+    )
+    def test_a_non_string_selector_is_refused_rather_than_read_as_absent(self, kwargs: dict[str, Any], argument: str, type_name: str) -> None:
+        # Empty is absent, but a WRONG TYPE is not: coercing it to `None` would let the XOR
+        # pass on `files` alone and prepare against a method the caller did not name.
+        client = _image_client()
+
+        with pytest.raises(InputPreparationError) as exc_info:
+            asyncio.run(prepare_inputs(client, files=_FILES, inputs={}, **kwargs))
+
+        assert str(exc_info.value) == f"Cannot prepare inputs: `{argument}` must be a string, got {type_name}."
+        assert client.validate_calls == []
+        assert client.upload_calls == []
+
+    def test_a_non_string_pipe_ref_is_refused_rather_than_silently_defaulted(self) -> None:
+        # Read as absent, it would be absorbed by the single-declared-pipe default: the pipe
+        # the caller named would vanish without a word. Refused on the pre-request boundary.
+        client = _image_client()
+
+        with pytest.raises(InputPreparationError) as exc_info:
+            asyncio.run(prepare_inputs(client, files=_FILES, pipe_ref=cast("str", 123), inputs={}))
+
+        assert str(exc_info.value) == "Cannot prepare inputs: `pipe_ref` must be a string, got int."
+        assert client.validate_calls == []
 
     # ── Pipe selection ────────────────────────────────────────────────────
 
