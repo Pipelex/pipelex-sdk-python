@@ -322,9 +322,12 @@ class PipelexValidationReport(ValidationReport):
     declared input slot reads as typed members — `concept_ref`, a three-valued `presence`
     (`PresenceMarker`), a `multiplicity` (`IOMultiplicity`), the `item_count` that is non-null exactly
     on the fixed arm, and its `json_schema` — and the output side reads its own asymmetric shape
-    (a two-valued `optional`, because `!` is rejected on an output). The artifact belongs to the
-    standard, so it is imported rather than restated: one declaration per language is what makes
-    drift impossible, which is precisely what keeping it opaque used to buy.
+    (a two-valued `optional`, because `!` is rejected on an output). Its `json_schema` is required
+    too since `mthds` 0.13.0, but states the concept's CONTENT MODEL rather than a caller's
+    argument: where a plural input's schema is a bare array, a plural output's is that model's list
+    envelope. The artifact belongs to the standard, so it is imported rather than restated: one
+    declaration per language is what makes drift impossible, which is precisely what keeping it
+    opaque used to buy.
 
     Contracts are **closed** shapes: a member this `mthds` version does not define is version drift
     and fails the parse. That closure is scoped to the artifact — the report around it stays

@@ -123,6 +123,8 @@ Earlier releases read the signature from the explicit inputs template (`POST /v1
 
 The descriptor states the resolved kind at every depth and includes optional fields, so both are gone. It is also the standard's own artifact, derived from authored facts rather than from a rendered shape, and `/v1/validate` resolves all three method selectors server-side — which is what made the uniform selector surface possible at no server cost.
 
+**If you actually wanted the template.** `prepare_inputs` no longer needs one, and this SDK's `build_inputs` wrapper went with it, but the template itself did not disappear — `mthds.protocol.inputs_template` projects one from the same descriptor, client-side: `render_inputs_template(descriptor=…, explicit=…, output_format=…)` for the JSON or TOML text, `project_inputs_template(descriptor=…, explicit=…)` for the dict. Ask `validate` for the `input_form` view, hand the pipe's descriptor to either, and the round-trip the removed route used to cost is gone too — which is what makes a template available for a method named only by `method_ref` or `method_id`.
+
 **Known limit.** A class-backed concept (`structure = "SomeClass"`) whose reflection cannot map a field annotation collapses to `kind: "unknown"` in the descriptor, so a file field beneath one is invisible to this walk. That is a fidelity bug in the runtime's `build_input_form`, tracked separately; pass such a value as an already-uploaded storage URI until it is fixed.
 
 ### Pass-through rules

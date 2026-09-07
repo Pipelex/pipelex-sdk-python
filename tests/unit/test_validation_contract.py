@@ -231,13 +231,25 @@ PRE_RESHAPE_CONTRACTS_BODY: dict[str, Any] = {
 
 
 def _body_with_contracts(input_contract: dict[str, Any]) -> dict[str, Any]:
-    """A valid body whose one pipe declares exactly `input_contract` as its single input slot."""
+    """A valid body whose one pipe declares exactly `input_contract` as its single input slot.
+
+    The output block states a `json_schema` for the same reason `VALID_BODY` does — required on
+    the contract since the output side gained a payload schema. It matters more here: every body
+    this helper builds feeds a test asserting the parse FAILS, so an incomplete output would make
+    each of them fail on the output rather than on the input drift the test names.
+    """
     return {
         **VALID_BODY,
         "pipe_io_contracts": {
             "legal_contracts.summarize": {
                 "inputs": {"contract": input_contract},
-                "output": {"concept_ref": "legal_contracts.Summary", "multiplicity": "single", "item_count": None, "optional": False},
+                "output": {
+                    "concept_ref": "legal_contracts.Summary",
+                    "multiplicity": "single",
+                    "item_count": None,
+                    "optional": False,
+                    "json_schema": {},
+                },
             }
         },
     }
