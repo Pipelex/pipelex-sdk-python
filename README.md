@@ -69,6 +69,25 @@ report = await client.validate(method_ref="github.com/Pipelex/methods/documents@
 report = await client.validate(method_id="mt_123")
 ```
 
+### Generate typed code into your project
+
+`codegen()` projects a method into stamped typed artifacts plus their `codegen.lock`, and `write_codegen_tree` writes that response to disk verbatim, so the tree is byte-identical to a local `pipelex codegen types` run and no `pipelex` install is needed:
+
+```python
+from pathlib import Path
+
+from pipelex_sdk.codegen_writer import write_codegen_tree
+from pipelex_sdk.crate_models import CodegenRequest, CodegenValidReport
+
+report = await client.codegen(CodegenRequest(method_ref="github.com/Pipelex/methods/documents@v0.1.0", target="python-pydantic"))
+if not isinstance(report, CodegenValidReport):
+    raise SystemExit(report.message)
+written = write_codegen_tree(report, output_dir=Path("src/generated/documents"))
+print(written.written, written.removed)
+```
+
+It never overwrites a file codegen does not own, rewrites only what changed, and prunes stamped artifacts that dropped out of the set. Commit the tree; do not run a formatter over it.
+
 ### Long runs: start + poll explicitly
 
 Behind the hosted gateway, a synchronous `execute()` is cut off at ~30s and surfaces a `PipelineExecuteTimeoutError` pointing here. For long methods, drive the durable lifecycle yourself — the run survives client disconnects and is resumable by `pipeline_run_id`:
@@ -103,7 +122,8 @@ There is no barrel import — package `__init__.py` files stay empty. Import eac
 - **Run lifecycle types** — `from pipelex_sdk.runs import RunStatus, RunPublic, RunRead, RunResults, RunResultState, WaitForResultOptions, PollInfo`
 - **Product wire models** — `from pipelex_sdk.product_models import UserProfile, MethodData, MethodWriteInput, Membership, MembershipsResponse, SubscriptionResponse, PlanView, InvoiceView, OnboardingSubmission, UploadInput, UploadedFile, PipelineRun, ...`
 - **Validation verdict types** — `from pipelex_sdk.validation_models import PipelexValidationResult, PipelexValidationReport, PipelexInvalidReport, ValidationErrorItem, SuggestedFix, VALIDATION_VIEW_INPUT_FORM, ...`
-- **Typed errors** — `from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError, PipelineExecuteTimeoutError, PagingNotTerminatingError, RunFailedError, RunTimeoutError, RunLifecycleUnavailableError, RunStillRunningError, ...`
+- **Codegen tree** — `from pipelex_sdk.codegen_writer import write_codegen_tree, CodegenTreeWriteReport`, with the format primitives in `pipelex_sdk.codegen_lock` (`CodegenLock`, `parse_lock`, `load_lock`, `validate_artifact_path`, ...) and `pipelex_sdk.codegen_stamp`
+- **Typed errors** — `from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError, PipelineExecuteTimeoutError, PagingNotTerminatingError, RunFailedError, RunTimeoutError, RunLifecycleUnavailableError, RunStillRunningError, CodegenError, CodegenLockError, ...`
 - **Version** — `from pipelex_sdk.version import __version__`
 - **Protocol surface** (the MTHDS standard's wire types) comes from the `mthds` dependency — e.g. `from mthds.protocol.exceptions import PipelineRequestError`, `from mthds.protocol.models import ValidationResult` (the neutral verdict union that `PipelexValidationResult` narrows).
 - **Input-form descriptors and pipe I/O contracts** come from `mthds` too, because they are the standard's artifacts and this SDK only carries them: `from mthds.protocol.input_form import InputForm, InputFormField, ListField, TextField, ...` and `from mthds.protocol.pipe_io_contracts import PipeIOContracts, PipeInputContract, PresenceMarker, IOMultiplicity, ...`. `PipelexValidationReport.input_form` and `.pipe_io_contracts` are typed with them, so a node narrows on its `kind` and a slot's presence and multiplicity read as enums — but `pipelex_sdk` does not re-export the vocabulary, and importing it from here is the one supported path.

@@ -1155,7 +1155,7 @@ class PipelexAPIClient(MthdsAPIClient):
         consumers, `python-structures`, `ts-zod`) — and returns the artifact set plus its
         `codegen.lock`. Write both verbatim and the tree is byte-identical to a local
         `pipelex codegen types` run, so the offline `pipelex codegen check` passes on it;
-        the SDK deliberately does not write files for you.
+        `pipelex_sdk.codegen_writer.write_codegen_tree` does exactly that.
 
         Same 200-verdict discipline and same three-form closure selector as `resolve`. A
         no-verdict condition (an unknown `kind`/`target`, a `pipe_ref` on the
