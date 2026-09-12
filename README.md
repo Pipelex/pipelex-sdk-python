@@ -22,7 +22,7 @@ The SDK never reads the `mthds` resolver (`MTHDS_API_KEY` / `MTHDS_BASE_URL` / `
 
 `request_timeout_seconds` (constructor argument, default 20 min) sets the per-instance blocking-execute ceiling the inherited protocol routes (`execute` / `start` / `validate` / `models` / `version`) use.
 
-The client is **async-only** (httpx `AsyncClient`) and is an async context manager.
+`PipelexAPIClient` is async (httpx `AsyncClient`) and is an async context manager. Code with no event loop of its own uses `SyncPipelexAPIClient`, the same surface without `await` (see "Synchronous callers" below).
 
 ## Quickstart
 
@@ -78,6 +78,20 @@ ack = await client.start(pipe_code="long_pipe", inputs={...})
 result = await client.wait_for_result(ack.pipeline_run_id)
 ```
 
+### Synchronous callers
+
+A script, a batch job or a Django view calls the same methods without `await`, and without an `asyncio.run` wrapper of its own, through `SyncPipelexAPIClient`:
+
+```python
+from pipelex_sdk.sync_client import SyncPipelexAPIClient
+
+with SyncPipelexAPIClient() as client:
+    result = client.start_and_wait(pipe_code="my_pipe", inputs={"topic": "quantum computing"})
+    print(result.main_stuff)
+```
+
+It delegates every call to a private `PipelexAPIClient` running on its own event-loop thread, so the signatures, results and errors are the async client's, and one instance can be shared across threads. It refuses to run inside a running event loop and raises `SyncClientInEventLoopError` there, because a blocking call would freeze that loop: async code awaits `PipelexAPIClient` instead.
+
 ### Product routes: branch on `err.code`, not the HTTP status
 
 The hosted product routes raise a typed `ApiResponseError` carrying the RFC 9457 `code` discriminant. Branch on `err.code`, which is decoupled from the transport status:
@@ -100,10 +114,11 @@ except ApiResponseError as exc:
 There is no barrel import — package `__init__.py` files stay empty. Import each symbol from its module:
 
 - **Client & construction** — `from pipelex_sdk.client import PipelexAPIClient, DEFAULT_API_BASE_URL, MthdsFile`
+- **Synchronous facade** — `from pipelex_sdk.sync_client import SyncPipelexAPIClient`
 - **Run lifecycle types** — `from pipelex_sdk.runs import RunStatus, RunPublic, RunRead, RunResults, RunResultState, WaitForResultOptions, PollInfo`
 - **Product wire models** — `from pipelex_sdk.product_models import UserProfile, MethodData, MethodWriteInput, Membership, MembershipsResponse, SubscriptionResponse, PlanView, InvoiceView, OnboardingSubmission, UploadInput, UploadedFile, PipelineRun, ...`
 - **Validation verdict types** — `from pipelex_sdk.validation_models import PipelexValidationResult, PipelexValidationReport, PipelexInvalidReport, ValidationErrorItem, SuggestedFix, VALIDATION_VIEW_INPUT_FORM, ...`
-- **Typed errors** — `from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError, PipelineExecuteTimeoutError, PagingNotTerminatingError, RunFailedError, RunTimeoutError, RunLifecycleUnavailableError, RunStillRunningError, ...`
+- **Typed errors** — `from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError, PipelineExecuteTimeoutError, PagingNotTerminatingError, RunFailedError, RunTimeoutError, RunLifecycleUnavailableError, RunStillRunningError, SyncClientInEventLoopError, ...`
 - **Version** — `from pipelex_sdk.version import __version__`
 - **Protocol surface** (the MTHDS standard's wire types) comes from the `mthds` dependency — e.g. `from mthds.protocol.exceptions import PipelineRequestError`, `from mthds.protocol.models import ValidationResult` (the neutral verdict union that `PipelexValidationResult` narrows).
 - **Input-form descriptors and pipe I/O contracts** come from `mthds` too, because they are the standard's artifacts and this SDK only carries them: `from mthds.protocol.input_form import InputForm, InputFormField, ListField, TextField, ...` and `from mthds.protocol.pipe_io_contracts import PipeIOContracts, PipeInputContract, PresenceMarker, IOMultiplicity, ...`. `PipelexValidationReport.input_form` and `.pipe_io_contracts` are typed with them, so a node narrows on its `kind` and a slot's presence and multiplicity read as enums — but `pipelex_sdk` does not re-export the vocabulary, and importing it from here is the one supported path.
