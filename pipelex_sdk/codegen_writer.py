@@ -13,9 +13,11 @@ a projection the server has already stamped:
 - **Validate before writing.** A `lock_filename` other than `codegen.lock`, an unsafe or duplicate
   artifact path, a lock that cannot be read or does not track exactly the artifacts, a symbolic link or
   a regular file on the way to a destination, a destination that is not a regular file, or a previously
-  tracked path about to be pruned that fails those same checks refuses the whole tree before the first
-  byte is written. The lock and prune checks go further than `pipelex`, which builds its lock from the
-  files it writes, so the two cannot disagree, and which resolves prune targets only after writing.
+  tracked path about to be pruned that sits behind a symbolic link or is no longer a regular file refuses
+  the whole tree before the first byte is written. The lock and prune checks go further than `pipelex`,
+  which builds its lock from the files it writes, so the two cannot disagree, and which resolves prune
+  targets only after writing. A previously tracked path whose directory has become a regular file is
+  skipped, as `pipelex` skips it: no file can be there to prune, and refusing it would block every rerun.
 - **Never overwrite a file codegen does not own.** A file already at an artifact's path is replaced only
   when its content is already identical, when the previous lock tracked it, or when it carries a stamp.
 - **Write only what changed.** An already-current file is left alone, so regenerating over a current
@@ -33,7 +35,15 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from pipelex_sdk.codegen_lock import CODEGEN_LOCK_FILENAME, load_lock, parse_lock, resolve_artifact_path, resolve_output_path, validate_artifact_paths
+from pipelex_sdk.codegen_lock import (
+    CODEGEN_LOCK_FILENAME,
+    load_lock,
+    parse_lock,
+    resolve_artifact_path,
+    resolve_output_path,
+    validate_artifact_path,
+    validate_artifact_paths,
+)
 from pipelex_sdk.codegen_stamp import comment_prefix_for, has_stamp
 from pipelex_sdk.crate_models import CodegenValidReport
 from pipelex_sdk.errors import CodegenError, CodegenLockError
@@ -86,7 +96,9 @@ def write_codegen_tree(report: CodegenValidReport, *, output_dir: Path) -> Codeg
     # behind a symbolic link must refuse the tree before the first write, not after the artifacts changed.
     stale_destinations: dict[str, Path] = {}
     for stale_path in sorted(previous_paths - set(destinations)):
-        stale_destinations[stale_path] = resolve_artifact_path(root=output_root, artifact_path=stale_path)
+        stale_destination = _resolve_prune_target(root=output_root, artifact_path=stale_path)
+        if stale_destination is not None:
+            stale_destinations[stale_path] = stale_destination
     _preflight_destinations(report=report, destinations=destinations, previous_paths=previous_paths)
 
     written: list[str] = []
@@ -137,6 +149,23 @@ def _previous_tracked_paths(lock_path: Path) -> set[str]:
         # violation, and recovering from it would weaken the boundary.
         return set()
     return lock.paths() if lock is not None else set()
+
+
+def _resolve_prune_target(*, root: Path, artifact_path: str) -> Path | None:
+    """Resolve a path the previous lock tracked for pruning, or return `None` when no file can be there.
+
+    A regular file where one of the path's directories used to be means there is nothing to prune, and
+    `pipelex` skips it. Refusing it instead would block every later run, because the refusal also keeps the
+    new lock from replacing the one that tracks the path. A symbolic link met on the way first still refuses.
+    """
+    current = root
+    for part in validate_artifact_path(artifact_path).parts[:-1]:
+        current /= part
+        if current.is_symlink():
+            break
+        if current.exists() and not current.is_dir():
+            return None
+    return resolve_artifact_path(root=root, artifact_path=artifact_path)
 
 
 def _preflight_destinations(*, report: CodegenValidReport, destinations: dict[str, Path], previous_paths: set[str]) -> None:

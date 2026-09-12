@@ -243,8 +243,9 @@ class CodegenError(Exception):
     leave the output root or name a file type codegen never emits (absolute or drive-prefixed, a `..`
     or empty component, a backslash, a control character, an unstampable suffix, a duplicate), a lock
     that cannot be read or does not track exactly the artifacts, a symbolic link or a regular file on
-    the way to a destination or to a previously tracked path about to be pruned, a destination that is
-    not a regular file, or a file already at an artifact's path that codegen does not own.
+    the way to a destination, a symbolic link on the way to a previously tracked path about to be pruned,
+    a destination or such a path that is not a regular file, or a file already at an artifact's path that
+    codegen does not own.
     """
 
 

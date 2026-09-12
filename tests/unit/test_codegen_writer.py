@@ -224,6 +224,20 @@ class TestCodegenWriter:
         assert (elsewhere / "old.py").exists()
         assert (output_dir / "models.py").read_text(encoding="utf-8") == _stamped("A = 1\n")
 
+    def test_skips_a_tracked_path_whose_directory_became_a_regular_file(self, tmp_path: Path) -> None:
+        """No file can sit under a regular file, so there is nothing to prune: `pipelex` skips it, and refusing would block every rerun."""
+        write_codegen_tree(_report({"models.py": _stamped("A = 1\n"), "sub/old.py": _stamped("OLD = 1\n")}), output_dir=tmp_path)
+        (tmp_path / "sub" / "old.py").unlink()
+        (tmp_path / "sub").rmdir()
+        (tmp_path / "sub").write_text("a hand-written file named sub\n", encoding="utf-8")
+
+        result = write_codegen_tree(_report({"models.py": _stamped("A = 2\n")}), output_dir=tmp_path)
+
+        assert result.written == ["models.py"]
+        assert result.removed == []
+        assert (tmp_path / "sub").read_text(encoding="utf-8") == "a hand-written file named sub\n"
+        assert (tmp_path / "codegen.lock").read_text(encoding="utf-8") == _lock_tracking("models.py")
+
     # ── Ownership ────────────────────────────────────────────────────
 
     def test_refuses_to_overwrite_an_unowned_file_and_writes_nothing(self, tmp_path: Path) -> None:
