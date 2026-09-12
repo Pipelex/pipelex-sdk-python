@@ -1,8 +1,9 @@
 """`SyncPipelexAPIClient` — a synchronous facade over `PipelexAPIClient`.
 
-For the callers that have no event loop of their own — a script, a batch job, a Django view,
-a notebook cell run without top-level `await` — so none of them writes an `asyncio.run`
-wrapper around each call.
+For the callers that have no event loop of their own — a script, a batch job, a Django view —
+so none of them writes an `asyncio.run` wrapper around each call. A Jupyter notebook is not one
+of them: its kernel runs every cell inside its own event loop, so a notebook awaits
+`PipelexAPIClient` directly.
 
 The facade wraps and delegates; it is not a second transport. Every public method calls the
 same-named coroutine on one private `PipelexAPIClient`, so there is exactly one HTTP
@@ -27,13 +28,18 @@ freeze everything else scheduled on it; such a caller wants `PipelexAPIClient` a
 
 Interrupting a blocked call (Ctrl+C) cancels the coroutine on the facade's loop and re-raises
 in the caller. As on the async client, cancelling a `wait_for_result` or `start_and_wait` stops
-the waiting, never the run itself, which keeps executing server-side and stays resumable by id.
+the waiting, never the run itself, which keeps executing server-side. A `KeyboardInterrupt` or
+`SystemExit` raised on the loop itself, by a `WaitForResultOptions.on_poll` callback for
+instance, reaches the caller the same way instead of stopping the loop.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import sys
 import threading
+import types
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Self, TypeVar, cast
 
@@ -96,7 +102,8 @@ class SyncPipelexAPIClient:
 
     Construction takes the same arguments and resolves credentials exactly as
     `PipelexAPIClient` does (it builds one). Use it as a context manager, or call `close()`
-    when done; a facade is reusable after `close()`, restarting its loop at the next call.
+    when done: a facade that is never closed keeps its loop thread until the process exits. A
+    facade is reusable after `close()`, restarting its loop at the next call.
     One instance may be shared across threads. It must not be called from a thread that runs
     an event loop (`SyncClientInEventLoopError`), which includes a `WaitForResultOptions.on_poll`
     callback: that callback runs on the facade's own loop.
@@ -107,10 +114,13 @@ class SyncPipelexAPIClient:
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None, request_timeout_seconds: float | None = None) -> None:
         self._async_client = PipelexAPIClient(api_key=api_key, base_url=base_url, request_timeout_seconds=request_timeout_seconds)
-        # Guards the loop's lifecycle: starting it, detaching it at close, and submitting to it.
-        # Submission happens under the lock so a call can never land on a loop `close()` has
-        # already detached; only the blocking wait for the result happens outside it.
-        self._lock = threading.Lock()
+        # Guards the loop's whole lifecycle: starting it, submitting to it, and closing it. `close()`
+        # holds it until the old loop is gone, so a call made meanwhile waits and then starts a
+        # fresh loop instead of reaching the wrapped client while the old loop is still closing it.
+        # Only the blocking wait for a call's result happens outside it. Reentrant, because a
+        # garbage collection can finalize an abandoned iterator, which takes the lock, on a thread
+        # that already holds it.
+        self._lock = threading.RLock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
 
@@ -138,27 +148,33 @@ class SyncPipelexAPIClient:
         """Close the HTTP client and stop the facade's event loop.
 
         A call still in flight on another thread is cancelled and raises
-        `concurrent.futures.CancelledError` there. Closing a facade that never made a call, or
-        closing it twice, does nothing.
+        `concurrent.futures.CancelledError` there, and so does the next item of a paged iterator
+        left open across the close. A call made on another thread while `close()` runs waits for
+        it, then starts a fresh loop. Closing a facade that never made a call, or closing it twice,
+        does nothing.
 
         Raises:
             SyncClientInEventLoopError: If called from a thread that runs an event loop.
         """
         if _inside_running_event_loop():
-            raise SyncClientInEventLoopError(_in_event_loop_message("SyncPipelexAPIClient.close"))
+            raise SyncClientInEventLoopError(_in_event_loop_message("close"))
         with self._lock:
             loop = self._loop
             loop_thread = self._loop_thread
+            if loop is None or loop_thread is None:
+                return
             self._loop = None
             self._loop_thread = None
-        if loop is None or loop_thread is None:
-            return
-        try:
-            asyncio.run_coroutine_threadsafe(self._shutdown(), loop).result()
-        finally:
-            loop.call_soon_threadsafe(loop.stop)
-            loop_thread.join()
-            loop.close()
+            try:
+                asyncio.run_coroutine_threadsafe(self._shutdown(), loop).result()
+            finally:
+                loop.call_soon_threadsafe(loop.stop)
+                loop_thread.join()
+                loop.close()
+                # Normally `_shutdown` has already released it. When an interrupt cut the shutdown
+                # short, an HTTP client bound to the loop just closed would otherwise be reused by
+                # the next call's fresh loop, since the transport only opens one when there is none.
+                self._async_client.client = None
 
     async def _shutdown(self) -> None:
         """Runs on the facade's loop: cancel what is in flight, then release every resource."""
@@ -181,18 +197,24 @@ class SyncPipelexAPIClient:
         self._loop_thread = loop_thread
         return loop
 
-    def _run(self, coroutine: Coroutine[Any, Any, _ResultT]) -> _ResultT:
-        """Run one coroutine of the wrapped client on the facade's loop and block for its result."""
+    def _run(self, coroutine: Coroutine[Any, Any, _ResultT], *, call_name: str | None = None) -> _ResultT:
+        """Run one coroutine of the wrapped client on the facade's loop and block for its result.
+
+        `call_name` is the facade method to name in a refusal; it defaults to the coroutine's own
+        name, which is the same-named twin's.
+        """
         if _inside_running_event_loop():
-            call_name = str(getattr(coroutine, "__qualname__", "PipelexAPIClient call"))
+            refused_call = call_name or str(getattr(coroutine, "__name__", "call"))
             # Close it rather than drop it: an unawaited coroutine would otherwise surface as a
             # "never awaited" RuntimeWarning pointing away from the real mistake.
             coroutine.close()
-            raise SyncClientInEventLoopError(_in_event_loop_message(call_name))
+            raise SyncClientInEventLoopError(_in_event_loop_message(refused_call))
         with self._lock:
-            future = asyncio.run_coroutine_threadsafe(coroutine, self._ensure_loop())
+            future = asyncio.run_coroutine_threadsafe(_contained(coroutine), self._ensure_loop())
         try:
             return future.result()
+        except _LoopExitCarrier as carrier:
+            raise carrier.escaped from None
         except BaseException:
             # Reached on an interrupt (KeyboardInterrupt) while blocked, as well as on a normal
             # error; cancelling an already finished future is a no-op, so this only stops work
@@ -202,23 +224,35 @@ class SyncPipelexAPIClient:
 
     def _iterate(self, iterator: AsyncIterator[_ItemT]) -> Iterator[_ItemT]:
         """Drive an async iterator of the wrapped client one item per round trip to the loop."""
-        try:
-            while True:
-                next_item = self._run(_next_item(iterator))
-                if not next_item:
-                    return
+        call_name = str(getattr(iterator, "__name__", "iterate"))
+        while True:
+            # Nothing is left to finalize when this raises: the async iterator has already ended, or
+            # is being ended by the cancellation `_run` requested on its way out. Closing it here
+            # would race that cancellation and replace the caller's exception with a RuntimeError.
+            next_item = self._run(_next_item(iterator), call_name=call_name)
+            if next_item is None:
+                msg = f"SyncPipelexAPIClient was closed while this {call_name}() iterator was open"
+                raise concurrent.futures.CancelledError(msg)
+            if not next_item:
+                return
+            try:
                 yield next_item[0]
-        finally:
-            self._close_async_generator(iterator)
+            except BaseException:
+                # Abandoned between two items: a `break` followed by the iterator being dropped, an
+                # explicit `close()`, garbage collection, or an exception thrown in.
+                self._close_async_generator(iterator)
+                raise
 
     def _close_async_generator(self, iterator: AsyncIterator[_ItemT]) -> None:
-        """Finalize an async generator left part-way, e.g. by a `break` out of the sync loop.
+        """Finalize an async generator abandoned between two items.
 
-        Skipped when there is no loop any more (`close()` already finalized every async
-        generator on it) or when this runs inside an event loop (a blocking call is not allowed
-        there; the loop finalizes the generator at shutdown instead).
+        Skipped when there is no loop any more (`close()` already finalized every async generator
+        on it), when this runs inside an event loop (a blocking call is not allowed there; the loop
+        finalizes the generator at shutdown instead), and while the interpreter is finalizing: an
+        iterator left in a module global is collected at exit, after the daemon loop thread has
+        stopped running, and waiting on that thread would keep the process from ever exiting.
         """
-        if not isinstance(iterator, AsyncGenerator) or _inside_running_event_loop():
+        if not isinstance(iterator, AsyncGenerator) or _inside_running_event_loop() or sys.is_finalizing():
             return
         # The wrapped iterators are async generators that are only ever advanced, never sent to.
         generator = cast("AsyncGenerator[_ItemT, None]", iterator)
@@ -513,24 +547,59 @@ def _inside_running_event_loop() -> bool:
     return True
 
 
-def _in_event_loop_message(call_name: str) -> str:
+def _in_event_loop_message(method_name: str) -> str:
     return (
-        f"{call_name}() was called from a thread that is running an event loop, where a blocking call would freeze "
-        "that loop for the whole request. Use PipelexAPIClient and await the call there instead."
+        f"SyncPipelexAPIClient.{method_name}() was called from a thread that is running an event loop, where a blocking "
+        "call would freeze that loop for the whole request. Use PipelexAPIClient and await the call there instead."
     )
 
 
-async def _next_item(iterator: AsyncIterator[_ItemT]) -> list[_ItemT]:
-    """The iterator's next item in a one-element list, or an empty list once it is exhausted.
+class _LoopExitCarrier(Exception):  # ruff: ignore[error-suffix-on-exception-name] — a carrier, never raised to a caller
+    """Carries a `KeyboardInterrupt` or `SystemExit` raised on the facade's loop to the calling thread.
+
+    asyncio lets those two escape the task that raised them and stop the loop outright, before the
+    task's outcome reaches the caller's future: the caller would block forever, and so would
+    `close()`, submitting its shutdown to a loop nothing runs. Wrapped in an ordinary exception, the
+    task ends like any failing task, and `_run` re-raises the original in the calling thread.
+    """
+
+    def __init__(self, escaped: KeyboardInterrupt | SystemExit) -> None:
+        super().__init__(escaped)
+        self.escaped = escaped
+
+
+async def _contained(coroutine: Coroutine[Any, Any, _ResultT]) -> _ResultT:
+    try:
+        return await coroutine
+    except (KeyboardInterrupt, SystemExit) as exc:
+        raise _LoopExitCarrier(exc) from exc
+
+
+async def _next_item(iterator: AsyncIterator[_ItemT]) -> list[_ItemT] | None:
+    """The iterator's next item in a one-element list, an empty list once it is exhausted, or `None`
+    when it had been closed before this call.
 
     Exhaustion is returned rather than raised because `StopAsyncIteration` is not an exception
     to carry across the thread boundary: the sync generator turns the empty list into its own
-    ordinary return.
+    ordinary return. A closed async generator is told apart from an exhausted one because
+    `close()` finalizes every async generator on its loop, and resuming one of those raises
+    `StopAsyncIteration` too: read as an ordinary end, it would hand the caller a silently
+    truncated listing.
     """
+    if _async_generator_finished(iterator):
+        return None
     try:
         return [await anext(iterator)]
     except StopAsyncIteration:
         return []
+
+
+def _async_generator_finished(iterator: AsyncIterator[Any]) -> bool:
+    """Whether an async generator has run to its end or been closed; the facade never resumes one it saw end."""
+    if not isinstance(iterator, types.AsyncGeneratorType):
+        return False
+    # CPython drops the generator's frame once it has returned, raised or been closed.
+    return iterator.ag_frame is None
 
 
 async def _close_generator(generator: AsyncGenerator[Any, Any]) -> None:
