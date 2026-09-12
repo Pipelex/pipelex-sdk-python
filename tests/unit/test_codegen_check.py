@@ -3,18 +3,25 @@
 The tree under `data/real_codegen_tree/` is genuine engine output — `pipelex codegen types --target
 python-pydantic` over the cookbook's `documents` method, engine 0.57.0, copied in byte for byte (the
 artifact carries a `.txt` suffix only so this repo's linters leave it alone; every test renames it back to
-`models.py`, which is the path the lock tracks). A verdict reached over those bytes is the verdict
-`pipelex codegen check` reaches over the same tree, which is the whole contract this module is held to.
+`models.py`, which is the path the lock tracks, and `.gitattributes` pins its line endings).
+
+What that fixture re-proves on every run is that **this** implementation reads real engine bytes as
+current, and what it cannot re-prove is agreement with `pipelex`, because this package must not depend on
+it — which is the whole point of the module. Its hashes are self-proving, so the fixture cannot rot
+unnoticed: recompute SHA-256 over the body below the fence and it equals both the stamp's recorded value
+and the lock's. Cross-implementation parity was established once, by an out-of-tree harness running both
+implementations in separate virtualenvs; `docs/architecture.md` records what that covered and why
+re-proving it per run belongs to the workspace's `conformance/` suite rather than here.
 
 The smaller fixtures below are the same grammar at a size a reader can hold: a real stamp fence whose
 `content_hash` is the true SHA-256 of the body under it, and a real lock tracking the same hashes.
 """
 
 import hashlib
-import shutil
 from pathlib import Path
 
 import pytest
+from pytest_mock import MockerFixture
 
 from pipelex_sdk.codegen_check import CodegenCheckReport, DriftCategory, run_codegen_check
 from pipelex_sdk.errors import CodegenError, CodegenLockError
@@ -67,10 +74,21 @@ def _tree(root: Path, *entries: tuple[str, str]) -> None:
 
 
 def _real_tree(root: Path) -> Path:
-    """Materialize the genuine `pipelex codegen types` tree, artifact back under the path the lock tracks."""
-    shutil.copyfile(_REAL_TREE / "codegen.lock", root / "codegen.lock")
-    shutil.copyfile(_REAL_TREE / "models.py.txt", root / "models.py")
+    """Materialize the genuine `pipelex codegen types` tree, artifact back under the path the lock tracks.
+
+    The copy folds any CRLF back to LF. `.gitattributes` pins the fixture to LF, so in a correct checkout
+    this is a no-op — but a clone made before that pin, or with `core.autocrlf=true`, holds CRLF bytes, and
+    then `test_a_real_tree_checked_out_with_crlf_is_still_current` would double every carriage return and
+    fail over its own fixture rather than over the code. The materialized tree is the engine's bytes either
+    way.
+    """
+    (root / "codegen.lock").write_bytes(_to_lf((_REAL_TREE / "codegen.lock").read_bytes()))
+    (root / "models.py").write_bytes(_to_lf((_REAL_TREE / "models.py.txt").read_bytes()))
     return root / "models.py"
+
+
+def _to_lf(raw: bytes) -> bytes:
+    return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
 
 def _categories(report: CodegenCheckReport) -> list[tuple[str, str]]:
@@ -324,6 +342,97 @@ class TestNoVerdict:
         root = _write(tmp_path, "not-a-directory", "")
         with pytest.raises(CodegenLockError, match="exists but is not a directory"):
             run_codegen_check(root=root)
+
+    def test_an_unreadable_locked_artifact_is_a_no_verdict_error_not_a_drift(self, tmp_path: Path) -> None:
+        _tree(tmp_path, ("models.py", "A = 1\n"))
+        (tmp_path / "models.py").chmod(0o000)
+        try:
+            # Bytes that are not UTF-8 are a verdict — not generated output — but bytes that cannot be read
+            # are the absence of one. Reporting this as hand-edited would be a wrong verdict, and letting the
+            # `PermissionError` out would break the one class a CI caller has to catch.
+            with pytest.raises(CodegenLockError, match="Unreadable file under the codegen output root"):
+                run_codegen_check(root=tmp_path)
+        finally:
+            (tmp_path / "models.py").chmod(0o644)
+
+    def test_an_entry_the_walk_cannot_stat_is_a_no_verdict_error(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        _tree(tmp_path, ("models.py", "A = 1\n"))
+        # `iterdir` is not the only syscall in the walk: classifying an entry stats it, and that fails on a
+        # path longer than the platform allows — a real 1400-deep tree does exactly this on macOS — or under
+        # a component that has become unsearchable. The depth reproduction is platform-dependent, so the
+        # failure is injected at the same call, for the walked entry alone rather than for every `is_dir`.
+        real_is_dir = Path.is_dir
+
+        def failing_is_dir(self: Path) -> bool:
+            if self.name == "models.py":
+                raise OSError(63, "File name too long")
+            return real_is_dir(self)
+
+        mocker.patch.object(Path, "is_dir", failing_is_dir)
+        with pytest.raises(CodegenLockError, match="Unreadable entry under the codegen output root"):
+            run_codegen_check(root=tmp_path)
+
+    def test_an_unreadable_directory_under_the_root_is_a_no_verdict_error(self, tmp_path: Path) -> None:
+        _tree(tmp_path, ("models.py", "A = 1\n"))
+        _write(tmp_path, "sub/stale.py", _stamped("STALE = 1\n"))
+        (tmp_path / "sub").chmod(0o000)
+        try:
+            # Treating an unlistable directory as an empty one would hide exactly the stale artifact the
+            # orphan scan exists to find.
+            with pytest.raises(CodegenLockError, match="Unreadable directory under the codegen output root"):
+                run_codegen_check(root=tmp_path)
+        finally:
+            (tmp_path / "sub").chmod(0o755)
+
+
+class TestParityWithTheReference:
+    """States where a reader and a writer must answer differently, and where the two readers must agree."""
+
+    def test_a_locked_artifact_whose_parent_is_a_regular_file_is_missing_not_an_error(self, tmp_path: Path) -> None:
+        _write(tmp_path, "codegen.lock", _lock(("nested/models.py", "A = 1\n")))
+        _write(tmp_path, "nested", "I am a file where a directory should be.\n")
+        report = run_codegen_check(root=tmp_path)
+        # `pipelex codegen check` reports `missing` here, so this reader must too. Refusing the tree is a
+        # *writer's* guard — it must not start writing into a blocked path — and the check inherited it by
+        # sharing the writer's resolver. To a reader the state says only that no file can be at that path.
+        assert _categories(report) == [("nested/models.py", "missing")]
+        assert report.drifts[0].detail == "Locked artifact is absent on disk."
+
+    def test_a_symbolic_link_component_is_still_refused_on_the_read_path(self, tmp_path: Path) -> None:
+        _write(tmp_path, "codegen.lock", _lock(("nested/models.py", "A = 1\n")))
+        (tmp_path / "elsewhere").mkdir()
+        (tmp_path / "nested").symlink_to(tmp_path / "elsewhere")
+        # Relaxing the directory guard must not relax containment: a link on the way to an artifact still
+        # routes the read out of the tree, and is still refused.
+        with pytest.raises(CodegenLockError, match="symbolic link component is not allowed"):
+            run_codegen_check(root=tmp_path)
+
+    def test_a_python_artifact_declaring_a_source_encoding_is_hand_edited(self, tmp_path: Path) -> None:
+        _tree(tmp_path, ("models.py", "A = 1\n"))
+        # Every header line still starts with `#`, and the body below the fence is untouched, so both the
+        # stamp hash and the locked hash still agree. But PEP 263 lets line 2 choose the codec CPython
+        # decodes the file with, and under `raw_unicode_escape` a header value carrying the six literal
+        # characters of a backslash-u-000a escape becomes a newline — so the text after it is a statement
+        # that runs on import, in a region no hash covers. Without the gate this tree reads as current
+        # while executing injected code.
+        injected = "# note: " + chr(92) + "u000aINJECTED = True"
+        stamped = (
+            _stamped("A = 1\n")
+            .replace(
+                "# >>> pipelex-codegen-stamp >>>\n",
+                "# >>> pipelex-codegen-stamp >>>\n# coding: raw_unicode_escape\n",
+            )
+            .replace("# options: {}\n", f"# options: {{}}\n{injected}\n")
+        )
+        _write(tmp_path, "models.py", stamped)
+        assert _categories(run_codegen_check(root=tmp_path)) == [("models.py", "hand-edited")]
+
+    def test_a_coding_declaration_below_pep_263s_two_line_window_is_not_a_drift(self, tmp_path: Path) -> None:
+        _tree(tmp_path, ("models.py", "A = 1\n"))
+        # CPython reads the declaration on the first two lines and no further, so one below them changes
+        # nothing about how the file decodes. Reporting it would be a drift the state does not justify.
+        _write(tmp_path, "models.py", _stamped("A = 1\n").replace("# options: {}\n", "# options: {}\n# coding: utf-8\n"))
+        assert run_codegen_check(root=tmp_path).is_current
 
     def test_every_no_verdict_condition_is_catchable_as_a_codegen_error(self, tmp_path: Path) -> None:
         _write(tmp_path, "codegen.lock", "lock_version = = 1\n")

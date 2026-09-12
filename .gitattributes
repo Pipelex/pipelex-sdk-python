@@ -1,0 +1,5 @@
+# The codegen check's fixture tree is genuine `pipelex codegen types` output, committed byte for byte so
+# the suite re-proves the verdict over real engine bytes. Its content hashes cover those bytes exactly, so
+# a checkout that rewrote its line endings (`core.autocrlf=true`) would hand the suite a different tree
+# than the one the stamp and the lock were computed over. Pin it.
+tests/unit/data/real_codegen_tree/** -text

@@ -17,9 +17,14 @@ split is the point: regeneration is a **dev action** (it needs the engine), the 
 **A mirror, deliberately.** The algorithm is `pipelex.codegen.check.run_codegen_check`, and the spec pins
 it as pure hashing precisely so that every client — the CLI, an SDK, a short CI script — reaches the same
 verdict over the same bytes. The drift `detail` sentences are kept verbatim for the same reason: a
-consumer moving between `pipelex codegen check` and this function reads the same report. The one
-documented relaxation is in `pipelex_sdk.codegen_stamp.parse_stamped`, which does not match the
-projection axes against this SDK's vocabulary.
+consumer moving between `pipelex codegen check` and this function reads the same report.
+
+Two divergences are documented, both in `pipelex_sdk.codegen_stamp`: a **relaxation**, which does not
+match the projection axes against this SDK's vocabulary, and a **tightening**, which refuses a Python
+artifact that declares a PEP 263 source encoding because such a declaration makes the header's
+comment-prefix gate unsound. A third difference is not a divergence of verdict: where the reference lets
+a `PermissionError` out of an unreadable file or directory, this module raises `CodegenLockError`, so a
+CI caller has one class to catch. Neither reaches a verdict for that state.
 
 The algorithm, per the codegen spec's "Offline check algorithm":
 
@@ -38,7 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pipelex_sdk._pydantic_utils import empty_list_factory_of
 from pipelex_sdk.codegen_lock import CODEGEN_LOCK_FILENAME, CodegenLock, load_lock, resolve_artifact_path, resolve_output_path
-from pipelex_sdk.codegen_stamp import STAMPABLE_SUFFIXES, comment_prefix_for, compute_content_hash, has_stamp, parse_stamped
+from pipelex_sdk.codegen_stamp import comment_prefix_for, compute_content_hash, has_stamp, is_stampable_artifact_path, parse_stamped
 from pipelex_sdk.errors import CodegenError, CodegenLockError
 
 _SKIP_DIRS = frozenset(
@@ -128,8 +133,10 @@ def run_codegen_check(*, root: Path) -> CodegenCheckReport:
     under `core.autocrlf=true`, is current to both readers rather than hand-edited to one.
 
     Raises `CodegenLockError` for a no-verdict condition — a lock that is malformed, unreadable or of a
-    `lock_version` this SDK does not know, or a tree whose paths are not safe and canonical. A drift is a
-    verdict and rides the report; this is the absence of one.
+    `lock_version` this SDK does not know, a tree whose paths are not safe and canonical, or a file or
+    directory under the root that the process cannot read. A drift is a verdict and rides the report; this
+    is the absence of one, and it is one class so a CI caller has one thing to catch. The reference lets a
+    `PermissionError` out of the equivalent paths instead; the verdict is the same in both — there is none.
     """
     try:
         lock_path = resolve_output_path(root=root, relative_path=Path(CODEGEN_LOCK_FILENAME))
@@ -159,7 +166,10 @@ def run_codegen_check(*, root: Path) -> CodegenCheckReport:
 def _check_locked_artifacts(*, root: Path, lock: CodegenLock) -> list[CodegenDrift]:
     drifts: list[CodegenDrift] = []
     for path, locked_hash in sorted(lock.hash_by_path().items()):
-        file_path = resolve_artifact_path(root=root, artifact_path=path)
+        # `require_directory_components=False` because this is a reader: a regular file where the artifact
+        # needs a parent directory is a writer's refusal and a reader's `missing` drift, which is what
+        # `pipelex codegen check` reports for it. Symbolic links and escapes are still refused.
+        file_path = resolve_artifact_path(root=root, artifact_path=path, require_directory_components=False)
         if not file_path.is_file():
             drifts.append(CodegenDrift(path=path, category=DriftCategory.MISSING, detail=_MISSING_DETAIL))
             continue
@@ -209,14 +219,31 @@ def _iter_stampable_files(*, directory: Path) -> Iterator[Path]:
     Symbolic links are skipped rather than refused, as in the reference: the orphan scan reads whatever
     happens to share the output root, and a link parked beside the tree is not the tree's fault. A link at
     an artifact's own path is a different matter and `resolve_artifact_path` still refuses it.
+
+    A directory the process cannot list is a no-verdict condition rather than an empty directory: skipping
+    it would hide exactly the stale artifact the orphan scan exists to find, so it is reported as one.
     """
-    for entry in sorted(directory.iterdir()):
-        if entry.is_symlink():
-            continue
-        if entry.is_dir():
+    try:
+        entries = sorted(directory.iterdir())
+    except OSError as exc:
+        msg = f"Unreadable directory under the codegen output root at '{directory}': {exc}"
+        raise CodegenLockError(msg) from exc
+    for entry in entries:
+        try:
+            # `is_symlink` first and inside the same guard, because it is what keeps a link out of the walk:
+            # asking `is_dir` about a symlink loop raises where this short-circuit never looks. Stat can fail
+            # for its own reasons too — a path longer than the platform allows, a component turned
+            # unsearchable — so the classification is guarded rather than assumed to answer.
+            if entry.is_symlink():
+                continue
+            is_directory = entry.is_dir()
+        except OSError as exc:
+            msg = f"Unreadable entry under the codegen output root at '{entry}': {exc}"
+            raise CodegenLockError(msg) from exc
+        if is_directory:
             if entry.name not in _SKIP_DIRS:
                 yield from _iter_stampable_files(directory=entry)
-        elif entry.suffix in STAMPABLE_SUFFIXES:
+        elif is_stampable_artifact_path(entry.name):
             yield entry
 
 
@@ -224,8 +251,16 @@ def _read_text_or_none(path: Path) -> str | None:
     """Read UTF-8 text, or `None` when the bytes are not UTF-8 — in which case it is not generated output.
 
     Text mode on purpose: see `run_codegen_check` on universal-newline translation.
+
+    Bytes that are not UTF-8 are a verdict — the file cannot be generated output — but a file that cannot
+    be *read at all* is the absence of one, and is raised rather than guessed at. Returning `None` for it
+    would report an unreadable artifact as hand-edited, and a file vanishing between the walk and this read
+    would report a stale artifact as absent: both are wrong verdicts where no verdict is available.
     """
     try:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return None
+    except OSError as exc:
+        msg = f"Unreadable file under the codegen output root at '{path}': {exc}"
+        raise CodegenLockError(msg) from exc

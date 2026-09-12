@@ -14,17 +14,27 @@ The **offline check** needs the rest: `parse_stamped` splits a file into the has
 the body that hash covers, and `compute_content_hash` recomputes it. That is the whole of the drift
 verdict for one file — no engine, no network, no key.
 
-One deliberate relaxation against the reference, inherited from `@pipelex/sdk`'s port: the projection
-line must be *present and well-formed*, but its `kind` / `target` values are not checked against this
-SDK's vocabulary. `pipelex` validates them against its own enums, which cannot lag its own emitter; an
-SDK copy can, and rejecting an unknown-but-valid future `kind` would report every artifact in the tree
-as hand-edited. For today's vocabulary the two readers are identical.
+Two deliberate divergences from the reference, one in each direction.
+
+The **relaxation** is inherited from `@pipelex/sdk`'s port: the projection line must be *present and
+well-formed*, but its `kind` / `target` values are not checked against this SDK's vocabulary. `pipelex`
+validates them against its own enums, which cannot lag its own emitter; an SDK copy can, and rejecting
+an unknown-but-valid future `kind` would report every artifact in the tree as hand-edited. For today's
+vocabulary the two readers are identical.
+
+The **tightening** is this reader's own: a Python artifact declaring a PEP 263 source encoding is
+refused, because such a declaration makes the comment-prefix gate below unsound — CPython decodes the
+file before tokenizing it, so a header line can carry an escape that becomes executable code the hashes
+never cover. `pipelex` and `@pipelex/sdk` both miss it today. It is the only case where this reader
+reports a drift the reference calls current, and it rejects nothing a real generated tree contains:
+`_declares_a_python_source_encoding` carries the reasoning.
 
 Nothing here builds or rewrites a stamp. The server stamps, and the SDK keeps the bytes it was sent.
 """
 
 import hashlib
 import json
+import re
 from pathlib import PurePosixPath
 from typing import NoReturn
 
@@ -35,14 +45,19 @@ from pipelex_sdk.errors import CodegenError
 _BEGIN_MARKER = ">>> pipelex-codegen-stamp >>>"
 _END_MARKER = "<<< pipelex-codegen-stamp <<<"
 
+_PYTHON_COMMENT_PREFIX = "#"
+
+_PEP_263_CODING_DECLARATION = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-_.a-zA-Z0-9]+)")
+"""PEP 263's own source-encoding pattern, which CPython honours on a file's first two lines only."""
+
 _COMMENT_PREFIX_BY_SUFFIX = {".py": "#", ".ts": "//"}
 
 STAMPABLE_SUFFIXES = frozenset(_COMMENT_PREFIX_BY_SUFFIX)
 """The file suffixes codegen stamps, mirroring pipelex's `STAMPABLE_SUFFIXES`.
 
-Public so a caller filters a tree walk exactly as the check does: a file whose suffix is not here can
-never be an artifact and can never be an orphan, so it is skipped rather than refused — which is what
-lets a project park a sidecar such as `sources.json` beside the lock.
+A file whose suffix is not here can never be an artifact and can never be an orphan, so the orphan scan
+skips it rather than refusing it — which is what lets a project park a sidecar such as `sources.json`
+beside the lock. `is_stampable_artifact_path` is the predicate over it, and the one the scan itself calls.
 """
 
 
@@ -59,7 +74,12 @@ class ParsedStamp(BaseModel):
 
 
 def is_stampable_artifact_path(artifact_path: str) -> bool:
-    """Whether `artifact_path` names a file type codegen stamps, and therefore one the check considers."""
+    """Whether `artifact_path` names a file type codegen stamps, and therefore one the check considers.
+
+    The offline check's own orphan scan filters on this, so a caller reasoning about a path — deciding
+    whether a file beside a tree could be an artifact at all — reaches the same answer by construction
+    rather than by keeping a second copy of the rule in step.
+    """
     return PurePosixPath(artifact_path).suffix in STAMPABLE_SUFFIXES
 
 
@@ -112,6 +132,8 @@ def parse_stamped(content: str, *, comment_prefix: str) -> ParsedStamp | None:
     # code, since the header itself is not hashed.
     if any(not line.startswith(comment_prefix) for line in header_region.splitlines()):
         return None
+    if _declares_a_python_source_encoding(content, comment_prefix=comment_prefix):
+        return None
 
     fields = _parse_fields(header_region, comment_prefix=comment_prefix)
     projection = fields.get("projection")
@@ -120,6 +142,31 @@ def parse_stamped(content: str, *, comment_prefix: str) -> ParsedStamp | None:
     if not _is_json_object(fields.get("options", "{}")):
         return None
     return ParsedStamp(content_hash=fields.get("content_hash", ""), body=body)
+
+
+def _declares_a_python_source_encoding(content: str, *, comment_prefix: str) -> bool:
+    """Whether a Python artifact declares a PEP 263 source encoding, which makes the prefix gate a lie.
+
+    The comment-prefix gate above proves every header line *begins* with a comment marker in the bytes on
+    disk. It does not prove those lines are inert, because CPython decodes the file before it tokenizes it,
+    and PEP 263 lets the file itself choose the codec from a comment on either of its first two lines. Under
+    `raw_unicode_escape` or `unicode_escape` a header line carrying a literal six-character u000a escape
+    becomes two lines once decoded, the second of them executable — and the body below the fence, which is
+    the only part the hashes cover, is untouched. Both hashes therefore still agree and the tree reads as
+    current while importing the artifact runs the injected statement.
+
+    It is the same hole the `splitlines` rule above closes for U+2028, reached through a different door, so
+    it is closed the same way: the emitter never writes a `coding:` line, so refusing one rejects nothing a
+    correctly generated tree contains. That makes this a *tightening* against `pipelex`, which shares the
+    gap (as does `@pipelex/sdk`) — the one divergence in this module that reports a drift the reference
+    calls current, and the safe direction for a CI gate to diverge in. Only Python has such a mechanism;
+    `.ts` needs no counterpart, since every line terminator ECMAScript honours is one `splitlines` breaks on.
+    """
+    if comment_prefix != _PYTHON_COMMENT_PREFIX:
+        return False
+    # PEP 263 reads the first two physical lines and no further, so a `coding:` line below them is inert and
+    # is left to the ordinary field parsing rather than reported as a drift it is not.
+    return any(_PEP_263_CODING_DECLARATION.match(line) for line in content.split("\n")[:2])
 
 
 def _parse_fields(header_region: str, *, comment_prefix: str) -> dict[str, str]:
