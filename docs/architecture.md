@@ -46,7 +46,7 @@ A token is **optional** (anonymous access is allowed; protocol routes work again
 
 ## Conventions
 
-- **Async-only** — httpx `AsyncClient`, `async def` throughout. No sync facade in v0.1.
+- **Async-native, with a synchronous facade** — httpx `AsyncClient` and `async def` throughout `PipelexAPIClient`; `SyncPipelexAPIClient` wraps it for callers with no event loop of their own (see "Synchronous facade" below).
 - **No barrel** — package `__init__.py` files stay empty; consumers import via full paths (`from pipelex_sdk.client import PipelexAPIClient`). The public import paths are documented in the README.
 - **Wire format** — snake_case JSON fields on Pydantic v2 models.
 
@@ -214,12 +214,21 @@ The wire models are snake_case Pydantic v2. Response models are extension-open (
 
 `health()` → `GET {origin}/health`. The one route served at the **origin**, NOT under the `/v1` prefix — the origin is derived from the base URL (`_origin_of`, exposed as `self.origin_url`), so a base URL of `https://api.pipelex.com/v1/...` still probes `https://api.pipelex.com/health`. It is **out-of-protocol**: the MTHDS Protocol defines no health route, and `/health` is neither a protocol nor a product surface. It rides `_request_json` (the plainer regime), so a non-2xx raises `PipelineRequestError` rather than the product `ApiResponseError` — liveness needs no `code` taxonomy. Transport failures still map to `ApiUnreachableError`. (Checkpoint-5 decision: kept the plainer regime — see "Error regimes" above.)
 
+## Synchronous facade
+
+`SyncPipelexAPIClient` (`pipelex_sdk/sync_client.py`) is the same surface without `await`, for a script, a batch job, a Django view, or any other caller with no event loop of its own. It wraps and delegates: every public method calls the same-named coroutine on one private `PipelexAPIClient`, so there is one HTTP implementation and none of the retry, error-mapping, paging or polling logic is restated. Each method keeps its twin's signature, result and errors, and `iterate_methods` / `iterate_runs` come back as plain `Iterator`s. `tests/unit/test_sync_client_parity.py` compares the two classes signature by signature in both directions, so a coroutine added to the async client without its twin fails the suite. The facade has no JavaScript counterpart, because Node has no synchronous half to serve; it is ergonomics, not parity.
+
+- **One private loop on a daemon thread.** The loop starts at the first call and lives until `close()`. Calling `asyncio.run` once per call was rejected: the wrapped client's httpx connection pool belongs to the loop that opened it, so a fresh loop per call breaks the pool or rebuilds it every time. Driving a long-lived loop from the caller's thread with `asyncio.Runner` was rejected too, because a facade shared across threads would then queue every call behind the one in flight, a twenty-minute `start_and_wait` included. With the loop on its own thread, calls from several threads run concurrently, and one instance can be shared.
+- **A caller inside a running event loop is refused.** It gets `SyncClientInEventLoopError` before anything is sent. The call would work mechanically, but it would block that loop for the whole request and freeze everything else scheduled on it; async code awaits `PipelexAPIClient` instead. The error is a `RuntimeError`, the class `asyncio.run()` raises for the same mistake, rather than a `PipelineRequestError`, so a handler written for API failures does not swallow a programming error. A `WaitForResultOptions.on_poll` callback runs on the facade's loop, so it falls under the same rule.
+- **Close and reuse.** `close()`, or leaving the `with` block, cancels any call still in flight on another thread (it raises `concurrent.futures.CancelledError` there), closes the HTTP client, finalizes async generators left part-way and joins the thread. A closed facade is reusable and starts a fresh loop at its next call. Breaking out of a sync iterator finalizes the async generator beneath it at once.
+- **Interrupts.** Ctrl+C while a call is blocked cancels the coroutine on the loop and re-raises in the caller. As on the async client, that stops the waiting, never the run, which keeps executing server-side and stays resumable by id.
+- **Processes.** The loop thread does not survive a `fork`, so a pre-forking server (a preloading gunicorn, for example) should make a facade's first call in the worker rather than in the parent.
+
 ## Out of scope
 
 - The `/v1/build/*` helpers — `build_output`, `build_runner`, `concept`, `pipe_spec`. `build_inputs` shipped in 0.5.0 and was removed again once `prepare_inputs`, its only caller, moved onto `validate` + the input-form descriptor: this SDK no longer touches `/v1/build/*`, which the workspace is retiring (`wip/build-retirement/`).
 - Organization *switch* (a WorkOS session operation, not a `/v1` route).
 - A `~/.pipelex/config` file reader (env-only for now, matching the JS SDK).
-- A synchronous client facade.
 
 ## Versioning
 
@@ -249,4 +258,4 @@ Each stays deferred rather than silently missing. Everything else — the protoc
 
 **Conscious exclusions:** the surfaces listed at the top of this section, and the organization *switch* (a WorkOS session op, not a `/v1` route).
 
-**Intentional divergences from the JS SDK** (Python house style / clean inheritance): no barrel (`__init__.py` stays empty; import via full paths); inheritance on `MthdsAPIClient` rather than the JS composition-of-types; async-only; `__version__` derived from installed metadata rather than a hand-synced constant.
+**Intentional divergences from the JS SDK** (Python house style / clean inheritance): no barrel (`__init__.py` stays empty; import via full paths); inheritance on `MthdsAPIClient` rather than the JS composition-of-types; a synchronous facade (`SyncPipelexAPIClient`) with no JS counterpart; `__version__` derived from installed metadata rather than a hand-synced constant.

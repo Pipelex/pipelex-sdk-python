@@ -15,6 +15,11 @@ protocol base. Both derive from the protocol base `PipelineRequestError`
 - `PagingNotTerminatingError` — a paged-list iterator hit its runaway backstop, meaning
   the server never stopped handing out cursors.
 
+`SyncClientInEventLoopError` is the one exception to that lineage: it is a usage error
+(`SyncPipelexAPIClient` called where a blocking call would freeze a running event loop), so
+it derives from `RuntimeError`, the class `asyncio.run()` raises for the same mistake, and a
+handler written for API failures does not swallow it.
+
 The run-lifecycle errors (`RunFailedError`, `RunTimeoutError`,
 `RunLifecycleUnavailableError`) are owned here (ported from `mthds-python` in
 HANDOFF Phase 2, and removed from `mthds-python` in Phase 6). `RunStillRunningError`
@@ -229,3 +234,13 @@ class UploadAuthenticationError(InputPreparationError):
 
 class UploadTransportError(InputPreparationError):
     """A network or server fault reaching the upload route (unreachable host, `5xx`)."""
+
+
+class SyncClientInEventLoopError(RuntimeError):
+    """Raised when `SyncPipelexAPIClient` is called from a thread that runs an event loop.
+
+    The call would block that loop for the whole request, freezing everything else scheduled
+    on it, so it is refused before anything is sent. An async caller wants `PipelexAPIClient`
+    and `await`. Deliberately not a `PipelineRequestError`: it is a programming error, not a
+    failed request.
+    """

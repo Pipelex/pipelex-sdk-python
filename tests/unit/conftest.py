@@ -12,8 +12,11 @@ import httpx
 import pytest
 
 from pipelex_sdk.client import PipelexAPIClient
+from pipelex_sdk.sync_client import SyncPipelexAPIClient
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from pytest_mock import MockerFixture, MockType
 
 BASE_URL = "http://localhost:8081"
@@ -34,6 +37,14 @@ class SendPatcher(Protocol):
 @pytest.fixture
 def api_client() -> PipelexAPIClient:
     return PipelexAPIClient(api_key="test-token", base_url=BASE_URL)
+
+
+@pytest.fixture
+def sync_api_client() -> Iterator[SyncPipelexAPIClient]:
+    """A sync facade over a test client, closed at teardown so no loop thread outlives the test."""
+    client = SyncPipelexAPIClient(api_key="test-token", base_url=BASE_URL)
+    yield client
+    client.close()
 
 
 @pytest.fixture
