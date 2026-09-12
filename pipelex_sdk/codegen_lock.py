@@ -67,6 +67,11 @@ class CodegenLock(BaseModel):
         """The set of tracked artifact paths, relative to the lock."""
         return set(validate_artifact_paths(entry.path for entry in self.artifacts))
 
+    def hash_by_path(self) -> dict[str, str]:
+        """Map each tracked artifact path to the locked hash of its body — what the offline check compares."""
+        validate_artifact_paths(entry.path for entry in self.artifacts)
+        return {entry.path: entry.content_hash for entry in self.artifacts}
+
 
 def parse_lock(content: str) -> CodegenLock:
     """Parse the text of a `codegen.lock`.
@@ -99,7 +104,12 @@ def load_lock(lock_path: Path) -> CodegenLock | None:
     if not lock_path.is_file():
         return None
     try:
-        content = lock_path.read_bytes().decode("utf-8")
+        # Text mode, so Python's universal-newline translation folds `\r\n` and a lone `\r` into `\n` before
+        # the TOML parser sees them. That is what `pipelex`'s reader does (`load_text_from_path` is
+        # `read_text(encoding="utf-8")`), so a lock checked out with CRLF reads identically on both sides.
+        # The writer reads *bytes* for its write-if-changed comparison, deliberately and for the opposite
+        # reason: there, translation would make the same response two different trees across platforms.
+        content = lock_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         msg = f"Unreadable codegen lock at '{lock_path}': {exc}"
         raise CodegenLockError(msg) from exc
