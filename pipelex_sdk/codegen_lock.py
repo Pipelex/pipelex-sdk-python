@@ -154,8 +154,11 @@ def resolve_output_path(*, root: Path, relative_path: Path) -> Path:
     """Resolve one output file beneath `root`, refusing a symbolic link anywhere on the way to it.
 
     The root itself must not be a symbolic link and, when it exists, must be a directory. Every component
-    below it must not be a symbolic link, the resolved destination must stay inside the root, and a
-    destination that already exists must be a regular file.
+    below it must not be a symbolic link, every one on the way to the destination that already exists must
+    be a directory, the resolved destination must stay inside the root, and a destination that already
+    exists must be a regular file. The directory check is what lets a writer refuse a tree before its first
+    write: without it, a regular file where an artifact needs a parent directory is only discovered when
+    creating that directory fails, after the artifacts before it were written.
     """
     if relative_path.is_absolute() or not relative_path.parts or any(part in {"", ".", ".."} for part in relative_path.parts):
         _raise_path_error(str(relative_path), reason="internal output path must be a canonical relative path")
@@ -168,7 +171,7 @@ def resolve_output_path(*, root: Path, relative_path: Path) -> Path:
         _raise_path_error(str(normalized_root), reason="output root exists but is not a directory")
 
     destination = normalized_root / relative_path
-    _reject_symlink_components(root=normalized_root, relative_path=relative_path)
+    _reject_unsafe_components(root=normalized_root, relative_path=relative_path)
     if not destination.resolve(strict=False).is_relative_to(normalized_root):
         _raise_path_error(str(destination), reason=f"resolved path escapes output root '{normalized_root}'")
     if destination.exists() and not destination.is_file():
@@ -176,12 +179,14 @@ def resolve_output_path(*, root: Path, relative_path: Path) -> Path:
     return destination
 
 
-def _reject_symlink_components(*, root: Path, relative_path: Path) -> None:
+def _reject_unsafe_components(*, root: Path, relative_path: Path) -> None:
     current = root
-    for part in relative_path.parts:
+    for depth, part in enumerate(relative_path.parts, start=1):
         current /= part
         if current.is_symlink():
             _raise_path_error(str(root / relative_path), reason=f"symbolic link component is not allowed: '{current}'")
+        if depth < len(relative_path.parts) and current.exists() and not current.is_dir():
+            _raise_path_error(str(root / relative_path), reason=f"a component on the way to it is not a directory: '{current}'")
 
 
 def _raise_path_error(path: str, *, reason: str) -> NoReturn:

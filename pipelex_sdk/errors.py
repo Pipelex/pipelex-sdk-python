@@ -241,9 +241,10 @@ class CodegenError(Exception):
     Raised before the first byte is written when a `/v1/codegen` response, or the directory it is
     headed for, is unsafe: a `lock_filename` other than `codegen.lock`, an artifact path that could
     leave the output root or name a file type codegen never emits (absolute or drive-prefixed, a `..`
-    or empty component, a backslash, a control character, an unstampable suffix, a duplicate), a
-    symbolic link on the way to a destination, a destination that is not a regular file, or a file
-    already at an artifact's path that codegen does not own.
+    or empty component, a backslash, a control character, an unstampable suffix, a duplicate), a lock
+    that cannot be read or does not track exactly the artifacts, a symbolic link or a regular file on
+    the way to a destination or to a previously tracked path about to be pruned, a destination that is
+    not a regular file, or a file already at an artifact's path that codegen does not own.
     """
 
 

@@ -198,6 +198,32 @@ class TestCodegenWriter:
         assert (tmp_path / "escape.py").exists()
         assert not (output_dir / "models.py").exists()
 
+    def test_refuses_a_tracked_path_that_became_a_directory_before_writing_anything(self, tmp_path: Path) -> None:
+        """Prune targets are resolved in the preflight: refusing one while pruning would leave rewritten artifacts beside the old lock."""
+        write_codegen_tree(_report({"models.py": _stamped("A = 1\n"), "old.py": _stamped("OLD = 1\n")}), output_dir=tmp_path)
+        previous_lock = (tmp_path / "codegen.lock").read_bytes()
+        (tmp_path / "old.py").unlink()
+        (tmp_path / "old.py").mkdir()
+
+        with pytest.raises(CodegenError, match="not a regular file"):
+            write_codegen_tree(_report({"models.py": _stamped("A = 2\n")}), output_dir=tmp_path)
+
+        assert (tmp_path / "models.py").read_text(encoding="utf-8") == _stamped("A = 1\n")
+        assert (tmp_path / "codegen.lock").read_bytes() == previous_lock
+
+    def test_refuses_a_tracked_path_behind_a_symlink_before_writing_anything(self, tmp_path: Path) -> None:
+        output_dir = tmp_path / "generated"
+        write_codegen_tree(_report({"models.py": _stamped("A = 1\n"), "sub/old.py": _stamped("OLD = 1\n")}), output_dir=output_dir)
+        elsewhere = tmp_path / "elsewhere"
+        (output_dir / "sub").rename(elsewhere)
+        (output_dir / "sub").symlink_to(elsewhere, target_is_directory=True)
+
+        with pytest.raises(CodegenError, match="symbolic link component is not allowed"):
+            write_codegen_tree(_report({"models.py": _stamped("A = 2\n")}), output_dir=output_dir)
+
+        assert (elsewhere / "old.py").exists()
+        assert (output_dir / "models.py").read_text(encoding="utf-8") == _stamped("A = 1\n")
+
     # ── Ownership ────────────────────────────────────────────────────
 
     def test_refuses_to_overwrite_an_unowned_file_and_writes_nothing(self, tmp_path: Path) -> None:
@@ -219,6 +245,7 @@ class TestCodegenWriter:
         assert result.unchanged == ["models.py"]
 
     def test_overwrites_a_stamped_file_the_previous_lock_never_tracked(self, tmp_path: Path) -> None:
+        """Ownership reads the stamp's begin line only. `pipelex` also requires the header to parse, and refuses this file (L-260912-bb83ca)."""
         (tmp_path / "models.py").write_text(_stamped("STALE = 1\n"), encoding="utf-8")
 
         result = write_codegen_tree(_pipelex_report(), output_dir=tmp_path)
@@ -257,6 +284,42 @@ class TestCodegenWriter:
 
         assert not output_dir.exists()
 
+    @pytest.mark.parametrize(
+        ("artifact_paths", "lock_paths"),
+        [(["models.py"], ["models.py", "hand.py"]), (["models.py", "other.py"], ["models.py"])],
+    )
+    def test_refuses_a_response_whose_lock_does_not_track_exactly_its_artifacts(
+        self, tmp_path: Path, artifact_paths: list[str], lock_paths: list[str]
+    ) -> None:
+        """The written lock is what the next run trusts: a path it tracks may be overwritten without a stamp, and pruned."""
+        output_dir = tmp_path / "generated"
+        report = _report({path: _stamped("X = 1\n") for path in artifact_paths}, lock=_lock_tracking(*lock_paths))
+
+        with pytest.raises(CodegenError, match="does not track exactly its artifacts"):
+            write_codegen_tree(report, output_dir=output_dir)
+
+        assert not output_dir.exists()
+
+    @pytest.mark.parametrize("lock", ["this is [not toml", _lock_tracking("models.py").replace("lock_version = 1", "lock_version = 2")])
+    def test_refuses_a_response_lock_this_sdk_cannot_read(self, tmp_path: Path, lock: str) -> None:
+        """Unlike a corrupt previous lock, which is replaced, a response lock that cannot be read is refused: writing it would switch pruning off."""
+        output_dir = tmp_path / "generated"
+
+        with pytest.raises(CodegenError, match="whose lock this SDK cannot read") as exc_info:
+            write_codegen_tree(_report({"models.py": _stamped("A = 1\n")}, lock=lock), output_dir=output_dir)
+
+        assert not isinstance(exc_info.value, CodegenLockError)
+        assert not output_dir.exists()
+
+    def test_refuses_a_response_lock_that_tracks_an_unsafe_path(self, tmp_path: Path) -> None:
+        output_dir = tmp_path / "generated"
+        report = _report({"models.py": _stamped("A = 1\n")}, lock=_lock_tracking("models.py", "../escape.py"))
+
+        with pytest.raises(CodegenError, match=r"Unsafe codegen artifact path '\.\./escape\.py'"):
+            write_codegen_tree(report, output_dir=output_dir)
+
+        assert not output_dir.exists()
+
     def test_refuses_a_duplicate_artifact_path(self, tmp_path: Path) -> None:
         report = _report({"models.py": _stamped("A = 1\n")})
         duplicated = report.model_copy(update={"artifacts": [*report.artifacts, GeneratedArtifact(path="models.py", content=_stamped("A = 2\n"))]})
@@ -288,6 +351,15 @@ class TestCodegenWriter:
 
         assert list(elsewhere.iterdir()) == []
         assert not (output_dir / "models.py").exists()
+
+    def test_refuses_a_file_where_an_artifact_needs_a_directory_before_writing_anything(self, tmp_path: Path) -> None:
+        (tmp_path / "nested").write_text("not a directory\n", encoding="utf-8")
+
+        with pytest.raises(CodegenError, match="a component on the way to it is not a directory"):
+            write_codegen_tree(_pipelex_report(), output_dir=tmp_path)
+
+        assert not (tmp_path / "models.py").exists()
+        assert not (tmp_path / "codegen.lock").exists()
 
     def test_refuses_a_destination_that_is_a_directory(self, tmp_path: Path) -> None:
         (tmp_path / "models.py").mkdir()
