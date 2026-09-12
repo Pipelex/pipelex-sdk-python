@@ -22,7 +22,8 @@ stays in `mthds` — it belongs to the protocol `execute()` 202-degrade path, no
 lifecycle — and is re-exported here so consumers have a single import home.
 
 The codegen tree errors (`CodegenError`, `CodegenLockError`) are not request errors at all: they are
-raised by `pipelex_sdk.codegen_writer`, `pipelex_sdk.codegen_check` and `pipelex_sdk.codegen_lock` over
+raised by `pipelex_sdk.codegen_writer`, `pipelex_sdk.codegen_check`, `pipelex_sdk.codegen_lock` and
+`pipelex_sdk.codegen_stamp` over
 bytes and a directory, so they derive from `Exception` rather than from the protocol base.
 """
 

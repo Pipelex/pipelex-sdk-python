@@ -389,6 +389,20 @@ class TestNoVerdict:
         finally:
             (tmp_path / "models.py").chmod(0o644)
 
+    def test_a_locked_artifact_under_an_unsearchable_directory_is_a_no_verdict_error(self, tmp_path: Path) -> None:
+        _tree(tmp_path, ("sub/models.py", "A = 1\n"))
+        (tmp_path / "sub").chmod(0o000)
+        try:
+            # Locating a locked artifact is a third filesystem leg beside reading one and walking the tree,
+            # and it fails the same way under a directory the process cannot search: resolving the path stats
+            # every component, and `is_file` stats the destination. Both raised a bare `PermissionError` while
+            # the two other legs were wrapped, so the documented single class a CI caller catches had a hole
+            # in exactly the path every run takes first.
+            with pytest.raises(CodegenLockError, match="Unreadable path under the codegen output root"):
+                run_codegen_check(root=tmp_path)
+        finally:
+            (tmp_path / "sub").chmod(0o755)
+
     def test_an_entry_the_walk_cannot_stat_is_a_no_verdict_error(self, tmp_path: Path, mocker: MockerFixture) -> None:
         _tree(tmp_path, ("models.py", "A = 1\n"))
         # `iterdir` is not the only syscall in the walk: classifying an entry stats it, and that fails on a

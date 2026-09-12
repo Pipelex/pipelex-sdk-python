@@ -184,17 +184,35 @@ def run_codegen_check(*, root: Path) -> CodegenCheckReport:
 def _check_locked_artifacts(*, root: Path, lock: CodegenLock) -> list[CodegenDrift]:
     drifts: list[CodegenDrift] = []
     for path, locked_hash in sorted(lock.hash_by_path().items()):
-        # `require_directory_components=False` because this is a reader: a regular file where the artifact
-        # needs a parent directory is a writer's refusal and a reader's `missing` drift, which is what
-        # `pipelex codegen check` reports for it. Symbolic links and escapes are still refused.
-        file_path = resolve_artifact_path(root=root, artifact_path=path, require_directory_components=False)
-        if not file_path.is_file():
+        file_path = _locate_locked_artifact(root=root, path=path)
+        if file_path is None:
             drifts.append(CodegenDrift(path=path, category=DriftCategory.MISSING, detail=_MISSING_DETAIL))
             continue
         drift = _check_present_artifact(path=path, file_path=file_path, locked_hash=locked_hash)
         if drift is not None:
             drifts.append(drift)
     return drifts
+
+
+def _locate_locked_artifact(*, root: Path, path: str) -> Path | None:
+    """The file at a locked artifact's path, or `None` when nothing is there and it is a `missing` drift.
+
+    `require_directory_components=False` because this is a reader: a regular file where the artifact needs a
+    parent directory is a writer's refusal and a reader's `missing` drift, which is what `pipelex codegen
+    check` reports for it. Symbolic links and escapes are still refused.
+
+    Resolving the path and stat-ing it both reach the filesystem, and both raise `EACCES` for an artifact
+    under a directory the process cannot search. That is the same no-verdict condition the artifact read and
+    the orphan walk already wrap, and the contract is a single catchable class, so a `PermissionError` must
+    not escape from this leg either. An unsafe path is a different matter: it raises `CodegenError`, which is
+    not an `OSError` and so passes through this guard to the caller that wraps it as an unsafe tree.
+    """
+    try:
+        file_path = resolve_artifact_path(root=root, artifact_path=path, require_directory_components=False)
+        return file_path if file_path.is_file() else None
+    except OSError as exc:
+        msg = f"Unreadable path under the codegen output root at '{root / path}': {exc}"
+        raise CodegenLockError(msg) from exc
 
 
 def _check_present_artifact(*, path: str, file_path: Path, locked_hash: str) -> CodegenDrift | None:
