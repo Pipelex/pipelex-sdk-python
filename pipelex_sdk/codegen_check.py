@@ -39,7 +39,7 @@ from collections.abc import Iterator
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from pipelex_sdk._pydantic_utils import empty_list_factory_of
 from pipelex_sdk.codegen_lock import CODEGEN_LOCK_FILENAME, CodegenLock, load_lock, resolve_artifact_path, resolve_output_path
@@ -105,14 +105,29 @@ class CodegenCheckReport(BaseModel):
 
     Surfaced so a caller can compare a committed tree against a live `codegen()` response's
     `crate_fingerprint` — the engine-needing comparison this check deliberately never makes itself.
+
+    It is the lock header's value as read, **not** cross-checked against the fingerprint each artifact's
+    own stamp records, and the check does not compare those stamps to each other either. So a tree whose
+    artifacts were generated against different crates — the shape a merge taking one artifact and its lock
+    entry from each side produces — is reported current, with this field naming only the crate the lock
+    header claims. `pipelex codegen check` has the same blind spot, so closing it is a spec question
+    rather than this reader's to answer alone.
     """
 
     engine_version: str | None = None
-    """The lock header's `pipelex` engine version, or `None` when no lock was found — same purpose."""
+    """The lock header's `pipelex` engine version, or `None` when no lock was found — same purpose, and
+    the same caveat: it is read from the header and never checked against the artifacts' own stamps."""
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def is_current(self) -> bool:
-        """Whether the generated tree is in sync: a lock was found and no drift was detected."""
+        """Whether the generated tree is in sync: a lock was found and no drift was detected.
+
+        A computed field rather than a bare property, so it survives `model_dump()` and
+        `model_dump_json()`. A CI gate that serializes the report — the natural shape for one — would
+        otherwise lose the verdict silently while every other field came through. The report is a local
+        return value and not a wire contract, so carrying it costs no parity with the reference.
+        """
         return self.lock_found and not self.drifts
 
 
@@ -120,7 +135,10 @@ def run_codegen_check(*, root: Path) -> CodegenCheckReport:
     """Run the offline drift check over `root`, the directory holding `codegen.lock`.
 
     Pass the same directory `write_codegen_tree` wrote into; the two are counterparts, and a tree that
-    writer produced from a `codegen()` response is current by construction.
+    writer produced from a `codegen()` response **into a directory codegen owns** is current by
+    construction. The qualifier is the writer's own: a stamped file it never tracked is deliberately left
+    alone "for the offline check to report", so a stray artifact sharing the output root is an `orphan`
+    here even on a tree the writer just wrote.
 
     The drift order is part of the contract, so a second implementation can mirror it exactly: every
     locked-artifact drift comes first, in ascending order of the full relative path compared as a plain

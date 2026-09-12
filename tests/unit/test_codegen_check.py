@@ -18,6 +18,7 @@ The smaller fixtures below are the same grammar at a size a reader can hold: a r
 """
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -125,6 +126,39 @@ class TestRealGeneratedTree:
         artifact.write_bytes(artifact.read_bytes().replace(b"\n", b"\r\n"))
         # Universal-newline translation, as pipelex's reader applies it: a Windows checkout is not a drift.
         assert run_codegen_check(root=tmp_path).is_current
+
+
+class TestTheReportItself:
+    """What a caller reads off the report, including what survives serializing it."""
+
+    def test_the_verdict_survives_model_dump(self, tmp_path: Path) -> None:
+        _tree(tmp_path, ("models.py", "A = 1\n"))
+        report = run_codegen_check(root=tmp_path)
+        # A CI gate that serializes the report is the natural shape for one, and a bare property would drop
+        # the verdict out of it silently while every other field came through.
+        assert report.model_dump()["is_current"] is True
+        assert json.loads(report.model_dump_json())["is_current"] is True
+
+    def test_the_verdict_survives_model_dump_when_the_tree_has_drifted(self, tmp_path: Path) -> None:
+        _tree(tmp_path, ("models.py", "A = 1\n"))
+        (tmp_path / "models.py").unlink()
+        report = run_codegen_check(root=tmp_path)
+        assert report.model_dump()["is_current"] is False
+        assert json.loads(report.model_dump_json())["drifts"][0]["category"] == "missing"
+
+    def test_the_reported_fingerprint_is_the_locks_header_and_is_not_cross_checked(self, tmp_path: Path) -> None:
+        older, newer = "a" * 64, "b" * 64
+        body_a, body_b = "A = 1\n", "B = 1\n"
+        _write(tmp_path, "a.py", _stamped(body_a).replace(_FINGERPRINT, older))
+        _write(tmp_path, "b.py", _stamped(body_b).replace(_FINGERPRINT, newer))
+        _write(tmp_path, "codegen.lock", _lock(("a.py", body_a), ("b.py", body_b)).replace(_FINGERPRINT, newer))
+        report = run_codegen_check(root=tmp_path)
+        # Two artifacts generated against different crates, each body matching its own stamp and the lock.
+        # The check is pure hashing, so it reports current and surfaces only what the lock header claims —
+        # it never compares the artifacts' own stamped fingerprints with the header or with each other.
+        # `pipelex codegen check` answers identically; the blind spot is the algorithm's, not this port's.
+        assert report.is_current
+        assert report.crate_fingerprint == newer
 
 
 class TestCurrentTree:
