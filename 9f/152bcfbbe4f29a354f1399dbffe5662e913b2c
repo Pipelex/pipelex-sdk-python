@@ -1,0 +1,36 @@
+CHANGELOG.md
+  s_414897d69b563e::t_cd3808b6c6364a 7
+tests/unit/test_method_source.py
+  s_414897d69b563e::t_93dc7b3689543a 4-7
+  s_414897d69b563e::t_0830bf9dee89b0 101-102,105-107,109-121,125
+docs/architecture.md
+  s_414897d69b563e::t_67c289baec6c09 234
+  s_414897d69b563e::t_cf9aed22d5f2f3 232
+wip/method-source-adapter/review-deferrals.md
+  s_414897d69b563e::t_c0aac111853ea3 8
+  s_414897d69b563e::t_9617e877fb8d66 1-7,9-34
+pipelex_sdk/product_models.py
+  s_414897d69b563e::t_bcf209b8bc158b 212,215-219,223,225-227,230-241
+  s_414897d69b563e::t_914828e6019fac 84-116
+  s_414897d69b563e::t_8f9afb1d5ded0e 171-197
+  s_414897d69b563e::t_7a4fce3e1784b9 254-255
+  s_414897d69b563e::t_114bc15d77162c 163
+  s_414897d69b563e::t_a66e0aff64c5bd 22
+  s_414897d69b563e::t_5636212f4c4a11 134
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "9f152bcfbbe4f29a354f1399dbffe5662e913b2c",
+  "prompts": {},
+  "sessions": {
+    "s_414897d69b563e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d629fd4-9a39-4cbd-a222-ee7742869d24",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Louis Choquel <louis@pipelex.com>"
+    }
+  }
+}
