@@ -1,8 +1,10 @@
 """Tests for `method_source_to_contents` — the adapter over a stored method's polymorphic source.
 
 Mirrors `pipelex-sdk-js/tests/method-source.test.ts` case for case, so the two SDKs read one
-stored method the same way, and adds the cases where this side deliberately does not: an array
-entry whose `content` is not a string, and a source the Python decoder cannot take.
+stored method the same way, and adds the cases the JS twin leaves untested: an array entry whose
+`content` is not a string — where the reading is the platform's and is pinned here because it was
+ruled rather than inherited — and a source the Python decoder cannot take, which has no JS twin
+at all because `JSON.parse` iterates where `json.loads` recurses.
 
 `MethodData.mthds` is either the catalog file-array or a bare `.mthds` bundle, and the reader
 cannot ask which. Every case here is therefore about telling the two apart — above all the
@@ -94,26 +96,33 @@ class TestMethodSourceToContents:
         [
             '[{"name": "a.mthds"}]',
             '[{"content": "domain = \\"demo\\""}]',
-            '[{"name": 1, "content": "domain = \\"demo\\""}]',
         ],
     )
-    def test_an_array_of_malformed_entries_is_a_raw_bundle(self, source: str) -> None:
+    def test_an_array_missing_a_catalog_key_is_a_raw_bundle(self, source: str) -> None:
+        """The catalog gate is key presence, so an entry lacking either key fails the whole array."""
         assert method_source_to_contents(source) == [source]
 
-    def test_a_partly_malformed_catalog_array_is_a_raw_bundle_not_a_partial_read(self) -> None:
-        """This SDK's reading, where three implementations of one field disagree.
+    def test_a_non_string_name_does_not_disqualify_the_catalog_form(self) -> None:
+        """Neither reference checks the `name`'s type, only that the key is there."""
+        source = '[{"name": 1, "content": "domain = \\"demo\\""}]'
 
-        `@pipelex/sdk` and the platform's own resolver — the one that expands a `method_id` run —
-        both recognize an entry by key presence alone, so both keep `"x = 1"` and silently drop the
-        sibling whose `content` is a number. This side takes the array as the catalog form only when
-        every entry is `{name: str, content: str}`, the rule `parse_method_files` applies to the same
-        shape, so a partly malformed array is not the catalog form at all. Which reading is right is
-        an open product question rather than a settled rule; this pins the behaviour as it ships, so
-        that a ruling either way shows up here as a failing test rather than as silent drift.
+        assert method_source_to_contents(source) == ['domain = "demo"']
+
+    def test_a_partly_malformed_catalog_array_keeps_its_valid_siblings(self) -> None:
+        """The ruled reading: reproduce the server's reading of its own field.
+
+        `@pipelex/sdk` and the platform's own resolver — the one that expands a `method_id` run,
+        and therefore the one that decides whether a stored method runs — both recognize an entry
+        by key presence alone, keep `"x = 1"` and drop the sibling whose `content` is a number.
+        This SDK now does the same, so one stored method has one observable reading wherever it is
+        read. An earlier strict reading took the whole array as a bundle instead; it refused to
+        lose a file silently, but it disagreed with the code that actually runs the method, which
+        is the property the ruling chose. The silent drop is a defect of the shared format and is
+        fixed in the platform, not worked around here.
         """
         source = '[{"name": "a.mthds", "content": "x = 1"}, {"name": "b.mthds", "content": 123}]'
 
-        assert method_source_to_contents(source) == [source]
+        assert method_source_to_contents(source) == ["x = 1"]
 
     def test_a_source_too_deep_for_the_decoder_is_a_raw_bundle_not_an_escape(self, mocker: MockerFixture) -> None:
         """Python's JSON decoder recurses where `JSON.parse` iterates, and `RecursionError` is not a `ValueError`.

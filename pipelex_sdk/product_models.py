@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_serializer, field_validator
 
@@ -81,6 +81,39 @@ def _is_blank(content: str) -> bool:
     return not content.strip()
 
 
+def _decode_method_source(source: str) -> Any:
+    """Decode a stored source string, with every way the decoder can refuse one as a `ValueError`.
+
+    The two readers of a stored source apply different shape rules to what comes back — see
+    `method_source_to_contents` for why — but they must fail identically on text the decoder
+    cannot take at all, so that rule lives here and in one place. `json.loads` refuses in two
+    ways: `JSONDecodeError` for malformed text, and `RecursionError` — which is NOT a
+    `ValueError` — for a source nested past a depth that is an interpreter build constant,
+    because `json.loads` recurses where `JSON.parse` iterates. Converting both gives each
+    caller the failure its own contract promises: `MethodData`'s validator turns this
+    `ValueError` into the `ValidationError` a caller catches (pydantic converts only
+    `ValueError`), and `method_source_to_contents` reads it as "not the catalog form".
+    """
+    try:
+        return json.loads(source)
+    except json.JSONDecodeError as exc:
+        msg = f"Method file source is not valid JSON; expected {_METHOD_FILES_SHAPE}."
+        raise ValueError(msg) from exc
+    except RecursionError as exc:
+        msg = f"Method file source is nested too deeply to decode; expected {_METHOD_FILES_SHAPE}."
+        raise ValueError(msg) from exc
+
+
+def _is_catalog_entry(entry: object) -> bool:
+    """The catalog gate the platform and `@pipelex/sdk` both apply: an object carrying both keys.
+
+    Key presence alone, with no check on either value's type — mirroring
+    `pipelex_platform.services.method_resolution.method_source_to_contents` and
+    `@pipelex/sdk`'s `isFileEntry`. Each entry's value types are filtered afterwards, per entry.
+    """
+    return isinstance(entry, dict) and "name" in entry and "content" in entry
+
+
 def parse_method_files(source: str | None) -> list[MethodFile]:
     """Parse the catalog wire string into method files.
 
@@ -98,20 +131,7 @@ def parse_method_files(source: str | None) -> list[MethodFile]:
     if source is None or _is_blank(source):
         return []
 
-    try:
-        parsed = json.loads(source)
-    except json.JSONDecodeError as exc:
-        msg = f"Method file source is not valid JSON; expected {_METHOD_FILES_SHAPE}."
-        raise ValueError(msg) from exc
-    except RecursionError as exc:
-        # `json.loads` recurses where `JSON.parse` iterates, so a deeply enough nested source
-        # raises `RecursionError` — not a `ValueError` — past a threshold that is an interpreter
-        # build constant. Converting it here gives the rule exactly one owner, so every caller
-        # of this parser sees the failure its contract promises: `MethodData`'s validator turns
-        # it into the `ValidationError` a caller catches (pydantic converts only `ValueError`),
-        # and `method_source_to_contents` reads it as "not the catalog form".
-        msg = f"Method file source is nested too deeply to decode; expected {_METHOD_FILES_SHAPE}."
-        raise ValueError(msg) from exc
+    parsed = _decode_method_source(source)
 
     try:
         files = _METHOD_FILES_ADAPTER.validate_python(parsed)
@@ -140,7 +160,7 @@ def method_source_to_contents(mthds: str | None) -> list[str]:
     """Read a stored method's polymorphic `mthds` source as the bundle contents a call takes.
 
     `MethodData.mthds` is polymorphic at rest. The webapp editor writes the catalog
-    file-array — the JSON `[{name, content}]` string `parse_method_files` decodes — while a
+    file-array — the JSON `[{name, content}]` string the gate below recognizes — while a
     row written before that editor, or by hand, holds the `.mthds` source itself as plain
     text. A caller holding one of those strings cannot tell which it has, so this resolves
     it to the `list[str]` that `run`, `start` and `validate` take as `mthds_contents`.
@@ -148,18 +168,33 @@ def method_source_to_contents(mthds: str | None) -> list[str]:
     An empty list means the method carries no MTHDS source — a row that exists but is not
     runnable yet. It is never a failure to read one: this function does not raise.
 
-    Three implementations read this one field and they do NOT all agree, so the rule below is
-    this SDK's reading rather than a settled contract. `@pipelex/sdk`'s `methodSourceToContents`
-    and the platform's own `method_source_to_contents` — the resolver that expands a `method_id`
-    run, in `pipelex_platform/services/method_resolution.py` — both recognize a catalog entry by
-    the mere presence of the `name` and `content` keys and then drop an entry whose `content` is
-    not a string, keeping its siblings. Here the array is the catalog form only if every entry
-    is a `{name: str, content: str}` object, and an array that is not becomes one bundle string
-    like any other non-catalog source — the rule `parse_method_files` applies to the same shape.
-    So `[{"name": "a", "content": "x"}, {"name": "b", "content": 1}]` reads as `["x"]` in the
-    other two and as the whole JSON text here. Which reading is right is an open product
-    question, not a preference this docstring settles: the strict rule refuses to lose a file
-    without a word, the lax one keeps a method runnable that the platform runs today.
+    **The catalog gate is key presence, and each entry's types are filtered afterwards.** An
+    array is the catalog form when every entry is an object carrying both a `name` and a
+    `content` key, whatever those values hold; an entry whose `content` is not a non-blank
+    string is then dropped and its siblings are kept. So
+    `[{"name": "a", "content": "x"}, {"name": "b", "content": 1}]` reads as `["x"]`.
+
+    That rule is not this SDK's preference — it reproduces, deliberately and character for
+    character, what the server does with the same stored row: the platform's own
+    `method_source_to_contents` (`pipelex_platform/services/method_resolution.py`, the resolver
+    that expands a `method_id` run) and `@pipelex/sdk`'s `methodSourceToContents`. A client-side
+    reader of a server-stored field exists so a caller can do locally what the platform does
+    with that row, and a reader that disagrees with the code which actually runs the method is a
+    reader that lies, however defensible its own rule. One stored method therefore has one
+    observable reading across `method_id`, `@pipelex/sdk` and this SDK. This was ruled against a
+    stricter reading that took a partly malformed array as a bundle; `docs/architecture.md` carries
+    the ruling and the three readers it compares.
+
+    The cost of the ruled rule is real and is not this function's to fix: a file whose `content`
+    is not a string vanishes from the bundle without a word. That is a property of the format's
+    decoder, shared by all three readers, so it is fixed once in the platform rather than three
+    times in its clients.
+
+    This is consequently NOT a pure delegation to `parse_method_files`. That function reads
+    `MethodData.python`, whose entries are a typed `[{name: str, content: str}]` catalog with no
+    second at-rest shape to tell apart, so it stays strict and rejects what this accepts. The two
+    share what must not drift — the decoder (`_decode_method_source`) and blankness
+    (`_is_blank`) — and nothing else.
 
     Lesser divergences from the JS twin follow from the decoder rather than from this function,
     and they flip in both directions: `json.loads` accepts `NaN` and `Infinity`, which
@@ -174,29 +209,36 @@ def method_source_to_contents(mthds: str | None) -> list[str]:
             as "no source" rather than raising — the twin's own defensive guard.
 
     Returns:
-        One content string per bundle file: the non-blank contents of the catalog
+        One content string per bundle file: the non-blank string contents of the catalog
         file-array, or the whole source as a single bundle when it is not that form.
     """
-    if mthds is None:
-        # `parse_method_files` reads `None` as no source too; this restates it so the bundle
-        # below is statically a `str`. Blankness is deliberately NOT restated: the parser owns
-        # that predicate, so the two readings of one stored source cannot drift apart.
+    if mthds is None or _is_blank(mthds):
+        # A blank source is no source, not a bundle of whitespace — and `None` although the
+        # model types the field `str`, the twin's own defensive guard. `_is_blank` is the
+        # parser's predicate rather than a second one, so the two readings of one stored
+        # source cannot drift apart on what blank means.
         return []
 
     try:
-        files = parse_method_files(mthds)
+        parsed: Any = _decode_method_source(mthds)
     except ValueError:
-        # Not the catalog form — valid JSON that is not the file-array, an array whose entries
-        # are not `{name: str, content: str}`, text that is not JSON at all, or a source nested
-        # past what the decoder can descend — so the whole source is one legacy bare bundle. A
-        # `.mthds` file may legally open with a digit or a brace, which is why a parse failure
-        # is a bundle rather than an error. The nesting rule is not restated here, exactly as
-        # blankness is not: `parse_method_files` owns both and hands this one `ValueError`, so
-        # the two readings of one stored source cannot drift apart. A blank source returns above
-        # from the parser rather than raising, so this is never `[""]`.
+        # Text the decoder cannot take — not JSON at all, or nested past what it can descend —
+        # so the whole source is one legacy bare bundle. A `.mthds` file may legally open with a
+        # digit or a brace, which is why a decode failure is a bundle rather than an error.
         return [mthds]
 
-    return [method_file.content for method_file in files]
+    if isinstance(parsed, list) and all(_is_catalog_entry(entry) for entry in cast("list[Any]", parsed)):
+        # Vacuously true for `[]`, which is the webapp editor's "no files" sentinel and yields
+        # no contents — read as a bundle it would send the two characters `[]` to the runner.
+        entries = cast("list[dict[str, Any]]", parsed)
+        contents: list[str] = []
+        for entry in entries:
+            content: Any = entry["content"]
+            if isinstance(content, str) and not _is_blank(content):
+                contents.append(content)
+        return contents
+
+    return [mthds]
 
 
 class MethodData(BaseModel):
@@ -209,7 +251,8 @@ class MethodData(BaseModel):
     #: The `.mthds` bundle source, polymorphic at rest and left exactly as the platform stored it:
     #: the catalog `[{name, content}]` array the webapp editor writes, or a bare bundle as plain
     #: text. Read it with `method_source_to_contents`, which resolves either shape to the
-    #: `mthds_contents` a run or a validate takes; unlike `python`, it is not converted here.
+    #: `mthds_contents` a run or a validate takes exactly as the platform's own resolver reads
+    #: the same row; unlike `python`, it is not converted here.
     mthds: str
     org_id: str
     created_by_user_id: str
