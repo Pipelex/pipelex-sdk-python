@@ -20,6 +20,11 @@ The run-lifecycle errors (`RunFailedError`, `RunTimeoutError`,
 HANDOFF Phase 2, and removed from `mthds-python` in Phase 6). `RunStillRunningError`
 stays in `mthds` — it belongs to the protocol `execute()` 202-degrade path, not the
 lifecycle — and is re-exported here so consumers have a single import home.
+
+The codegen tree errors (`CodegenError`, `CodegenLockError`) are not request errors at all: they are
+raised by `pipelex_sdk.codegen_writer`, `pipelex_sdk.codegen_check`, `pipelex_sdk.codegen_lock` and
+`pipelex_sdk.codegen_stamp` over
+bytes and a directory, so they derive from `Exception` rather than from the protocol base.
 """
 
 from __future__ import annotations
@@ -229,3 +234,31 @@ class UploadAuthenticationError(InputPreparationError):
 
 class UploadTransportError(InputPreparationError):
     """A network or server fault reaching the upload route (unreachable host, `5xx`)."""
+
+
+class CodegenError(Exception):
+    """A codegen tree this SDK refuses to write or read.
+
+    Raised before the first byte is written when a `/v1/codegen` response, or the directory it is
+    headed for, is unsafe: a `lock_filename` other than `codegen.lock`, an artifact path that could
+    leave the output root or name a file type codegen never emits (absolute or drive-prefixed, a `..`
+    or empty component, a backslash, a control character, an unstampable suffix, a duplicate), a lock
+    that cannot be read or does not track exactly the artifacts, a symbolic link or a regular file on
+    the way to a destination, a symbolic link on the way to a previously tracked path about to be pruned,
+    a destination or such a path that is not a regular file, or a file already at an artifact's path that
+    codegen does not own.
+    """
+
+
+class CodegenLockError(CodegenError):
+    """A `codegen.lock` that cannot be read: malformed TOML, a shape the format does not define,
+    bytes that are not UTF-8, or a `lock_version` this SDK does not know.
+
+    It is also the offline check's one no-verdict class, raised where that check can reach no verdict at
+    all rather than find a drift — including a file or directory under the output root the process cannot
+    read, so a CI caller has a single thing to catch.
+
+    An unsafe artifact path inside an otherwise well-formed lock is deliberately NOT this error but a
+    plain `CodegenError`: it is a containment violation, not corrupt state a writer may recover from
+    by replacing the lock.
+    """

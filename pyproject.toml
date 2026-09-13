@@ -1,6 +1,6 @@
 [project]
 name = "pipelex-sdk"
-version = "0.9.0"
+version = "0.10.0"
 description = "The Python client for the Pipelex hosted API — the MTHDS Protocol surface plus the durable run lifecycle and the Pipelex product surface, built on the `mthds` protocol base."
 authors = [{ name = "Evotis S.A.S.", email = "oss@pipelex.com" }]
 maintainers = [{ name = "Pipelex staff", email = "oss@pipelex.com" }]
@@ -18,7 +18,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "mthds==0.13.0",
+  "mthds==0.14.0",
   "pydantic>=2.10.6,<3.0.0",
   "typing-extensions>=4.0.0",
   "httpx>=0.23.0,<1.0.0",
@@ -337,7 +337,7 @@ convention = "google"
   "implicit-namespace-package", # Allow test files to not have __init__.py in their directories (avoids namespace collisions)
   "private-member-access",      # Unit tests legitimately probe private transport/error helpers (e.g. _request_product, _request_json)
   "import-private-name",        # Unit tests legitimately import private module helpers under test (e.g. _parse_error_body)
-  "unused-method-argument",     # Test-double methods match a Protocol signature; an unused param (e.g. a fake build_inputs ignoring `request`) is intentional
+  "unused-method-argument",     # Test-double methods match a Protocol signature; an unused param (e.g. a fake validate ignoring `render`) is intentional
   "float-equality-comparison",  # Tests assert exact float literals that round-trip exactly; `pytest.approx` would only add noise
 ]
 "examples/**/*.py" = [

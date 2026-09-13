@@ -14,9 +14,8 @@ import pytest
 from pydantic import ValidationError
 from pytest_mock import MockerFixture, MockType
 
-from pipelex_sdk.build_models import CrateInvalidReport, MthdsFileItem
 from pipelex_sdk.client import PipelexAPIClient
-from pipelex_sdk.crate_models import CodegenRequest, CodegenValidReport, ResolveRequest, ResolveValidReport
+from pipelex_sdk.crate_models import CodegenRequest, CodegenValidReport, CrateInvalidReport, MthdsFileItem, ResolveRequest, ResolveValidReport
 from pipelex_sdk.errors import ApiResponseError
 
 _BASE_URL = "http://localhost:8081"

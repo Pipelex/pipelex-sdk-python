@@ -1,13 +1,18 @@
-"""Wire models for the crate routes — `POST /v1/resolve` and `POST /v1/codegen`.
+"""Wire models for the crate routes — `POST /v1/resolve` and `POST /v1/codegen` — and the
+shared crate envelope they are built on.
 
-The second crate-family surface, mirroring `pipelex-sdk-js`: `/v1/resolve` emits the
-normalized library crate, `/v1/codegen` projects that crate into stamped typed artifacts
-plus their lock. Both are Pipelex API extensions (NOT MTHDS Protocol routes) over the
-standard-owned artifact, so their wire fields stay brand-neutral. Same envelope and same
-verdict discipline as the build routes: a produced verdict is a `200` discriminated on
-`is_valid`, with `CrateInvalidReport` (from `build_models`) as the shared invalid arm; a
-no-verdict condition (a malformed selector, a selector-resolution failure, auth, a server
-fault) raises `ApiResponseError`.
+The envelope lives here because these are the routes that still use it. `MthdsFileItem`,
+`CrateRequestBase` and `CrateInvalidReport` used to sit in a `build_models` module beside the
+`/v1/build/inputs` wire models; those went when `prepare_inputs` moved its signature source to
+the input-form descriptor and this SDK stopped calling `/v1/build/*` (workspace campaign
+`wip/build-retirement/`). Nothing about the envelope changed in the move.
+
+`/v1/resolve` emits the normalized library crate, `/v1/codegen` projects that crate into stamped
+typed artifacts plus their lock. Both are Pipelex API extensions (NOT MTHDS Protocol routes) over
+the standard-owned artifact, so their wire fields stay brand-neutral. A produced verdict is a
+`200` discriminated on `is_valid`, with `CrateInvalidReport` as the shared invalid arm; a
+no-verdict condition (a malformed selector, a selector-resolution failure, auth, a server fault)
+raises `ApiResponseError`.
 
 The closure arrives in exactly one of three forms — the tooling routes' strict three-way
 XOR: inline `files`, an address-form `method_ref` (server-resolved, pipelex-api >= 0.21.0;
@@ -23,7 +28,69 @@ from typing import Annotated, Any, Literal, Self, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
-from pipelex_sdk.build_models import CrateInvalidReport, CrateRequestBase
+from pipelex_sdk.validation_models import ValidationErrorItem
+
+
+class MthdsFileItem(BaseModel):
+    """One MTHDS file in a crate closure. `source` is an optional provenance label the
+    server threads onto diagnostics raised from this file.
+    """
+
+    content: str
+    source: str | None = None
+
+
+class CrateRequestBase(BaseModel):
+    """The closure selector every crate-family route shares — `/v1/resolve` and
+    `/v1/codegen` (mirror of the server's `MthdsFilesRequest` and of
+    `pipelex-sdk-js`'s `CrateRequestBase`).
+
+    Supply the closure EITHER as inline `files` OR as a `method_ref` — never both, and
+    never neither. An **address-form** `method_ref`
+    (`github.com/<owner>/<repo>[/<selector>][@<tag>]`) is resolved by the server
+    (pipelex-api >= 0.21.0): the repository is fetched at the tag, the package is
+    located by manifest identity, and its `.mthds` files feed the closure with their
+    real relative paths as per-file sources. The **registry form** (any non-address
+    reference) stays reserved and answers `501` until a method registry exists.
+
+    An EMPTY selector is normalized to absent before the exclusivity check — `files=[]`
+    selects no closure and `method_ref=""` (or whitespace-only) no address, the same
+    empty-as-absent rule the run routes apply — so an unusable value never counts as the
+    sole selector and never reaches the wire.
+
+    The subclass owns the exclusivity validator, because the crate routes add a third
+    selector (the hosted `method_id`) this base does not know about.
+    """
+
+    files: list[MthdsFileItem] | None = None
+    method_ref: str | None = None
+
+    @field_validator("files")
+    @classmethod
+    def _empty_files_are_absent(cls, value: list[MthdsFileItem] | None) -> list[MthdsFileItem] | None:
+        # `files=[]` is not a closure — normalize to absent so the XOR counts real selectors only.
+        return value or None
+
+    @field_validator("method_ref")
+    @classmethod
+    def _blank_method_ref_is_absent(cls, value: str | None) -> str | None:
+        # A blank address selects nothing — same empty-as-absent rule as the run routes'
+        # `_normalized_selector` boundary. A real value is passed through untouched.
+        if value is None or not value.strip():
+            return None
+        return value
+
+
+class CrateInvalidReport(BaseModel):
+    """The `is_valid: false` arm shared by the crate routes — an unresolvable closure is a
+    produced verdict on a `200`, never a thrown error. Branch on `is_valid`, not transport.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    is_valid: Literal[False]
+    validation_errors: list[ValidationErrorItem]
+    message: str
 
 
 class CrateToolingRequest(CrateRequestBase):
@@ -95,7 +162,7 @@ ResolveResponse: TypeAlias = Annotated[
 ]
 
 # The single parse path for a 200 `/resolve` body — discriminated on `is_valid`, built once
-# at import (TypeAdapter construction is expensive), mirroring `BuildInputsResponseAdapter`.
+# at import (TypeAdapter construction is expensive), mirroring `PipelexValidationResultAdapter`.
 ResolveResponseAdapter: TypeAdapter[ResolveResponse] = TypeAdapter(ResolveResponse)  # pylint: disable=invalid-name
 
 

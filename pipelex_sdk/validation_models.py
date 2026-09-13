@@ -306,6 +306,15 @@ class PipelexValidationReport(ValidationReport):
     """The parsed bundle, carried opaquely: no published package declares its shape, so a type
     here could only be a copy free to drift from the runtime that emits it."""
 
+    default_pipe_ref: str | None = None
+    """The qualified `pipe_ref` a caller gets by omitting the pipe selector, or `None` when the
+    closure declares none or several.
+
+    Manifest-aware for a fetched package, which is what makes it outrank a `bundle_blueprint` read:
+    a published package may name its entry pipe in `METHODS.toml` alone, and the blueprint never
+    carries a manifest. Optional and read leniently — a runner that predates the field simply sends
+    nothing, so a consumer falls back (`prepare_inputs` reads the blueprint's `main_pipe` next)."""
+
     pipe_io_contracts: PipeIOContracts = Field(default_factory=dict)
     """The per-pipe I/O contracts, typed by importing the standard's own client models.
 
@@ -313,9 +322,12 @@ class PipelexValidationReport(ValidationReport):
     declared input slot reads as typed members — `concept_ref`, a three-valued `presence`
     (`PresenceMarker`), a `multiplicity` (`IOMultiplicity`), the `item_count` that is non-null exactly
     on the fixed arm, and its `json_schema` — and the output side reads its own asymmetric shape
-    (a two-valued `optional`, because `!` is rejected on an output). The artifact belongs to the
-    standard, so it is imported rather than restated: one declaration per language is what makes
-    drift impossible, which is precisely what keeping it opaque used to buy.
+    (a two-valued `optional`, because `!` is rejected on an output). Its `json_schema` is required
+    too since `mthds` 0.13.0, but states the concept's CONTENT MODEL rather than a caller's
+    argument: where a plural input's schema is a bare array, a plural output's is that model's list
+    envelope. The artifact belongs to the standard, so it is imported rather than restated: one
+    declaration per language is what makes drift impossible, which is precisely what keeping it
+    opaque used to buy.
 
     Contracts are **closed** shapes: a member this `mthds` version does not define is version drift
     and fails the parse. That closure is scoped to the artifact — the report around it stays
