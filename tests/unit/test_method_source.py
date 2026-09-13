@@ -101,30 +101,33 @@ class TestMethodSourceToContents:
         assert method_source_to_contents(source) == [source]
 
     def test_a_partly_malformed_catalog_array_is_a_raw_bundle_not_a_partial_read(self) -> None:
-        """The deliberate divergence from `@pipelex/sdk`.
+        """This SDK's reading, where three implementations of one field disagree.
 
-        The JS twin recognizes an entry by key presence alone, so it keeps `"x = 1"` here and
-        silently drops the sibling whose `content` is a number. This side takes the array as the
-        catalog form only when every entry is `{name: str, content: str}`, which is the rule
-        `parse_method_files` already applies to the same bytes — so the two Python readings of one
-        stored method agree, where the two JavaScript ones do not. Losing a file without a word is
-        the worse failure: the bundle then resolves against pipes that are not there.
+        `@pipelex/sdk` and the platform's own resolver — the one that expands a `method_id` run —
+        both recognize an entry by key presence alone, so both keep `"x = 1"` and silently drop the
+        sibling whose `content` is a number. This side takes the array as the catalog form only when
+        every entry is `{name: str, content: str}`, the rule `parse_method_files` applies to the same
+        shape, so a partly malformed array is not the catalog form at all. Which reading is right is
+        an open product question rather than a settled rule; this pins the behaviour as it ships, so
+        that a ruling either way shows up here as a failing test rather than as silent drift.
         """
         source = '[{"name": "a.mthds", "content": "x = 1"}, {"name": "b.mthds", "content": 123}]'
 
         assert method_source_to_contents(source) == [source]
 
-    def test_a_parser_recursion_error_is_a_raw_bundle_not_an_escape(self, mocker: MockerFixture) -> None:
+    def test_a_source_too_deep_for_the_decoder_is_a_raw_bundle_not_an_escape(self, mocker: MockerFixture) -> None:
         """Python's JSON decoder recurses where `JSON.parse` iterates, and `RecursionError` is not a `ValueError`.
 
-        Unguarded it escapes a function whose whole contract is that it never raises. The depth that
-        trips the real decoder is an interpreter build constant — it moved by an order of magnitude in
-        CPython 3.14 — so the parser is made to raise instead of a nesting literal being pinned: the
-        guard is what is under test, not the threshold.
+        Unconverted it escapes a function whose whole contract is that it never raises. The rule has
+        one owner — `parse_method_files` turns the decoder's `RecursionError` into the `ValueError`
+        its contract promises — so this pins the through-path rather than a mock of the delegate. The
+        depth that trips the real decoder is an interpreter build constant that moved by an order of
+        magnitude in CPython 3.14, so the decoder is made to raise instead of a nesting literal being
+        pinned: the conversion is what is under test, not the threshold.
         """
         # A source that parses cleanly unpatched, so the assertion below fails if the patch or the
-        # guard is absent: without them it reads as the catalog form and yields `["x = 1"]`.
+        # conversion is absent: without them it reads as the catalog form and yields `["x = 1"]`.
         source = '[{"name": "a.mthds", "content": "x = 1"}]'
-        mocker.patch.object(product_models, "parse_method_files", side_effect=RecursionError)
+        mocker.patch.object(product_models.json, "loads", side_effect=RecursionError)
 
         assert method_source_to_contents(source) == [source]
