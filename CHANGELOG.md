@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`method_source_to_contents`, the reader for a stored method's bundle source**: `pipelex_sdk.product_models.method_source_to_contents(method.mthds)` turns the polymorphic string `get_method` hands back — the catalog `[{name, content}]` array the webapp editor writes, or a bare `.mthds` bundle as plain text — into the `list[str]` that `run`, `start` and `validate` take as `mthds_contents`. It never raises, and an empty list means the method carries no source rather than that reading it failed. It reads the array as the catalog form on key presence and then drops an entry whose `content` is not a non-blank string, keeping its siblings — the same reading the platform's own resolver and `@pipelex/sdk` apply to the same stored row, so one stored method reads the same way wherever it is read.
+
+### Fixed
+
+- **A stored source nested too deeply to decode now fails as a `ValidationError`**: `parse_method_files` converts the JSON decoder's `RecursionError` into the `ValueError` its contract documents, so `MethodData`'s validator surfaces it as a `pydantic.ValidationError` like any other malformed response body instead of letting a bare `RecursionError` escape `get_method` past a caller's `except ValidationError`.
+
 ## [v0.10.0] - 2026-09-13
 
 ### Added
