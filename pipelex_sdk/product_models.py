@@ -126,6 +126,58 @@ def serialize_method_files(files: list[MethodFile]) -> str:
     return json.dumps([{"name": file.name, "content": file.content} for file in kept])
 
 
+def method_source_to_contents(mthds: str | None) -> list[str]:
+    """Read a stored method's polymorphic `mthds` source as the bundle contents a call takes.
+
+    `MethodData.mthds` is polymorphic at rest. The webapp editor writes the catalog
+    file-array — the JSON `[{name, content}]` string `parse_method_files` decodes — while a
+    row written before that editor, or by hand, holds the `.mthds` source itself as plain
+    text. A caller holding one of those strings cannot tell which it has, so this resolves
+    it to the `list[str]` that `run`, `start` and `validate` take as `mthds_contents`.
+
+    An empty list means the method carries no MTHDS source — a row that exists but is not
+    runnable yet. It is never a failure to read one: this function does not raise.
+
+    Mirrors `@pipelex/sdk`'s `methodSourceToContents`, with one deliberate divergence. The
+    JS twin recognizes a catalog entry by the mere presence of the `name` and `content`
+    keys, so an entry whose `content` is a number is silently dropped while its siblings
+    are kept; here the array is the catalog form only if every entry is a
+    `{name: str, content: str}` object, and an array that is not becomes one bundle string
+    like any other non-catalog source. That is the rule `parse_method_files` already
+    enforces for the same bytes, so the two Python readings of one stored method agree —
+    which the two JavaScript ones do not.
+
+    Args:
+        mthds: The stored source, as `MethodData.mthds` carries it. `None` is tolerated
+            although the model types it `str`, so a contract-violating response body reads
+            as "no source" rather than raising — the twin's own defensive guard.
+
+    Returns:
+        One content string per bundle file: the non-blank contents of the catalog
+        file-array, or the whole source as a single bundle when it is not that form.
+    """
+    if mthds is None:
+        # `parse_method_files` reads `None` as no source too; this restates it so the bundle
+        # below is statically a `str`. Blankness is deliberately NOT restated: the parser owns
+        # that predicate, so the two readings of one stored source cannot drift apart.
+        return []
+
+    try:
+        files = parse_method_files(mthds)
+    except (ValueError, RecursionError):
+        # Not the catalog form — valid JSON that is not the file-array, an array whose
+        # entries are not `{name: str, content: str}`, or text that is not JSON at all —
+        # so the whole source is one legacy bare bundle. A `.mthds` file may legally open
+        # with a digit or a brace, which is why a parse failure is a bundle rather than an
+        # error. `RecursionError` joins `ValueError` because the decoder recurses on nesting
+        # `JSON.parse` takes iteratively: that source is unparseable here, and letting it
+        # escape would break this function's promise never to raise. A blank source returns
+        # above from the parser rather than raising, so this is never `[""]`.
+        return [mthds]
+
+    return [method_file.content for method_file in files]
+
+
 class MethodData(BaseModel):
     """One saved method record."""
 

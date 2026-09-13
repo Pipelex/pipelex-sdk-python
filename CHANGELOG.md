@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`method_source_to_contents`, the reader for a stored method's bundle source**: `pipelex_sdk.product_models.method_source_to_contents(method.mthds)` turns the polymorphic string `get_method` hands back into the `list[str]` that `run`, `start` and `validate` take as `mthds_contents`. `MethodData.mthds` has two at-rest shapes and the field does not say which it holds — the catalog `[{name, content}]` array the webapp editor writes, or a bare `.mthds` bundle as plain text — so until now a Python caller had to guess, and guessing wrong sends the two characters `[]` to the runner as MTHDS source. It yields the non-blank contents of the file-array, or the whole source as one bundle when it is not that form, and an empty list means the method carries no source rather than that reading it failed; it never raises, because a bundle may legally open with a digit or a brace. It is the Python counterpart of `@pipelex/sdk`'s `methodSourceToContents`, with one deliberate divergence: the JS twin recognizes a catalog entry by the presence of the `name` and `content` keys alone, so it keeps a well-formed entry while silently dropping a sibling whose `content` is a number, whereas here an array whose entries are not all `{name: str, content: str}` is not the catalog form at all — the rule `parse_method_files` already applies to the same bytes, so the two readings of one stored method agree.
+
 ## [v0.10.0] - 2026-09-13
 
 ### Added
