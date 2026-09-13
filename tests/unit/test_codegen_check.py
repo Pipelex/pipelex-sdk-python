@@ -389,19 +389,28 @@ class TestNoVerdict:
         finally:
             (tmp_path / "models.py").chmod(0o644)
 
-    def test_a_locked_artifact_under_an_unsearchable_directory_is_a_no_verdict_error(self, tmp_path: Path) -> None:
-        _tree(tmp_path, ("sub/models.py", "A = 1\n"))
-        (tmp_path / "sub").chmod(0o000)
-        try:
-            # Locating a locked artifact is a third filesystem leg beside reading one and walking the tree,
-            # and it fails the same way under a directory the process cannot search: resolving the path stats
-            # every component, and `is_file` stats the destination. Both raised a bare `PermissionError` while
-            # the two other legs were wrapped, so the documented single class a CI caller catches had a hole
-            # in exactly the path every run takes first.
-            with pytest.raises(CodegenLockError, match="Unreadable path under the codegen output root"):
-                run_codegen_check(root=tmp_path)
-        finally:
-            (tmp_path / "sub").chmod(0o755)
+    def test_a_locked_artifact_that_cannot_be_located_is_a_no_verdict_error(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        _tree(tmp_path, ("models.py", "A = 1\n"))
+        # Locating a locked artifact is a third filesystem leg beside reading one and walking the tree, and it
+        # failed the same way: resolving the path stats every component and `is_file` stats the destination, so
+        # an `EACCES` or an `ENAMETOOLONG` escaped as a bare `OSError` while the other two legs were wrapped —
+        # a hole in the single class a CI caller catches, on the path every run takes first.
+        #
+        # Injected at the call rather than reproduced with `chmod`, for the same reason the walk's twin below
+        # is: the real trigger is interpreter-dependent. Python 3.11 to 3.13 propagate `EACCES` out of
+        # `is_file()` for an artifact under an unsearchable directory; 3.14 swallows it and answers `False`, so
+        # on that interpreter the same tree reaches no verdict by a different leg. The guard is what is under
+        # test, not the platform's errno.
+        real_is_file = Path.is_file
+
+        def failing_is_file(self: Path) -> bool:
+            if self.name == "models.py":
+                raise OSError(63, "File name too long")
+            return real_is_file(self)
+
+        mocker.patch.object(Path, "is_file", failing_is_file)
+        with pytest.raises(CodegenLockError, match="Unreadable path under the codegen output root"):
+            run_codegen_check(root=tmp_path)
 
     def test_an_entry_the_walk_cannot_stat_is_a_no_verdict_error(self, tmp_path: Path, mocker: MockerFixture) -> None:
         _tree(tmp_path, ("models.py", "A = 1\n"))
