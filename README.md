@@ -88,6 +88,24 @@ print(written.written, written.removed)
 
 It never overwrites a file codegen does not own, rewrites only what changed, and prunes stamped artifacts that dropped out of the set. Commit the tree; do not run a formatter over it.
 
+### Gate a committed tree in CI, with no key and no `pipelex`
+
+`run_codegen_check` is the writer's counterpart: pure hashing over the tree and its lock, so it boots no engine, reaches no network and needs no API key. Point it at the directory you generated into:
+
+```python
+from pathlib import Path
+
+from pipelex_sdk.codegen_check import run_codegen_check
+
+report = run_codegen_check(root=Path("src/generated/documents"))
+if not report.is_current:
+    for drift in report.drifts:
+        print(f"{drift.path}: {drift.category} — {drift.detail}")
+    raise SystemExit(1)
+```
+
+The drift categories are `pipelex codegen check`'s, and so are the sentences: an artifact edited below its stamp is `hand-edited`, one off the locked hash is `modified`, one the lock tracks and disk has lost is `missing`, and a stamped file the lock does not track is an `orphan` — the stale-artifact class a per-file stamp cannot catch alone. The two readers reach the same verdict over the same bytes apart from two deliberate divergences, both documented in `docs/architecture.md`: this one accepts a projection line whose axes are outside its own vocabulary, where the CLI calls such a tree hand-edited, and it refuses a Python artifact that declares a PEP 263 source encoding, where the CLI calls that one current. Regeneration stays a developer action, because it needs the engine; the check is the CI action, because it needs only hashes, so an upstream template improvement never reddens your pipeline. Whether the tree still matches what the *method* resolves to is a separate question the engine alone can answer — compare `report.crate_fingerprint` against a live `codegen()` response to close it.
+
 ### Long runs: start + poll explicitly
 
 Behind the hosted gateway, a synchronous `execute()` is cut off at ~30s and surfaces a `PipelineExecuteTimeoutError` pointing here. For long methods, drive the durable lifecycle yourself — the run survives client disconnects and is resumable by `pipeline_run_id`:
@@ -122,7 +140,7 @@ There is no barrel import — package `__init__.py` files stay empty. Import eac
 - **Run lifecycle types** — `from pipelex_sdk.runs import RunStatus, RunPublic, RunRead, RunResults, RunResultState, WaitForResultOptions, PollInfo`
 - **Product wire models** — `from pipelex_sdk.product_models import UserProfile, MethodData, MethodWriteInput, Membership, MembershipsResponse, SubscriptionResponse, PlanView, InvoiceView, OnboardingSubmission, UploadInput, UploadedFile, PipelineRun, ...`
 - **Validation verdict types** — `from pipelex_sdk.validation_models import PipelexValidationResult, PipelexValidationReport, PipelexInvalidReport, ValidationErrorItem, SuggestedFix, VALIDATION_VIEW_INPUT_FORM, ...`
-- **Codegen tree** — `from pipelex_sdk.codegen_writer import write_codegen_tree, CodegenTreeWriteReport`, with the format primitives in `pipelex_sdk.codegen_lock` (`CodegenLock`, `parse_lock`, `load_lock`, `validate_artifact_path`, ...) and `pipelex_sdk.codegen_stamp`
+- **Codegen tree** — `from pipelex_sdk.codegen_writer import write_codegen_tree, CodegenTreeWriteReport` to write one, `from pipelex_sdk.codegen_check import run_codegen_check, CodegenCheckReport, CodegenDrift, DriftCategory` to verify one, with the format primitives in `pipelex_sdk.codegen_lock` (`CodegenLock`, `parse_lock`, `load_lock`, `validate_artifact_path`, ...) and `pipelex_sdk.codegen_stamp` (`STAMPABLE_SUFFIXES`, `is_stampable_artifact_path`, `compute_content_hash`, `parse_stamped`, ...)
 - **Typed errors** — `from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError, PipelineExecuteTimeoutError, PagingNotTerminatingError, RunFailedError, RunTimeoutError, RunLifecycleUnavailableError, RunStillRunningError, CodegenError, CodegenLockError, ...`
 - **Version** — `from pipelex_sdk.version import __version__`
 - **Protocol surface** (the MTHDS standard's wire types) comes from the `mthds` dependency — e.g. `from mthds.protocol.exceptions import PipelineRequestError`, `from mthds.protocol.models import ValidationResult` (the neutral verdict union that `PipelexValidationResult` narrows).

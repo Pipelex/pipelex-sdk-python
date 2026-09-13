@@ -78,5 +78,22 @@ class TestCodegenLock:
         with pytest.raises(CodegenLockError, match="Unreadable codegen lock at"):
             load_lock(lock_path)
 
+    @pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
+    def test_load_lock_reads_every_line_ending_dialect(self, tmp_path: Path, line_ending: str) -> None:
+        lock_path = tmp_path / "codegen.lock"
+        lock_path.write_bytes(_PIPELEX_LOCK.replace("\n", line_ending).encode("utf-8"))
+
+        # The reader is deliberately in text mode, so universal-newline translation folds all three into LF
+        # before `tomllib` sees them. A lone CR is the case that distinguishes the two modes: `tomllib`
+        # already accepts CRLF, but reading the bytes raw made a lone-CR lock a `CodegenLockError` while
+        # `pipelex`'s reader parsed it. That divergence is what text mode closes — and it is not only the
+        # check's concern, because a previous lock the writer cannot parse silently switches pruning off,
+        # leaving a delisted artifact behind as exactly the stale file the lock exists to catch.
+        lock = load_lock(lock_path)
+
+        assert lock is not None
+        assert lock.paths() == {"models.py", "nested/extra.ts"}
+        assert lock.hash_by_path() == {"models.py": "111", "nested/extra.ts": "222"}
+
     def test_validate_artifact_path_returns_the_relative_filesystem_form(self) -> None:
         assert validate_artifact_path("nested/deeper/models.ts") == Path("nested", "deeper", "models.ts")

@@ -21,9 +21,10 @@ HANDOFF Phase 2, and removed from `mthds-python` in Phase 6). `RunStillRunningEr
 stays in `mthds` — it belongs to the protocol `execute()` 202-degrade path, not the
 lifecycle — and is re-exported here so consumers have a single import home.
 
-The codegen tree errors (`CodegenError`, `CodegenLockError`) are not request errors at all: they
-are raised by `pipelex_sdk.codegen_writer` and `pipelex_sdk.codegen_lock` over bytes and a directory,
-so they derive from `Exception` rather than from the protocol base.
+The codegen tree errors (`CodegenError`, `CodegenLockError`) are not request errors at all: they are
+raised by `pipelex_sdk.codegen_writer`, `pipelex_sdk.codegen_check`, `pipelex_sdk.codegen_lock` and
+`pipelex_sdk.codegen_stamp` over
+bytes and a directory, so they derive from `Exception` rather than from the protocol base.
 """
 
 from __future__ import annotations
@@ -252,6 +253,10 @@ class CodegenError(Exception):
 class CodegenLockError(CodegenError):
     """A `codegen.lock` that cannot be read: malformed TOML, a shape the format does not define,
     bytes that are not UTF-8, or a `lock_version` this SDK does not know.
+
+    It is also the offline check's one no-verdict class, raised where that check can reach no verdict at
+    all rather than find a drift — including a file or directory under the output root the process cannot
+    read, so a CI caller has a single thing to catch.
 
     An unsafe artifact path inside an otherwise well-formed lock is deliberately NOT this error but a
     plain `CodegenError`: it is a containment violation, not corrupt state a writer may recover from
