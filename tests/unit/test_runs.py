@@ -303,10 +303,7 @@ class TestRuns:
 
         assert dumped["pipe_io_contracts"] == _PIPE_IO_CONTRACTS
         assert dumped["input_form"] == _INPUT_FORM
-        # The output-form node dumps with the descriptor's optional members spelled out as null, so
-        # compare the members the fixture states rather than the whole node.
-        field = dumped["output_form"]["x.greet"]["field"]
-        assert (field["name"], field["kind"], field["required"]) == ("text", "prose", True)
+        assert dumped["output_form"] == _OUTPUT_FORM
 
     @pytest.mark.parametrize(
         ("key", "drifted_value"),

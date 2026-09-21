@@ -261,21 +261,22 @@ class RunResults(BaseModel):
     #: (`docs/architecture.md`). It is what says what a `graph_spec` node's data IS: the graph
     #: carries the values, this carries their concepts and their schemas. Read it together with
     #: `output_form` — a renderer takes the pair or neither. A closed shape: a member the pinned
-    #: `mthds` does not define fails the parse of the whole results body. `None` on the hosted path
-    #: for a run whose artifacts were not written, and absent until the platform relays the key.
+    #: `mthds` does not define fails the parse of the whole results body with pydantic's
+    #: `ValidationError` (`docs/run-results.md` says what that costs on each path). The hosted
+    #: results body relays it as its own key, so it is set on that path: `None` for a run whose
+    #: artifact was not written.
     pipe_io_contracts: PipeIOContracts | None = None
     #: Per-pipe input-form descriptors for that same library — the standard's `InputForm`, keyed
     #: over the same `pipe_ref` set as `pipe_io_contracts`, describing each declared input as a
     #: typed field rather than a schema. It is what lets a rendered run show its own inputs as
-    #: values; a renderer treats it as optional even when it has the other two. `None` or absent on
-    #: the same terms as `pipe_io_contracts`.
+    #: values; a renderer treats it as optional even when it has the other two. `None` on the same
+    #: terms as `pipe_io_contracts`.
     input_form: InputForm | None = None
     #: Per-pipe OUTPUT-form descriptors for that same library — the standard's `OutputForm`, the twin
     #: of `input_form` on the other side of the pipe, keyed over the same `pipe_ref` set. The
     #: descriptor says what the result IS and the contract's `output.json_schema` names the property
     #: its payload arrives under, which together are everything a renderer needs to lay a run's
-    #: result out without inspecting the value. `None` or absent on the same terms as
-    #: `pipe_io_contracts`.
+    #: result out without inspecting the value. `None` on the same terms as `pipe_io_contracts`.
     output_form: OutputForm | None = None
     #: Non-`None` when the runner's build of the three I/O artifacts failed for the run — their twin
     #: of `graph_assembly_error`, and the only thing that separates "describing the data broke" from
