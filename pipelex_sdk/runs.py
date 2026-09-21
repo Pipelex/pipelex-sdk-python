@@ -16,13 +16,16 @@ The lifecycle types **defined here are owned by this SDK** (not imported from
 shapes still exist in `mthds-python`; that duplication is deliberate and is
 removed from `mthds-python` in Phase 6, leaving these as the single home.
 
-Two things in this module are deliberately NOT owned here, and both reuse rather
+Three things in this module are deliberately NOT owned here, and all reuse rather
 than redefine. `RunResults.pipe_output` is typed with the protocol's own
 `DictPipeOutputAbstract` wire model from `mthds` — a shared wire contract the
-`pipelex` runtime also builds on, not a lifecycle concept. `TokensUsageRecord`
-mirrors the runtime's own record: inference accounting is a Pipelex runtime
-extension the MTHDS Protocol does not model, so the hosted API is what pins that
-wire contract; this SDK follows the shape, it does not define it.
+`pipelex` runtime also builds on, not a lifecycle concept. The three I/O artifacts
+on `RunResults` (`pipe_io_contracts`, `input_form`, `output_form`) are the standard's
+own, typed by importing `mthds.protocol` exactly as the validate report does — one
+declaration per language, nothing to drift from. `TokensUsageRecord` mirrors the
+runtime's own record: inference accounting is a Pipelex runtime extension the MTHDS
+Protocol does not model, so the hosted API is what pins that wire contract; this SDK
+follows the shape, it does not define it.
 
 Wire contract mirrors `pipelex-platform`:
     POST /v1/start                           -> RunResultStart   (start, 202)
@@ -36,7 +39,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
 
+from mthds.protocol.input_form import InputForm
 from mthds.protocol.models import RunResultStart
+from mthds.protocol.output_form import OutputForm
+from mthds.protocol.pipe_io_contracts import PipeIOContracts
 from mthds.runners.api.models import DictPipeOutputAbstract
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -214,23 +220,76 @@ class RunResults(BaseModel):
     cannot deliver a main stuff raises `MissingMainStuffError`. Extension-open
     (`extra="allow"`): any other server artifact (e.g. the hosted `working_memory`)
     is preserved without being named by the SDK.
+
+    Every field but the first two is optional, and two readings of an optional field
+    are distinct on purpose. A key the hosted body did not carry is not in
+    `model_fields_set` and reads `None`; a key relayed as `null` is in the set and
+    reads `None` too. That is how a reader tells "the platform relayed no such key"
+    from "the platform relayed null", where the JS twin reads `undefined` against
+    `null`. The blocking path always answers for every field, so each is set there.
+    Every field is walked on `docs/run-results.md`.
     """
 
     model_config = ConfigDict(extra="allow")
 
     pipeline_run_id: str
     #: The resolved main output content — always present for a completed run. Typed `Any` because the
-    #: content is polymorphic (a list output renders to a top-level array, a structured output to an
-    #: object) and may be a valid falsy value (empty list, `0`); it is never absent for a completed run.
+    #: content is polymorphic (a structured output is an object of the concept's fields, a multiple
+    #: output the `{"items": [...]}` envelope the runtime's `ListContent` serialises to, a native is
+    #: wrapped too — `{"text": ...}`, `{"number": ...}`) and may be a valid empty value (an empty
+    #: `items`, an empty `text`); it is never absent for a completed run.
     main_stuff: Any
-    #: Method graph spec (`graphspec.json`); `None` if missing mid-write or on the bare-runner path.
+    #: The executed graph — the same document a local run writes as `graphspec.json`: `meta.mode`
+    #: `"live"`, one node per pipe with its status, its timings and its own usage. It reaches the
+    #: client on both paths: the hosted path relays the `graphspec.json` artifact verbatim, and on
+    #: the blocking path the SDK lifts it off `pipe_output`. `None` when the runner assembled no
+    #: graph (see `graph_assembly_error`) or, on the hosted path, when the artifact was not yet
+    #: written. Typed `Any` on purpose — no published Python package declares the graph spec, so a
+    #: type here could only be a copy that drifts.
     graph_spec: Any = None
+    #: Non-`None` when the runner's graph assembly failed for the run — the graph's twin of
+    #: `usage_assembly_error`, and the only thing that separates "the graph broke" from "this run
+    #: produced no graph". Lifted off `pipe_output` on the blocking path; the hosted results body
+    #: carries nothing of the kind yet, so on that path the key is absent (not in `model_fields_set`)
+    #: until the platform writes and relays it.
+    graph_assembly_error: str | None = None
+    #: Per-pipe input/output contracts for the library the run executed against, keyed by namespaced
+    #: `pipe_ref` (`domain.code`) — the standard's `PipeIOContracts`, the same artifact `POST
+    #: /v1/validate` reports and the same one a local run writes beside its graph as
+    #: `pipe_io_contracts.json`. Imported from `mthds.protocol` rather than restated, under the
+    #: standing ruling that keeps the standard's artifacts declared once per language
+    #: (`docs/architecture.md`). It is what says what a `graph_spec` node's data IS: the graph
+    #: carries the values, this carries their concepts and their schemas. Read it together with
+    #: `output_form` — a renderer takes the pair or neither. A closed shape: a member the pinned
+    #: `mthds` does not define fails the parse of the whole results body with pydantic's
+    #: `ValidationError` (`docs/run-results.md` says what that costs on each path). The hosted
+    #: results body relays it as its own key, so it is set on that path: `None` for a run whose
+    #: artifact was not written.
+    pipe_io_contracts: PipeIOContracts | None = None
+    #: Per-pipe input-form descriptors for that same library — the standard's `InputForm`, keyed
+    #: over the same `pipe_ref` set as `pipe_io_contracts`, describing each declared input as a
+    #: typed field rather than a schema. It is what lets a rendered run show its own inputs as
+    #: values; a renderer treats it as optional even when it has the other two. `None` on the same
+    #: terms as `pipe_io_contracts`.
+    input_form: InputForm | None = None
+    #: Per-pipe OUTPUT-form descriptors for that same library — the standard's `OutputForm`, the twin
+    #: of `input_form` on the other side of the pipe, keyed over the same `pipe_ref` set. The
+    #: descriptor says what the result IS and the contract's `output.json_schema` names the property
+    #: its payload arrives under, which together are everything a renderer needs to lay a run's
+    #: result out without inspecting the value. `None` on the same terms as `pipe_io_contracts`.
+    output_form: OutputForm | None = None
+    #: Non-`None` when the runner's build of the three I/O artifacts failed for the run — their twin
+    #: of `graph_assembly_error`, and the only thing that separates "describing the data broke" from
+    #: "this run described none". Lifted off `pipe_output` on the blocking path; absent on the hosted
+    #: path until the platform writes and relays it.
+    pipe_io_artifacts_error: str | None = None
     #: Bare runner's native pipe output — the full working memory, blocking-execute path only;
-    #: `None` on the hosted path. Supplementary to `main_stuff`, which is already resolved out of
-    #: it; kept for consumers that need the whole working memory. Extension-open, so the Pipelex
-    #: extension fields the runner rides on it stay reachable via `model_extra` — including the
-    #: usage pair, in its **raw** form. Read `tokens_usages` below instead: same data, validated
-    #: into records, and present on the hosted path too (where `pipe_output` is `None`).
+    #: `None` on the hosted path. Supplementary: `main_stuff`, the graph pair, the three I/O
+    #: artifacts and the usage pair are all lifted out of it onto fields that read the same on both
+    #: paths; kept for consumers that need the whole working memory. Extension-open, so the Pipelex
+    #: extension fields the runner rides on it stay reachable via `model_extra` in their **raw**
+    #: form — the usage pair, the graph pair, the `pipe_io_artifacts` envelope. Read the lifted
+    #: fields instead: same data, validated, and present on the hosted path too.
     pipe_output: DictPipeOutputAbstract | None = None
     #: Per-call usage records — token counts by category, computed `cost` in USD, model id — for
     #: LLM and img-gen/extract/search calls alike. On the hosted path this is the
