@@ -1544,16 +1544,35 @@ def _map_run_result_to_run_results(response: PipelexExecuteResult) -> RunResults
     carried over as-is — no `.model_dump()` round-trip — so the full working memory stays typed
     (blocking only; the hosted path has none).
 
-    The usage pair (`tokens_usages` / `usage_assembly_error`) rides the execute response's
-    extension-open `pipe_output` as Pipelex extension fields. Lifting it onto the two top-level
-    fields here is what makes `.tokens_usages` read the same on the blocking and durable paths;
-    `RunResults` validates the raw records into `TokensUsageRecord`s on the way in.
+    The graph pair (`graph_spec` / `graph_assembly_error`), the usage pair (`tokens_usages` /
+    `usage_assembly_error`), the `pipe_io_artifacts` envelope and its `pipe_io_artifacts_error` all
+    ride the execute response's extension-open `pipe_output` as Pipelex extension fields. Lifting
+    each onto its top-level field here is what makes `.graph_spec`, `.tokens_usages` and
+    `.pipe_io_contracts` read the same on the blocking and durable paths; `RunResults` validates the
+    raw records into `TokensUsageRecord`s and the raw artifacts into the standard's models on the
+    way in. The runner carries the three I/O artifacts in one envelope — they share a key set and
+    are always built together — where the hosted results body relays them as three sibling keys;
+    `RunResults` follows the hosted shape and this unwraps the envelope onto it. A null envelope
+    leaves all three `None`, beside whatever `pipe_io_artifacts_error` says about why.
+
+    Every lifted field is passed explicitly, so on this path each is in `model_fields_set` whether
+    or not the runner carried the key — the blocking path always answers, as the JS twin writes
+    `null` there; only the hosted path leaves a field unset when the body did not carry its key.
     """
     pipe_output_extras: dict[str, Any] = response.pipe_output.model_extra or {}
+    pipe_io_artifacts: dict[str, Any] = {}
+    raw_pipe_io_artifacts = pipe_output_extras.get("pipe_io_artifacts")
+    if isinstance(raw_pipe_io_artifacts, dict):
+        pipe_io_artifacts = cast("dict[str, Any]", raw_pipe_io_artifacts)
     return RunResults(
         pipeline_run_id=response.pipeline_run_id,
         main_stuff=response.main_stuff,
-        graph_spec=None,
+        graph_spec=pipe_output_extras.get("graph_spec"),
+        graph_assembly_error=pipe_output_extras.get("graph_assembly_error"),
+        pipe_io_contracts=pipe_io_artifacts.get("pipe_io_contracts"),
+        input_form=pipe_io_artifacts.get("input_form"),
+        output_form=pipe_io_artifacts.get("output_form"),
+        pipe_io_artifacts_error=pipe_output_extras.get("pipe_io_artifacts_error"),
         pipe_output=response.pipe_output,
         tokens_usages=pipe_output_extras.get("tokens_usages"),
         usage_assembly_error=pipe_output_extras.get("usage_assembly_error"),

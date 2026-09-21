@@ -3,7 +3,10 @@
 from typing import Any
 
 import pytest
-from pydantic import TypeAdapter
+from mthds.protocol.input_form import PipeInputFormDescriptor, ProseField
+from mthds.protocol.output_form import PipeOutputFormDescriptor
+from mthds.protocol.pipe_io_contracts import IOMultiplicity, PipeIOContract
+from pydantic import TypeAdapter, ValidationError
 
 from pipelex_sdk.runs import RunResults, RunStatus, TokensUsageRecord
 
@@ -40,6 +43,47 @@ _PRE_CONTRACT_RECORD: dict[str, Any] = {
         "user_id": "legacy-user",
     },
 }
+
+# The executed graph as the runner writes it to `graphspec.json`: opaque to this SDK, relayed as is.
+_GRAPH_SPEC: dict[str, Any] = {
+    "meta": {"format": "mthds", "mode": "live"},
+    "nodes": [{"id": "pipe_1", "status": "COMPLETED"}],
+    "edges": [],
+}
+
+# The three I/O artifacts for a one-pipe library, in the standard's own shapes and keyed over the
+# one shared `pipe_ref` set — the same fixture the JS SDK's tests carry, so the two mirrors are
+# exercised on one document.
+_PIPE_IO_CONTRACTS: dict[str, Any] = {
+    "x.greet": {
+        "inputs": {},
+        "output": {
+            "concept_ref": "native.Text",
+            "multiplicity": "single",
+            "item_count": None,
+            "optional": False,
+            "json_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
+        },
+    },
+}
+_INPUT_FORM: dict[str, Any] = {"x.greet": {"fields": []}}
+_OUTPUT_FORM: dict[str, Any] = {"x.greet": {"field": {"name": "text", "kind": "prose", "required": True}}}
+
+_GRAPH_ASSEMBLY_ERROR = "failed to assemble the graph for the run"
+_PIPE_IO_ARTIFACTS_ERROR = "failed to build the I/O artifacts for the run"
+
+# Every field the hosted results body may carry beside the ones always present. Their absence,
+# their explicit null and their value are three different readings, and the tests below pin each.
+_OPTIONAL_RESULT_KEYS = (
+    "graph_spec",
+    "graph_assembly_error",
+    "pipe_io_contracts",
+    "input_form",
+    "output_form",
+    "pipe_io_artifacts_error",
+    "tokens_usages",
+    "usage_assembly_error",
+)
 
 
 class TestRuns:
@@ -163,3 +207,200 @@ class TestRuns:
         assert results.tokens_usages is None
         assert results.usage_assembly_error is None
         assert results.pipe_output is None
+
+    # ── The graph pair and the I/O artifacts ─────────────────────
+
+    def test_run_results_declares_every_optional_field_absent_as_none_and_unset(self) -> None:
+        """A hosted body carrying none of the optional keys (an older platform, or a lean relay)
+        leaves each declared field `None` and out of `model_fields_set` — which is how a Python
+        reader tells "the platform relayed no such key" from "the platform relayed null", where the
+        JS twin reads `undefined`.
+        """
+        results = RunResults.model_validate({"pipeline_run_id": "run_1", "main_stuff": {"answer": "42"}})
+
+        assert results.graph_spec is None
+        assert results.graph_assembly_error is None
+        assert results.pipe_io_contracts is None
+        assert results.input_form is None
+        assert results.output_form is None
+        assert results.pipe_io_artifacts_error is None
+        assert results.model_fields_set == {"pipeline_run_id", "main_stuff"}
+        # Nothing rode `model_extra` either: every key of the body is declared.
+        assert results.model_extra == {}
+
+    def test_run_results_reads_a_relayed_null_as_set(self) -> None:
+        """A key the platform relays as `null` (the artifact was not written, or the run described no
+        data) reads `None` too, but is IN `model_fields_set`: relayed-as-null and not-relayed are
+        distinguishable, which is what the JS `null` / `undefined` split carries.
+        """
+        body: dict[str, Any] = {"pipeline_run_id": "run_1", "main_stuff": {"answer": "42"}}
+        for key in _OPTIONAL_RESULT_KEYS:
+            body[key] = None
+        results = RunResults.model_validate(body)
+
+        for key in _OPTIONAL_RESULT_KEYS:
+            assert getattr(results, key) is None, key
+        assert set(_OPTIONAL_RESULT_KEYS) <= results.model_fields_set
+
+    def test_run_results_types_the_io_artifacts_from_the_standard(self) -> None:
+        """The three artifacts parse into the standard's own models, imported from `mthds.protocol`
+        rather than restated: a contract entry is a `PipeIOContract`, a form entry a descriptor whose
+        field is the kind-discriminated node union.
+        """
+        results = RunResults.model_validate(
+            {
+                "pipeline_run_id": "run_1",
+                "main_stuff": {"text": "hello"},
+                "graph_spec": _GRAPH_SPEC,
+                "graph_assembly_error": None,
+                "pipe_io_contracts": _PIPE_IO_CONTRACTS,
+                "input_form": _INPUT_FORM,
+                "output_form": _OUTPUT_FORM,
+                "pipe_io_artifacts_error": None,
+            }
+        )
+
+        # The graph stays opaque and rides through unchanged.
+        assert results.graph_spec == _GRAPH_SPEC
+        assert results.graph_assembly_error is None
+        assert results.pipe_io_contracts is not None
+        contract = results.pipe_io_contracts["x.greet"]
+        assert isinstance(contract, PipeIOContract)
+        assert contract.inputs == {}
+        assert contract.output.concept_ref == "native.Text"
+        assert contract.output.multiplicity == IOMultiplicity.SINGLE
+        assert contract.output.item_count is None
+        assert contract.output.optional is False
+        assert contract.output.json_schema == {"type": "object", "properties": {"text": {"type": "string"}}}
+        assert results.input_form is not None
+        input_descriptor = results.input_form["x.greet"]
+        assert isinstance(input_descriptor, PipeInputFormDescriptor)
+        assert input_descriptor.fields == []
+        assert results.output_form is not None
+        output_descriptor = results.output_form["x.greet"]
+        assert isinstance(output_descriptor, PipeOutputFormDescriptor)
+        assert isinstance(output_descriptor.field, ProseField)
+        assert output_descriptor.field.name == "text"
+        assert output_descriptor.field.required is True
+        assert results.pipe_io_artifacts_error is None
+        # The three share one key set — the reader's rule that they are taken together.
+        assert set(results.pipe_io_contracts) == set(results.input_form) == set(results.output_form) == {"x.greet"}
+
+    def test_run_results_round_trips_the_io_artifacts_verbatim(self) -> None:
+        """Dumping the parsed artifacts in JSON mode gives back the relayed documents: typing them
+        adds nothing and drops nothing.
+        """
+        results = RunResults.model_validate(
+            {
+                "pipeline_run_id": "run_1",
+                "main_stuff": {"text": "hello"},
+                "pipe_io_contracts": _PIPE_IO_CONTRACTS,
+                "input_form": _INPUT_FORM,
+                "output_form": _OUTPUT_FORM,
+            }
+        )
+        dumped = results.model_dump(mode="json", exclude_unset=True)
+
+        assert dumped["pipe_io_contracts"] == _PIPE_IO_CONTRACTS
+        assert dumped["input_form"] == _INPUT_FORM
+        # The output-form node dumps with the descriptor's optional members spelled out as null, so
+        # compare the members the fixture states rather than the whole node.
+        field = dumped["output_form"]["x.greet"]["field"]
+        assert (field["name"], field["kind"], field["required"]) == ("text", "prose", True)
+
+    @pytest.mark.parametrize(
+        ("key", "drifted_value"),
+        [
+            pytest.param(
+                "pipe_io_contracts",
+                {"x.greet": {**_PIPE_IO_CONTRACTS["x.greet"], "not_in_this_standard": 1}},
+                id="contract-member",
+            ),
+            pytest.param("input_form", {"x.greet": {"fields": [], "not_in_this_standard": 1}}, id="input-form-member"),
+            pytest.param(
+                "output_form",
+                {"x.greet": {"field": {"name": "text", "kind": "prose", "required": True}, "not_in_this_standard": 1}},
+                id="output-form-member",
+            ),
+        ],
+    )
+    def test_run_results_refuses_an_artifact_member_the_pinned_standard_does_not_define(self, key: str, drifted_value: dict[str, Any]) -> None:
+        """The artifacts are closed shapes: a member the pinned `mthds` does not define is version
+        drift, refused at the parse of the whole results body rather than read half-way — the same
+        ruling the validate report follows. The envelope around them stays open (see the extras test
+        below), so strictness composes rather than spreads.
+        """
+        with pytest.raises(ValidationError):
+            RunResults.model_validate({"pipeline_run_id": "run_1", "main_stuff": {}, key: drifted_value})
+
+    def test_run_results_stays_extension_open_around_the_typed_artifacts(self) -> None:
+        """Declaring typed fields does not close the envelope: a key the SDK does not name still
+        parses and rides `model_extra`, so the platform can add an artifact without a client release.
+        """
+        results = RunResults.model_validate(
+            {
+                "pipeline_run_id": "run_1",
+                "main_stuff": {},
+                "pipe_io_contracts": _PIPE_IO_CONTRACTS,
+                "some_future_artifact": {"k": "v"},
+            }
+        )
+
+        assert results.model_extra == {"some_future_artifact": {"k": "v"}}
+
+    @pytest.mark.parametrize(
+        ("graph_spec", "graph_assembly_error"),
+        [
+            pytest.param(None, None, id="no-graph-or-not-written"),
+            pytest.param(None, _GRAPH_ASSEMBLY_ERROR, id="assembly-broke"),
+            pytest.param(_GRAPH_SPEC, None, id="assembled"),
+        ],
+    )
+    def test_run_results_keeps_the_graph_null_semantics_distinct(self, graph_spec: dict[str, Any] | None, graph_assembly_error: str | None) -> None:
+        """A run with no graph and a run whose assembly broke both carry a null `graph_spec`;
+        `graph_assembly_error` is the only field that tells them apart, as `usage_assembly_error`
+        does for the usage pair.
+        """
+        results = RunResults.model_validate(
+            {
+                "pipeline_run_id": "run_1",
+                "main_stuff": {},
+                "graph_spec": graph_spec,
+                "graph_assembly_error": graph_assembly_error,
+            }
+        )
+
+        assert results.graph_spec == graph_spec
+        assert results.graph_assembly_error == graph_assembly_error
+
+    def test_run_results_keeps_the_artifact_null_semantics_distinct(self) -> None:
+        """Three null artifacts alone cannot say whether the run described no data or the build
+        broke; `pipe_io_artifacts_error` is the only field that tells the two apart.
+        """
+        described_nothing = RunResults.model_validate(
+            {
+                "pipeline_run_id": "run_1",
+                "main_stuff": {},
+                "pipe_io_contracts": None,
+                "input_form": None,
+                "output_form": None,
+                "pipe_io_artifacts_error": None,
+            }
+        )
+        build_broke = RunResults.model_validate(
+            {
+                "pipeline_run_id": "run_1",
+                "main_stuff": {},
+                "pipe_io_contracts": None,
+                "input_form": None,
+                "output_form": None,
+                "pipe_io_artifacts_error": _PIPE_IO_ARTIFACTS_ERROR,
+            }
+        )
+
+        assert described_nothing.pipe_io_contracts is None
+        assert described_nothing.pipe_io_artifacts_error is None
+        assert build_broke.pipe_io_contracts is None
+        assert build_broke.input_form is None
+        assert build_broke.output_form is None
+        assert build_broke.pipe_io_artifacts_error == _PIPE_IO_ARTIFACTS_ERROR
