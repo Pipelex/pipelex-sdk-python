@@ -10,6 +10,10 @@
 
 - **A stored source nested too deeply to decode now fails as a `ValidationError`**: `parse_method_files` converts the JSON decoder's `RecursionError` into the `ValueError` its contract documents, so `MethodData`'s validator surfaces it as a `pydantic.ValidationError` like any other malformed response body instead of letting a bare `RecursionError` escape `get_method` past a caller's `except ValidationError`.
 
+### Removed
+
+- **The Pipelex Gateway inference key is gone from the client (Breaking)**: `create_gateway_api_key` and `get_gateway_api_key`, with the `GatewayApiKey` and `GatewayApiKeyStatus` models, are removed — the `POST` and `GET /v1/gateway-api-key` routes behind them no longer exist on the hosted API. A caller brings its own provider keys, or runs against the hosted API with a Pipelex API key (`list_pipelex_api_keys` and friends, which are untouched). This has nothing to do with the hosted HTTP gateway's synchronous-execute ceiling, which is unchanged.
+
 ## [v0.10.0] - 2026-09-13
 
 ### Added
