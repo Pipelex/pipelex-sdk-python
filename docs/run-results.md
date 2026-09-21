@@ -136,7 +136,7 @@ if contracts is not None and output_form is not None:
 
 ## `tokens_usages` and `usage_assembly_error` — what the run consumed
 
-The usage pair reports what each inference call consumed and cost — one `TokensUsageRecord` per call, in completion order — and reads identically on both paths. The `None`-versus-empty semantics, the cost rules (`None` is unrated, `0` is priced at zero), the non-additive token categories and the pre-contract artifacts that still parse all have their own page: [`run-usage.md`](./run-usage.md). For the run's totals, sum the records as that page shows.
+The usage pair reports what each inference call consumed and cost — one `TokensUsageRecord` per call, in completion order — and reads identically on both paths. The `None`-versus-empty semantics, the cost rules (`None` is unrated, `0` is priced at zero), the non-additive token categories and the pre-contract artifacts that still parse all have their own page: [`run-usage.md`](./run-usage.md). For the run's totals, do not add the records up by hand — `pipelex_sdk.usage.summarize_usage(results)` folds the pair into one null-aware reading with a per-pipe rollup, under every rule that page states. It is the one place the `None`-versus-absent distinction above becomes an error rather than a branch: a results body that never carried `tokens_usages` raises `FieldNotIncludedError`, because a field nobody asked for is not a run that reported no usage.
 
 ## `pipe_output` — the runner's native output
 

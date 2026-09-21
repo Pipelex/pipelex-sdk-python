@@ -262,3 +262,16 @@ class CodegenLockError(CodegenError):
     plain `CodegenError`: it is a containment violation, not corrupt state a writer may recover from
     by replacing the lock.
     """
+
+
+class FieldNotIncludedError(PipelineRequestError):
+    """A `RunResults` field this operation needs was not requested from the hosted results read.
+
+    Raised when the field is absent from `results.model_fields_set` — the body did not carry the key —
+    as opposed to relayed as `None`, which is a value. Carries the field's name in `field_name`.
+    """
+
+    def __init__(self, field_name: str) -> None:
+        self.field_name = field_name
+        msg = f"RunResults field `{field_name}` was not included in the results read; request it and read again"
+        super().__init__(msg)
