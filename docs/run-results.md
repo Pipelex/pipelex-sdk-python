@@ -146,7 +146,9 @@ The usage pair reports what each inference call consumed and cost — one `Token
 
 A run that produces an image, a PDF or a document does not embed the bytes. The content inside `main_stuff` carries the file's durable reference — a `pipelex-storage://` URI, in the content's `url` — beside a `public_url` the storage provider signed when the run wrote the file. **That signed link is short-lived and must not be stored**: it expires on the provider's own schedule, so a link persisted in a database or rendered into a cached page stops working without warning, while the `pipelex-storage://` reference beside it is permanent and is what belongs in your records.
 
-To read the bytes, mint a fresh link from the reference:
+**The whole download direction is [`artifact-download.md`](./artifact-download.md)**, and it is where a consumer should start: `collect_artifacts(results.main_stuff)` lists the references without touching the network, `resolve_artifacts` mints a fresh link for each through the platform's bulk route, `fetch_artifact` streams one within bounds, and `download_artifacts` saves a whole run's files under a directory and answers a produced verdict. None of them reads the embedded `public_url`.
+
+For the single reference you already hold, the raw primitive is still there:
 
 ```python
 resolved = await client.resolve_storage_url("pipelex-storage://...")

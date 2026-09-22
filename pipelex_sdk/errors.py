@@ -21,6 +21,11 @@ HANDOFF Phase 2, and removed from `mthds-python` in Phase 6). `RunStillRunningEr
 stays in `mthds` — it belongs to the protocol `execute()` 202-degrade path, not the
 lifecycle — and is re-exported here so consumers have a single import home.
 
+The artifact errors (`ArtifactOperationError` and its subclasses, plus `FieldNotIncludedError`)
+are the download twin of the input-preparation family: they are raised only where the artifact
+operations can produce no verdict at all, per-reference failure being a value on the verdict's
+item. See `docs/artifact-download.md`.
+
 The codegen tree errors (`CodegenError`, `CodegenLockError`) are not request errors at all: they are
 raised by `pipelex_sdk.codegen_writer`, `pipelex_sdk.codegen_check`, `pipelex_sdk.codegen_lock` and
 `pipelex_sdk.codegen_stamp` over
@@ -42,6 +47,7 @@ from mthds.protocol.exceptions import PipelineRequestError
 from mthds.runners.api.exceptions import RunStillRunningError as RunStillRunningError  # ruff: ignore[useless-import-alias]
 
 if TYPE_CHECKING:
+    from pipelex_sdk.artifact_models import ArtifactScope, DownloadArtifactsResult
     from pipelex_sdk.runs import RunStatus
     from pipelex_sdk.validation_models import ValidationErrorItem
 
@@ -266,6 +272,68 @@ class CodegenLockError(CodegenError):
     plain `CodegenError`: it is a containment violation, not corrupt state a writer may recover from
     by replacing the lock.
     """
+
+
+class ArtifactOperationError(PipelineRequestError):
+    """Base class for the failures the artifact operations raise on their own
+    (`fetch_artifact` / `download_artifacts`) — the download twin of `InputPreparationError`.
+
+    Catch this to handle any artifact failure; catch a subclass to branch on the category. A
+    per-reference failure inside a `download_artifacts` verdict is a **value on the item**, never
+    one of these: the operation throws only when it can produce no verdict at all. The transport
+    failures of the resolve route (`ApiResponseError`, `ApiUnreachableError`) and the run-lifecycle
+    errors propagate unchanged, so they are not subclasses. Mirrors `pipelex-sdk-js`'s
+    `ArtifactOperationError` family.
+    """
+
+
+class ScopeUnavailableError(ArtifactOperationError):
+    """The scope `download_artifacts` was asked to walk is `None` on the run's results.
+
+    The key WAS relayed — it is in `results.model_fields_set` — and its value is `None`, which is
+    the platform saying it has no such artifact for this run. Distinct from a key the results read
+    never carried, which is `FieldNotIncludedError`, and from an empty walk over a present scope,
+    which is a produced verdict with no artifacts. `scope` names the scope, `run_id` the run.
+    """
+
+    def __init__(self, scope: ArtifactScope, run_id: str) -> None:
+        msg = f'Run "{run_id}" carries no "{scope}" artifact to walk for produced files — the results relayed it as null.'
+        super().__init__(msg)
+        self.scope = scope
+        self.run_id = run_id
+
+
+class ArtifactFetchError(ArtifactOperationError):
+    """One reference could not be turned into a bounded stream by `fetch_artifact`.
+
+    `code` says why, in a closed vocabulary the download verdict shares for its per-item errors:
+    the resolve route's own per-reference codes (`invalid_storage_uri`, `forbidden`), then the
+    fetch boundary's — `unsupported_url`, `plain_http_refused`, `redirect_refused`, `store_refused`
+    (a 401/403 from the object store), `not_found` (404/410), `store_error` (any other non-2xx),
+    `too_large`, `timeout`, `network`. `status` is the store's HTTP status when one was received.
+    `download_artifacts` never lets this escape: it becomes the item's `error`.
+    """
+
+    def __init__(self, message: str, uri: str, code: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.uri = uri
+        self.code = code
+        self.status = status
+
+
+class ArtifactAuthenticationError(ArtifactOperationError):
+    """The resolve route refused the caller's credential (`401` / `403`) during a download.
+
+    No further reference can be resolved with it, so the download stops — but the files already
+    saved are real, and `verdict` carries the result as it stood: every item saved before the
+    refusal, and the rest marked `aborted`. `status` is the route's status; the wrapped
+    `ApiResponseError` is reachable through `__cause__`.
+    """
+
+    def __init__(self, message: str, status: int, verdict: DownloadArtifactsResult) -> None:
+        super().__init__(message)
+        self.status = status
+        self.verdict = verdict
 
 
 class FieldNotIncludedError(PipelineRequestError):
