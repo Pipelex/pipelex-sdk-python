@@ -53,6 +53,7 @@ Two traps worth naming explicitly:
 
 - `cost is None` means the model has **no rate table at all** — an own-GPU model, a mock run, a dry run.
 - `cost == 0` means a rate table existed and priced the call at zero.
+- `cost` is strict and finite on the wire: a value relayed as a string, a bool or a NaN fails the whole results body's parse, so a number that reaches a sum is a number the artifact carried.
 
 Those are different facts; `record.cost or 0.0` conflates them, which is fine for a sum but wrong for "was this call priced?".
 
@@ -127,7 +128,7 @@ A [pre-contract record](#old-artifacts-parse-too) carries no `cost` and no `pipe
 
 ### A key that was never carried is not a `None` list
 
-A results body that never carried `tokens_usages` at all raises `FieldNotIncludedError` rather than answering `unavailable`. That is the Python reading of the difference [`run-results.md`](./run-results.md) sets out: a key the platform relayed as `null` is in `results.model_fields_set` and is a value, while a key the body did not carry is absent from the set and is the caller not having asked for the field. Answering "nothing is known about this run's usage" for a field nobody requested would report the caller's own omission as a fact about the run. The error carries the field's name in `field_name`, and the fix is to read the results again asking for it — the TypeScript twin, which cannot tell the two apart, reads both as `unavailable`.
+A results body that never carried `tokens_usages` at all raises `FieldNotIncludedError` rather than answering `unavailable`. That is the Python reading of the difference [`run-results.md`](./run-results.md) sets out: a key the platform relayed as `null` is in `results.model_fields_set` and is a value, while a key the body did not carry is absent from the set and says nothing about the run. Answering "nothing is known about this run's usage" for a key the read never delivered would turn a gap in the read into a fact about the run. The error carries the field's name in `field_name`. Today it is dormant: the blocking path lifts the pair off the runner's output and sets it explicitly, and the hosted body relays the key on every read, so the only body without it comes from a runner that relays no usage at all. It becomes reachable the day a results read can leave a key out, which is the include selector's to add, and it then names what the read left out. The TypeScript twin, which cannot tell the two apart, reads both as `unavailable`.
 
 `usage_assembly_error` is not guarded the same way: both paths relay it beside the list, so its absence carries no such ambiguity and reads as `None`.
 

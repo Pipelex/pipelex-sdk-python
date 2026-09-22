@@ -201,7 +201,9 @@ class TokensUsageRecord(BaseModel):
     #: Computed USD cost of this call. `None` when the model has no rate table at all (own-GPU,
     #: mock, dry run); `0` means a rate table existed and priced the call at zero. The underlying
     #: rate table never crosses the wire and there is no run-level aggregate — sum the records.
-    cost: float | None = None
+    #: Strict and finite: a string, a bool or a NaN on the wire fails the whole results body's
+    #: parse rather than reaching a sum as a number.
+    cost: float | None = Field(default=None, strict=True, allow_inf_nan=False)
     #: ISO 8601 start of the call.
     started_at: str | None = None
     #: ISO 8601 end of the call. Duration is derivable from the pair and deliberately not shipped.

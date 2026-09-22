@@ -15,11 +15,11 @@ Pure: no I/O, no client, and the input is never mutated. It is the Python twin o
 `@pipelex/sdk`'s `summarizeUsage` and reports the same summary shape, with two deliberate
 divergences. Where the JS reads an absent `tokens_usages` as `unavailable`, this raises
 `FieldNotIncludedError`, because Python tells an absent key from a relayed `null` through
-`model_fields_set` and answering "nothing is known" for a field nobody asked for would hide
-the caller's own omission. And where the JS guards every read with `typeof`, because its
-records are relayed JSON nothing validated, this reads the parsed fields directly: a record
-whose `cost` is not a number never reaches the fold, since it fails the whole results body's
-parse at the client boundary.
+`model_fields_set` and answering "nothing is known" for a key the read never carried would turn
+a gap in the read into a fact about the run. And where the JS guards every read with `typeof`,
+because its records are relayed JSON nothing validated, this reads the parsed fields directly:
+`cost` is validated strict and finite at the client boundary, so a record whose `cost` is not a
+number never reaches the fold — it fails the whole results body's parse.
 """
 
 from __future__ import annotations
@@ -125,9 +125,9 @@ def summarize_usage(results: RunResults) -> UsageSummary:
     and a per-pipe rollup. See `docs/run-usage.md` for the rules it applies.
 
     Raises `FieldNotIncludedError` when the results body never carried `tokens_usages` — the key
-    is absent from `results.model_fields_set` — because that is the caller not having asked for
-    the field rather than the run having no usage to report. A key relayed as `None` IS a value
-    and reads as `unavailable`.
+    is absent from `results.model_fields_set` — because a read that did not deliver the key says
+    nothing about the run, and is not a run with no usage to report. A key relayed as `None` IS a
+    value and reads as `unavailable`.
 
     Pre-contract records, relayed verbatim from artifacts written before the usage contract,
     carry no `cost` and no `pipe_code`: they count as unrated and unattributed. The legacy
