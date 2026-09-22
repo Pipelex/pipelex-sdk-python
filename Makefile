@@ -48,6 +48,7 @@ make update                   - Upgrade dependencies via uv
 make build                    - Build the wheels
 
 make test                     - Run unit tests
+make e2e-test                 - Run the live e2e legs (needs PIPELEX_E2E_BASE_URL + PIPELEX_API_KEY)
 make test-with-prints         - Run unit tests with prints
 make t                        - Shorthand -> test
 make tp                       - Shorthand -> test-with-prints
@@ -83,7 +84,7 @@ make li                       - Shorthand -> lock install
 endef
 export HELP
 
-.PHONY: all help env env-verbose check-uv check-uv-verbose lock install update build test test-with-prints t tp gha-tests agent-test format lint pyright mypy pylint merge-check-ruff-format merge-check-ruff-lint merge-check-pyright merge-check-mypy merge-check-pylint check-unused-imports fix-unused-imports check-TODOs cleanderived cleanenv cleanall c cc li agent-check
+.PHONY: all help env env-verbose check-uv check-uv-verbose lock install update build test e2e-test test-with-prints t tp gha-tests agent-test format lint pyright mypy pylint merge-check-ruff-format merge-check-ruff-lint merge-check-pyright merge-check-mypy merge-check-pylint check-unused-imports fix-unused-imports check-TODOs cleanderived cleanenv cleanall c cc li agent-check
 
 all help:
 	@echo "$$HELP"
@@ -192,6 +193,11 @@ test: env
 	else \
 		$(VENV_PYTEST) -o log_cli=true -o log_level=WARNING $(if $(filter 1,$(VERBOSE)),-v,$(if $(filter 2,$(VERBOSE)),-vv,$(if $(filter 3,$(VERBOSE)),-vvv,))); \
 	fi
+
+e2e-test: env
+	$(call PRINT_TITLE,"Live e2e legs")
+	@echo "These legs run against a live platform; they skip cleanly when PIPELEX_E2E_BASE_URL and PIPELEX_API_KEY are unset."
+	$(VENV_PYTEST) tests/e2e -o log_cli=true -o log_level=WARNING -v
 
 test-with-prints: env
 	$(call PRINT_TITLE,"Unit testing with prints")

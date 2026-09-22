@@ -8,10 +8,16 @@ these pin both sentinels, the blank-content drop, and the round-trip.
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
-from pipelex_sdk.product_models import MethodFile, parse_method_files, serialize_method_files
+from pipelex_sdk import product_models
+from pipelex_sdk.product_models import MethodData, MethodFile, parse_method_files, serialize_method_files
+
+if TYPE_CHECKING:
+    from pytest_mock import MockerFixture
 
 
 class TestMethodFiles:
@@ -52,6 +58,40 @@ class TestMethodFiles:
     def test_malformed_source_raises_naming_the_expected_shape(self, bad_source: str) -> None:
         with pytest.raises(ValueError, match=r"\{name, content\}"):
             parse_method_files(bad_source)
+
+    def test_a_source_too_deep_for_the_decoder_raises_value_error(self, mocker: MockerFixture) -> None:
+        """`json.loads` recurses where `JSON.parse` iterates, and `RecursionError` is not a `ValueError`.
+
+        The depth that trips the real decoder is an interpreter build constant — it moved by an
+        order of magnitude in CPython 3.14 — so the decoder is made to raise rather than a nesting
+        literal being pinned: the conversion is what is under test, not the threshold.
+        """
+        mocker.patch.object(product_models.json, "loads", side_effect=RecursionError)
+
+        with pytest.raises(ValueError, match=r"nested too deeply"):
+            parse_method_files('[{"name": "a.py", "content": "x = 1"}]')
+
+    def test_a_source_too_deep_for_the_decoder_fails_method_data_as_a_validation_error(self, mocker: MockerFixture) -> None:
+        """The parser's two call sites must fail the same way; pydantic converts only `ValueError`.
+
+        Unconverted, the decoder's `RecursionError` escapes `MethodData` untouched and a caller's
+        `except ValidationError` around `get_method` misses a malformed stored source entirely.
+        """
+        mocker.patch.object(product_models.json, "loads", side_effect=RecursionError)
+
+        with pytest.raises(ValidationError):
+            MethodData.model_validate(
+                {
+                    "method_id": "mt_x",
+                    "name": "deep",
+                    "mthds": 'domain = "demo"',
+                    "org_id": "org_x",
+                    "created_by_user_id": "user_x",
+                    "python": '[{"name": "a.py", "content": "x = 1"}]',
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                }
+            )
 
     def test_empty_list_serializes_to_the_clear_sentinel(self) -> None:
         """`""` is the platform's clear signal; the literal `"[]"` would not clear anything."""

@@ -32,6 +32,17 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import to_json
 from typing_extensions import override
 
+from pipelex_sdk.artifact_models import (
+    BulkResolvedStorageUrls,
+    DownloadArtifactsOptions,
+    DownloadArtifactsResult,
+    FetchArtifactOptions,
+    ResolvedArtifact,
+)
+from pipelex_sdk.artifacts import ArtifactStream
+from pipelex_sdk.artifacts import download_artifacts as _download_artifacts_impl
+from pipelex_sdk.artifacts import fetch_artifact as _fetch_artifact_impl
+from pipelex_sdk.artifacts import resolve_artifacts as _resolve_artifacts_impl
 from pipelex_sdk.crate_models import (
     CodegenRequest,
     CodegenResponse,
@@ -95,6 +106,8 @@ from pipelex_sdk.validation_models import PipelexValidationResultAdapter, Valida
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from contextlib import AbstractAsyncContextManager
+    from pathlib import Path
 
     from mthds.protocol.pipe_output import VariableMultiplicity
     from mthds.protocol.pipeline_inputs import PipelineInputs
@@ -1112,6 +1125,50 @@ class PipelexAPIClient(MthdsAPIClient):
         """Resolve a storage URI to a presigned URL — `POST /v1/resolve-storage-url`."""
         return ResolvedStorageUrl.model_validate(await self._request_product("POST", "resolve-storage-url", body={"uri": uri}))
 
+    async def resolve_storage_urls_bulk(self, uris: list[str]) -> BulkResolvedStorageUrls:
+        """Resolve a list of storage URIs in one request — `POST /v1/resolve-storage-url/bulk`.
+
+        The single route applied to a list. One item per reference, in request order, duplicates
+        included; a refused reference is a value on its item (`error`), and the request is a `200`
+        whenever every reference got a verdict. At most `BULK_RESOLVE_MAX_URIS` references per call
+        (a longer list is a `422`) — `resolve_artifacts` chunks a longer set. Served by the hosted
+        platform only: a deployment without the route answers a `404` `ApiResponseError`.
+        """
+        return BulkResolvedStorageUrls.model_validate(await self._request_product("POST", "resolve-storage-url/bulk", body={"uris": uris}))
+
+    async def resolve_artifacts(self, uris: list[str]) -> list[ResolvedArtifact]:
+        """Resolve a whole list of `pipelex-storage://` references through the bulk route, chunked at
+        its bound, answering one `ResolvedArtifact` per reference in request order with per-reference
+        failure as a value. The reading layer of the artifact stack: pair it with `collect_artifacts`
+        to mint fresh links for everything a run produced. See `docs/artifact-download.md`.
+        """
+        return await _resolve_artifacts_impl(self, uris)
+
+    def fetch_artifact(self, uri: str, options: FetchArtifactOptions | None = None) -> AbstractAsyncContextManager[ArtifactStream]:
+        """A bounded stream for one `pipelex-storage://` reference, as an async context manager:
+        resolved fresh, a timeout, redirects refused, the byte cap enforced mid-stream, no credentials
+        forwarded, the store's headers neutral. What `download_artifacts` and a same-origin proxy
+        share. See `docs/artifact-download.md`.
+        """
+        return _fetch_artifact_impl(self, uri, options)
+
+    async def download_artifacts(
+        self,
+        *,
+        dir_path: str | Path,
+        run_id: str | None = None,
+        results: RunResults | None = None,
+        options: DownloadArtifactsOptions | None = None,
+    ) -> DownloadArtifactsResult:
+        """Save a run's produced files under a directory — the download twin of `prepare_inputs`.
+
+        Keyed on a `run_id` (the results are re-read, so it works days after the run) or a `RunResults`
+        in hand; walks the `main_stuff` scope by default, `working_memory` on request; resolves every
+        link fresh (never the embedded `public_url`); and returns a produced verdict, one entry per
+        reference, errors as values. See `docs/artifact-download.md`.
+        """
+        return await _download_artifacts_impl(self, dir_path=dir_path, run_id=run_id, results=results, options=options)
+
     async def upload(self, upload_input: UploadInput) -> UploadedFile:
         """Upload a base64 file — `POST /v1/upload`."""
         body = upload_input.model_dump(mode="json", exclude_none=True)
@@ -1541,19 +1598,41 @@ def _map_run_result_to_run_results(response: PipelexExecuteResult) -> RunResults
     `response.main_stuff` resolves the main output out of the returned working memory (and raises
     `MissingMainStuffError` if the run named no locatable main stuff), so the durable and blocking
     paths hand back the same `main_stuff` content shape. The already-parsed `pipe_output` model is
-    carried over as-is — no `.model_dump()` round-trip — so the full working memory stays typed
-    (blocking only; the hosted path has none).
+    carried over as-is — no `.model_dump()` round-trip — so the runner's whole envelope stays typed
+    (blocking only; the hosted path has none), and its `working_memory` is lifted onto the field of
+    that name, where the hosted path relays the artifact as its own key. The standard declares
+    `DictPipeOutputAbstract.working_memory` required, so that lift always carries a value here.
 
-    The usage pair (`tokens_usages` / `usage_assembly_error`) rides the execute response's
-    extension-open `pipe_output` as Pipelex extension fields. Lifting it onto the two top-level
-    fields here is what makes `.tokens_usages` read the same on the blocking and durable paths;
-    `RunResults` validates the raw records into `TokensUsageRecord`s on the way in.
+    The graph pair (`graph_spec` / `graph_assembly_error`), the usage pair (`tokens_usages` /
+    `usage_assembly_error`), the `pipe_io_artifacts` envelope and its `pipe_io_artifacts_error` all
+    ride the execute response's extension-open `pipe_output` as Pipelex extension fields. Lifting
+    each onto its top-level field here is what makes `.graph_spec`, `.tokens_usages` and
+    `.pipe_io_contracts` read the same on the blocking and durable paths; `RunResults` validates the
+    raw records into `TokensUsageRecord`s and the raw artifacts into the standard's models on the
+    way in. The runner carries the three I/O artifacts in one envelope — they share a key set and
+    are always built together — where the hosted results body relays them as three sibling keys;
+    `RunResults` follows the hosted shape and this unwraps the envelope onto it. A null envelope
+    leaves all three `None`, beside whatever `pipe_io_artifacts_error` says about why.
+
+    Every lifted field is passed explicitly, so on this path each is in `model_fields_set` whether
+    or not the runner carried the key — the blocking path always answers, as the JS twin writes
+    `null` there; only the hosted path leaves a field unset when the body did not carry its key.
     """
     pipe_output_extras: dict[str, Any] = response.pipe_output.model_extra or {}
+    pipe_io_artifacts: dict[str, Any] = {}
+    raw_pipe_io_artifacts = pipe_output_extras.get("pipe_io_artifacts")
+    if isinstance(raw_pipe_io_artifacts, dict):
+        pipe_io_artifacts = cast("dict[str, Any]", raw_pipe_io_artifacts)
     return RunResults(
         pipeline_run_id=response.pipeline_run_id,
         main_stuff=response.main_stuff,
-        graph_spec=None,
+        graph_spec=pipe_output_extras.get("graph_spec"),
+        graph_assembly_error=pipe_output_extras.get("graph_assembly_error"),
+        pipe_io_contracts=pipe_io_artifacts.get("pipe_io_contracts"),
+        input_form=pipe_io_artifacts.get("input_form"),
+        output_form=pipe_io_artifacts.get("output_form"),
+        pipe_io_artifacts_error=pipe_output_extras.get("pipe_io_artifacts_error"),
+        working_memory=response.pipe_output.working_memory,
         pipe_output=response.pipe_output,
         tokens_usages=pipe_output_extras.get("tokens_usages"),
         usage_assembly_error=pipe_output_extras.get("usage_assembly_error"),

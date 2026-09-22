@@ -138,7 +138,7 @@ There is no barrel import — package `__init__.py` files stay empty. Import eac
 
 - **Client & construction** — `from pipelex_sdk.client import PipelexAPIClient, DEFAULT_API_BASE_URL, MthdsFile`
 - **Run lifecycle types** — `from pipelex_sdk.runs import RunStatus, RunPublic, RunRead, RunResults, RunResultState, WaitForResultOptions, PollInfo`
-- **Product wire models** — `from pipelex_sdk.product_models import UserProfile, MethodData, MethodWriteInput, Membership, MembershipsResponse, SubscriptionResponse, PlanView, InvoiceView, OnboardingSubmission, UploadInput, UploadedFile, PipelineRun, ...`
+- **Product wire models** — `from pipelex_sdk.product_models import UserProfile, MethodData, MethodWriteInput, Membership, MembershipsResponse, SubscriptionResponse, PlanView, InvoiceView, OnboardingSubmission, UploadInput, UploadedFile, PipelineRun, ...`, with the catalog-source readers beside them: `method_source_to_contents` turns a fetched `MethodData.mthds` into the `mthds_contents` a run or a validate takes, and `MethodFile` / `parse_method_files` / `serialize_method_files` are the codec for a method's custom PipeFunc `python`.
 - **Validation verdict types** — `from pipelex_sdk.validation_models import PipelexValidationResult, PipelexValidationReport, PipelexInvalidReport, ValidationErrorItem, SuggestedFix, VALIDATION_VIEW_INPUT_FORM, ...`
 - **Codegen tree** — `from pipelex_sdk.codegen_writer import write_codegen_tree, CodegenTreeWriteReport` to write one, `from pipelex_sdk.codegen_check import run_codegen_check, CodegenCheckReport, CodegenDrift, DriftCategory` to verify one, with the format primitives in `pipelex_sdk.codegen_lock` (`CodegenLock`, `parse_lock`, `load_lock`, `validate_artifact_path`, ...) and `pipelex_sdk.codegen_stamp` (`STAMPABLE_SUFFIXES`, `is_stampable_artifact_path`, `compute_content_hash`, `parse_stamped`, ...)
 - **Typed errors** — `from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError, PipelineExecuteTimeoutError, PagingNotTerminatingError, RunFailedError, RunTimeoutError, RunLifecycleUnavailableError, RunStillRunningError, CodegenError, CodegenLockError, ...`
@@ -149,7 +149,7 @@ There is no barrel import — package `__init__.py` files stay empty. Import eac
 ## Development
 
 ```bash
-make install      # create the venv and install all extras (resolves `mthds` from ../mthds-python)
+make install      # create the venv and install all extras
 make agent-check  # fix-imports + format + lint + pyright + mypy
 make agent-test   # run the test suite quietly (prints only on failure)
 make check        # full gate: agent-check aggregate + unused-imports + pylint
