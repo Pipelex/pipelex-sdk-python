@@ -45,9 +45,13 @@ Repository = "https://github.com/Pipelex/pipelex-sdk-python"
 Documentation = "https://github.com/Pipelex/pipelex-sdk-python"
 Changelog = "https://github.com/Pipelex/pipelex-sdk-python/blob/main/CHANGELOG.md"
 
-[tool.pytest]
+# `[tool.pytest.ini_options]` is the section pytest actually reads; the legacy `[tool.pytest]`
+# beside it was inert. `testpaths` is the unit tree alone, so a bare `pytest` (and `make test` /
+# `make agent-test` with it) never collects the live e2e legs — those are `make e2e-test`, which
+# names `tests/e2e` explicitly and skips itself without credentials.
+[tool.pytest.ini_options]
 minversion = "9.0"
-testpaths = ["tests"]
+testpaths = ["tests/unit"]
 pythonpath = ["."]
 
 [tool.mypy]
