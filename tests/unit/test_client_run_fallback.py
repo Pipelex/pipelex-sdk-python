@@ -237,6 +237,27 @@ class TestClientRunFallback:
         assert result.tokens_usages is None
         assert result.usage_assembly_error is None
 
+    def test_blocking_fallback_lifts_the_working_memory_off_pipe_output(self, mocker: MockerFixture) -> None:
+        """The standard declares `pipe_output.working_memory` required, so the SDK lifts it onto
+        `RunResults.working_memory` and the field always carries a value on this path — set in
+        `model_fields_set` like every other lifted field, where the hosted path may leave it unset.
+        """
+        client = self._client()
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(side_effect=[_response(200, json=_BARE_VERSION), _response(200, json=_EXECUTE_BODY)]),
+        )
+
+        result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
+        assert result.working_memory is not None
+        assert "working_memory" in result.model_fields_set
+        assert result.working_memory.root["result"].content == {"text": "hello"}
+        assert result.working_memory.aliases == {"main_stuff": "result"}
+        # The same memory the runner's own envelope carries — lifted, not copied or re-parsed.
+        assert result.pipe_output is not None
+        assert result.working_memory is result.pipe_output.working_memory
+
     def test_blocking_fallback_lifts_the_executed_graph_off_pipe_output(self, mocker: MockerFixture) -> None:
         """The runner returns the executed graph inside `pipe_output`; the SDK lifts it onto
         `RunResults.graph_spec` so the field carries the same document whichever path ran.

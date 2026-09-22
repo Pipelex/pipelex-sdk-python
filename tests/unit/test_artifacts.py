@@ -604,7 +604,13 @@ class TestArtifacts:
     def test_walks_working_memory_when_asked_echoed_inputs_included(self, mocker: MockerFixture, tmp_path: Path) -> None:
         results = _results(
             {"text": "round trip"},
-            working_memory={"root": {"doc": {"content": _content(_URI_PDF)}, "picture": {"content": _content(_URI_PNG)}}},
+            working_memory={
+                "root": {
+                    "doc": {"concept": "native.PDF", "content": _content(_URI_PDF)},
+                    "picture": {"concept": "native.Image", "content": _content(_URI_PNG)},
+                },
+                "aliases": {},
+            },
         )
         client = _FakeClient(resolve=_resolver(_resolved(_URI_PDF), _resolved(_URI_PNG, content_type="image/png")))
         _patch_storage(mocker, _serving(_PDF_BYTES))

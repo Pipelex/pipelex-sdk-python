@@ -6,6 +6,7 @@ import pytest
 from mthds.protocol.input_form import PipeInputFormDescriptor, ProseField
 from mthds.protocol.output_form import PipeOutputFormDescriptor
 from mthds.protocol.pipe_io_contracts import IOMultiplicity, PipeIOContract
+from mthds.runners.api.models import DictWorkingMemoryAbstract
 from pydantic import TypeAdapter, ValidationError
 
 from pipelex_sdk.runs import RunResults, RunStatus, TokensUsageRecord
@@ -72,6 +73,18 @@ _OUTPUT_FORM: dict[str, Any] = {"x.greet": {"field": {"name": "text", "kind": "p
 _GRAPH_ASSEMBLY_ERROR = "failed to assemble the graph for the run"
 _PIPE_IO_ARTIFACTS_ERROR = "failed to build the I/O artifacts for the run"
 
+# The run's whole working memory as the platform relays the `working_memory.json` artifact: one
+# root entry per named stuff, and the alias table that names which of them the main stuff is. The
+# runner's per-stuff extras (`stuff_code`, `stuff_name`) are carried here too — they are not the
+# standard's fields and must ride `model_extra` rather than fail the parse.
+_WORKING_MEMORY: dict[str, Any] = {
+    "root": {
+        "topic": {"concept": "native.Text", "content": {"text": "kites"}, "stuff_name": "topic"},
+        "greeting": {"concept": "x.Greeting", "content": {"text": "hello, kites"}, "stuff_name": "greeting"},
+    },
+    "aliases": {"main_stuff": "greeting"},
+}
+
 # Every field the hosted results body may carry beside the ones always present. Their absence,
 # their explicit null and their value are three different readings, and the tests below pin each.
 _OPTIONAL_RESULT_KEYS = (
@@ -83,6 +96,7 @@ _OPTIONAL_RESULT_KEYS = (
     "pipe_io_artifacts_error",
     "tokens_usages",
     "usage_assembly_error",
+    "working_memory",
 )
 
 
@@ -236,6 +250,7 @@ class TestRuns:
         assert results.input_form is None
         assert results.output_form is None
         assert results.pipe_io_artifacts_error is None
+        assert results.working_memory is None
         assert results.model_fields_set == {"pipeline_run_id", "main_stuff"}
         # Nothing rode `model_extra` either: every key of the body is declared.
         assert results.model_extra == {}
@@ -413,3 +428,56 @@ class TestRuns:
         assert build_broke.input_form is None
         assert build_broke.output_form is None
         assert build_broke.pipe_io_artifacts_error == _PIPE_IO_ARTIFACTS_ERROR
+
+    # ── The working memory ───────────────────────────────────────
+
+    def test_run_results_types_the_relayed_working_memory_from_the_standard(self) -> None:
+        """The hosted `working_memory.json` artifact parses into the standard's own
+        `DictWorkingMemoryAbstract`, imported from `mthds` rather than restated: a root of named
+        stuffs, each with its concept ref and its content, and the alias table that says which of
+        them the main stuff is. The runner's per-stuff extras ride `model_extra`.
+        """
+        results = RunResults.model_validate(
+            {
+                "pipeline_run_id": "run_1",
+                "main_stuff": {"text": "hello, kites"},
+                "working_memory": _WORKING_MEMORY,
+            }
+        )
+
+        memory = results.working_memory
+        assert isinstance(memory, DictWorkingMemoryAbstract)
+        assert "working_memory" in results.model_fields_set
+        assert set(memory.root) == {"topic", "greeting"}
+        greeting = memory.root["greeting"]
+        assert greeting.concept_ref == "x.Greeting"
+        assert greeting.content == {"text": "hello, kites"}
+        assert greeting.model_extra == {"stuff_name": "greeting"}
+        assert memory.aliases == {"main_stuff": "greeting"}
+        # The alias table is what turns the `main_stuff` role into a root key, and the content it
+        # names is the one `main_stuff` already resolved.
+        assert memory.root[memory.aliases["main_stuff"]].content == results.main_stuff
+
+    def test_run_results_round_trips_the_working_memory_verbatim(self) -> None:
+        """Dumping the parsed memory in JSON mode gives back the relayed artifact: typing it adds
+        nothing and drops nothing, extras included.
+        """
+        results = RunResults.model_validate({"pipeline_run_id": "run_1", "main_stuff": {"text": "hello, kites"}, "working_memory": _WORKING_MEMORY})
+        dumped = results.model_dump(mode="json", exclude_unset=True)
+
+        assert dumped["working_memory"] == _WORKING_MEMORY
+
+    def test_run_results_reads_a_relayed_null_working_memory_as_set(self) -> None:
+        """A `working_memory` relayed as `null` — the platform has no such artifact for this run —
+        reads `None` and IS in `model_fields_set`, which is what separates it from a body that
+        carried no such key at all.
+        """
+        relayed_null = RunResults.model_validate({"pipeline_run_id": "run_1", "main_stuff": {}, "working_memory": None})
+        never_relayed = RunResults.model_validate({"pipeline_run_id": "run_1", "main_stuff": {}})
+
+        assert relayed_null.working_memory is None
+        assert "working_memory" in relayed_null.model_fields_set
+        assert never_relayed.working_memory is None
+        assert "working_memory" not in never_relayed.model_fields_set
+        # It is a declared field either way — an absent key never falls through to `model_extra`.
+        assert never_relayed.model_extra == {}

@@ -16,6 +16,7 @@ Two paths produce it. Against the hosted API the SDK starts a durable run and po
 | `pipe_io_artifacts_error` | `str \| None` | absent until the platform relays it | lifted off `pipe_output` |
 | `tokens_usages` | `list[TokensUsageRecord] \| None` | the `tokens_usages.json` artifact | lifted off `pipe_output` |
 | `usage_assembly_error` | `str \| None` | relayed | lifted off `pipe_output` |
+| `working_memory` | `DictWorkingMemoryAbstract \| None` | the `working_memory.json` artifact | lifted off `pipe_output.working_memory` |
 | `pipe_output` | `DictPipeOutputAbstract \| None` | absent | the runner's whole native output |
 
 ## `None` versus absent — the reading this page relies on
@@ -73,9 +74,28 @@ match state:
 
 `get_run_result` is the single-shot lookup and returns that discriminated state. `wait_for_result(run_id)` drives the same lookup in a loop, honouring the server's `Retry-After`, and returns the `RunResults` directly — raising `RunFailedError` on a terminal non-completed status and `RunTimeoutError` when the budget runs out.
 
-## The working memory — every named stuff of the run
+## `working_memory` — every named stuff of the run
 
-The run's whole working memory — every named stuff the run held when it finished, as `{"root": ..., "aliases": ...}`, the inputs it was given and the intermediates it produced as well as the main output — is not a declared field of `RunResults` yet, and it reads differently on the two paths for now. On the hosted path the platform relays the `working_memory.json` artifact and it rides `results.model_extra["working_memory"]` as a plain dict. On the blocking path it is `results.pipe_output.working_memory`, typed as the standard's `DictWorkingMemoryAbstract`. The JS SDK declares `working_memory` on both paths and this SDK is catching up; until it does, `main_stuff` is the one output accessor that reads the same everywhere, and it is the content of one of the working memory's entries, already resolved.
+`working_memory` is everything the run held when it finished — the inputs it was given, the intermediates it produced and the main output, each under the name the method gave it. It is a declared field on both paths and reads the same on each: on the hosted path the platform relays the `working_memory.json` artifact as its own key, and on the blocking path the SDK lifts it off `pipe_output.working_memory`. The standard declares that member required on the runner's output, so on the blocking path the field always carries a value.
+
+It is typed as the standard's `DictWorkingMemoryAbstract`, imported from `mthds.runners.api.models` rather than restated here — the same ruling that types `pipe_output`. Two members: `root`, a dict of stuff name to stuff, each stuff carrying a `concept` (the namespaced ref, or the whole concept object when the runner dumps one) and its `content`; and `aliases`, a dict mapping a role onto a root key, which is where `main_stuff` names the entry `results.main_stuff` already resolved for you. Every level is extension-open, so a runner's per-stuff extras — `stuff_code`, `stuff_name` — ride `model_extra` instead of being dropped.
+
+Reading a stuff by name means going through `root`, and the alias table is what turns a role into that name:
+
+```python
+results = await client.wait_for_result(run_id)
+
+memory = results.working_memory
+if memory is not None:
+    draft = memory.root["draft"]
+    print(draft.concept_ref, draft.content)  # e.g. "my_domain.Draft" {...}
+    main_name = memory.aliases.get("main_stuff", "main_stuff")
+    print(memory.root[main_name].content)  # the same content as `results.main_stuff`
+```
+
+`content` is typed `Any` for the same reason `main_stuff` is: it is the serialized content of whatever concept the stuff holds, so narrow it where you read it, ideally through the types generated for the method.
+
+**When it is `None`, and when it is absent.** The two readings the page states above apply here: on the hosted path a relayed `null` means the platform has no such artifact for this run (it was not written), and is in `model_fields_set`; a body that carried no `working_memory` key at all leaves the field `None` and out of the set, which is no information rather than "the run held nothing". On the blocking path the field is always set and never `None`. `download_artifacts` makes that distinction an error rather than a branch when its scope is `working_memory` — a never-relayed key raises `FieldNotIncludedError` and a relayed `null` raises `ScopeUnavailableError` ([`artifact-download.md`](./artifact-download.md)).
 
 ## `graph_spec` — the executed graph
 
@@ -140,7 +160,7 @@ The usage pair reports what each inference call consumed and cost — one `Token
 
 ## `pipe_output` — the runner's native output
 
-`pipe_output` is the bare runner's whole native output, and it is present on the blocking path only — the hosted results body carries no such key, so on that path it reads `None`. It is supplementary: `main_stuff`, the graph pair, the three I/O artifacts and the usage pair are all lifted out of it onto fields that read the same on both paths, so a consumer that reads those fields keeps working against the hosted API. What `pipe_output` adds is the runner's output exactly as it arrived, typed as the standard's `DictPipeOutputAbstract`, which is extension-open — the runner's Pipelex extension fields, the `pipe_io_artifacts` envelope among them, stay reachable in their raw form through `model_extra`.
+`pipe_output` is the bare runner's whole native output, and it is present on the blocking path only — the hosted results body carries no such key, so on that path it reads `None`. It is supplementary: `main_stuff`, the graph pair, the three I/O artifacts, the working memory and the usage pair are all lifted out of it onto fields that read the same on both paths, so a consumer that reads those fields keeps working against the hosted API. What `pipe_output` adds is the runner's output exactly as it arrived, typed as the standard's `DictPipeOutputAbstract`, which is extension-open — the runner's Pipelex extension fields, the `pipe_io_artifacts` envelope among them, stay reachable in their raw form through `model_extra`.
 
 ## Produced files
 
