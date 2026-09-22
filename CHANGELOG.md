@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.10.2] - 2026-09-22
+
+### Added
+
+- **`results_from_execute`, the lift from a blocking result onto `RunResults`, made public.** `pipelex_sdk.execute_result.results_from_execute(result)` turns a `PipelexExecuteResult` into the `RunResults` the durable path hands back, lifting the usage pair, the graph pair, the working memory and the three I/O artifacts off the runner's extension-open `pipe_output` onto their declared fields. It is the same mapping `start_and_wait` has always applied on its bare-runner fallback, which until now was private: a caller driving the blocking `execute()` itself had to re-read `pipe_output.model_extra` and re-validate the records by hand to reach `summarize_usage`, `collect_artifacts` or any parity field. `execute()` still returns `PipelexExecuteResult`, since that model carries the runner's whole typed envelope. The function is pure — no client, no network — and is documented in `docs/run-results.md` and `docs/run-usage.md`.
+
 ## [v0.10.1] - 2026-09-22
 
 ### Added

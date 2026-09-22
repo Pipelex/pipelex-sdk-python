@@ -4,6 +4,17 @@ A completed run hands back one object, `RunResults` (`pipelex_sdk/runs.py`), and
 
 Two paths produce it. Against the hosted API the SDK starts a durable run and polls `GET /v1/runs/{id}/results`, where the platform relays the run's S3 artifacts verbatim. Against a bare `pipelex-api` runner, which has no run store, the SDK falls back to the blocking `POST /v1/execute` and maps the runner's native `pipe_output` onto the same shape, lifting the artifacts that ride it onto their own fields. `start_and_wait` picks between the two from the `GET /v1/version` handshake, so a consumer does not choose.
 
+**Calling the blocking route yourself.** `execute()` returns a `PipelexExecuteResult` rather than a `RunResults`, because that model is the runner's whole typed envelope and nothing of it is thrown away. To read such a result through this page's fields, lift it: `results_from_execute(result)` (`pipelex_sdk/execute_result.py`) is the same mapping `start_and_wait` applies on its fallback, exposed for the caller who drives `execute()` directly. It is pure — no client, no network — and what it buys is everything written against `RunResults`: `summarize_usage`, `download_artifacts`, the graph pair and the three I/O artifacts, instead of re-reading `pipe_output.model_extra` by hand.
+
+```python
+from pipelex_sdk.execute_result import results_from_execute
+from pipelex_sdk.usage import summarize_usage
+
+execute_result = await client.execute(pipe_code="my_domain.my_pipe", mthds_contents=[source])
+results = results_from_execute(execute_result)
+print(results.main_stuff, summarize_usage(results).total_cost_usd)
+```
+
 | field | type | hosted (durable) path | bare-runner (blocking) path |
 |---|---|---|---|
 | `pipeline_run_id` | `str` | the run store's id | the runner's own id for the call |
@@ -160,7 +171,7 @@ The usage pair reports what each inference call consumed and cost — one `Token
 
 ## `pipe_output` — the runner's native output
 
-`pipe_output` is the bare runner's whole native output, and it is present on the blocking path only — the hosted results body carries no such key, so on that path it reads `None`. It is supplementary: `main_stuff`, the graph pair, the three I/O artifacts, the working memory and the usage pair are all lifted out of it onto fields that read the same on both paths, so a consumer that reads those fields keeps working against the hosted API. What `pipe_output` adds is the runner's output exactly as it arrived, typed as the standard's `DictPipeOutputAbstract`, which is extension-open — the runner's Pipelex extension fields, the `pipe_io_artifacts` envelope among them, stay reachable in their raw form through `model_extra`.
+`pipe_output` is the bare runner's whole native output, and it is present on the blocking path only — the hosted results body carries no such key, so on that path it reads `None`. It is supplementary: `main_stuff`, the graph pair, the three I/O artifacts, the working memory and the usage pair are all lifted out of it onto fields that read the same on both paths, so a consumer that reads those fields keeps working against the hosted API. What `pipe_output` adds is the runner's output exactly as it arrived, typed as the standard's `DictPipeOutputAbstract`, which is extension-open — the runner's Pipelex extension fields, the `pipe_io_artifacts` envelope among them, stay reachable in their raw form through `model_extra`. A caller holding an `execute()` result rather than a `RunResults` does that lift with `results_from_execute`, described at the top of this page, instead of reading the bag itself.
 
 ## Produced files
 
