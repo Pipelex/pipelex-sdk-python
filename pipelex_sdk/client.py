@@ -62,7 +62,7 @@ from pipelex_sdk.errors import (
     RunLifecycleUnavailableError,
     RunTimeoutError,
 )
-from pipelex_sdk.execute_result import PipelexExecuteResult
+from pipelex_sdk.execute_result import PipelexExecuteResult, results_from_execute
 from pipelex_sdk.prepare_inputs import PreparedInputs
 from pipelex_sdk.prepare_inputs import prepare_inputs as _prepare_inputs_impl
 from pipelex_sdk.product_models import (
@@ -937,7 +937,7 @@ class PipelexAPIClient(MthdsAPIClient):
             method_ref=method_ref,
             method_id=method_id,
         )
-        return _map_run_result_to_run_results(result)
+        return results_from_execute(result)
 
     # ── Pipelex product surface (hosted management routes) ─────────────────
     #
@@ -1590,53 +1590,6 @@ def _extract_run_status_from_message(message: str) -> RunStatus:
     if match and match.group(1) in _KNOWN_RUN_STATUS_NAMES:
         return RunStatus(match.group(1))
     return RunStatus.FAILED
-
-
-def _map_run_result_to_run_results(response: PipelexExecuteResult) -> RunResults:
-    """Map the protocol's blocking `POST /v1/execute` response onto the lifecycle's `RunResults`.
-
-    `response.main_stuff` resolves the main output out of the returned working memory (and raises
-    `MissingMainStuffError` if the run named no locatable main stuff), so the durable and blocking
-    paths hand back the same `main_stuff` content shape. The already-parsed `pipe_output` model is
-    carried over as-is — no `.model_dump()` round-trip — so the runner's whole envelope stays typed
-    (blocking only; the hosted path has none), and its `working_memory` is lifted onto the field of
-    that name, where the hosted path relays the artifact as its own key. The standard declares
-    `DictPipeOutputAbstract.working_memory` required, so that lift always carries a value here.
-
-    The graph pair (`graph_spec` / `graph_assembly_error`), the usage pair (`tokens_usages` /
-    `usage_assembly_error`), the `pipe_io_artifacts` envelope and its `pipe_io_artifacts_error` all
-    ride the execute response's extension-open `pipe_output` as Pipelex extension fields. Lifting
-    each onto its top-level field here is what makes `.graph_spec`, `.tokens_usages` and
-    `.pipe_io_contracts` read the same on the blocking and durable paths; `RunResults` validates the
-    raw records into `TokensUsageRecord`s and the raw artifacts into the standard's models on the
-    way in. The runner carries the three I/O artifacts in one envelope — they share a key set and
-    are always built together — where the hosted results body relays them as three sibling keys;
-    `RunResults` follows the hosted shape and this unwraps the envelope onto it. A null envelope
-    leaves all three `None`, beside whatever `pipe_io_artifacts_error` says about why.
-
-    Every lifted field is passed explicitly, so on this path each is in `model_fields_set` whether
-    or not the runner carried the key — the blocking path always answers, as the JS twin writes
-    `null` there; only the hosted path leaves a field unset when the body did not carry its key.
-    """
-    pipe_output_extras: dict[str, Any] = response.pipe_output.model_extra or {}
-    pipe_io_artifacts: dict[str, Any] = {}
-    raw_pipe_io_artifacts = pipe_output_extras.get("pipe_io_artifacts")
-    if isinstance(raw_pipe_io_artifacts, dict):
-        pipe_io_artifacts = cast("dict[str, Any]", raw_pipe_io_artifacts)
-    return RunResults(
-        pipeline_run_id=response.pipeline_run_id,
-        main_stuff=response.main_stuff,
-        graph_spec=pipe_output_extras.get("graph_spec"),
-        graph_assembly_error=pipe_output_extras.get("graph_assembly_error"),
-        pipe_io_contracts=pipe_io_artifacts.get("pipe_io_contracts"),
-        input_form=pipe_io_artifacts.get("input_form"),
-        output_form=pipe_io_artifacts.get("output_form"),
-        pipe_io_artifacts_error=pipe_output_extras.get("pipe_io_artifacts_error"),
-        working_memory=response.pipe_output.working_memory,
-        pipe_output=response.pipe_output,
-        tokens_usages=pipe_output_extras.get("tokens_usages"),
-        usage_assembly_error=pipe_output_extras.get("usage_assembly_error"),
-    )
 
 
 def _is_valid_base_url(value: str) -> bool:
