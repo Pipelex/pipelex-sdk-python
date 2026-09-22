@@ -17,9 +17,10 @@ shapes still exist in `mthds-python`; that duplication is deliberate and is
 removed from `mthds-python` in Phase 6, leaving these as the single home.
 
 Three things in this module are deliberately NOT owned here, and all reuse rather
-than redefine. `RunResults.pipe_output` is typed with the protocol's own
-`DictPipeOutputAbstract` wire model from `mthds` — a shared wire contract the
-`pipelex` runtime also builds on, not a lifecycle concept. The three I/O artifacts
+than redefine. `RunResults.pipe_output` and `RunResults.working_memory` are typed
+with the protocol's own `DictPipeOutputAbstract` and `DictWorkingMemoryAbstract`
+wire models from `mthds` — a shared wire contract the `pipelex` runtime also builds
+on, not a lifecycle concept. The three I/O artifacts
 on `RunResults` (`pipe_io_contracts`, `input_form`, `output_form`) are the standard's
 own, typed by importing `mthds.protocol` exactly as the validate report does — one
 declaration per language, nothing to drift from. `TokensUsageRecord` mirrors the
@@ -43,7 +44,7 @@ from mthds.protocol.input_form import InputForm
 from mthds.protocol.models import RunResultStart
 from mthds.protocol.output_form import OutputForm
 from mthds.protocol.pipe_io_contracts import PipeIOContracts
-from mthds.runners.api.models import DictPipeOutputAbstract
+from mthds.runners.api.models import DictPipeOutputAbstract, DictWorkingMemoryAbstract
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
@@ -220,8 +221,8 @@ class RunResults(BaseModel):
     run's `main_stuff_name`, so both paths deliver the same content shape.
     Consumers read `main_stuff` directly — no shape-guessing. A completed run that
     cannot deliver a main stuff raises `MissingMainStuffError`. Extension-open
-    (`extra="allow"`): any other server artifact (e.g. the hosted `working_memory`)
-    is preserved without being named by the SDK.
+    (`extra="allow"`): any other server artifact the SDK does not name is preserved
+    on `model_extra` rather than dropped.
 
     Every field but the first two is optional, and two readings of an optional field
     are distinct on purpose. A key the hosted body did not carry is not in
@@ -285,10 +286,22 @@ class RunResults(BaseModel):
     #: "this run described none". Lifted off `pipe_output` on the blocking path; absent on the hosted
     #: path until the platform writes and relays it.
     pipe_io_artifacts_error: str | None = None
+    #: The run's whole working memory — every named stuff it held when it finished, the inputs it was
+    #: given and the intermediates it produced as well as the main output, as the standard's
+    #: `DictWorkingMemoryAbstract` (`root` keyed by stuff name, `aliases` mapping a role such as
+    #: `main_stuff` onto one of those names). It reaches the client on both paths: the hosted path
+    #: relays the `working_memory.json` artifact as its own key, and on the blocking path the SDK
+    #: lifts it off `pipe_output.working_memory`, which the standard declares as a required field —
+    #: so it is always set there. `None` on the hosted path when the platform relayed `null` (the
+    #: artifact was not written); absent from `model_fields_set`, and `None` too, when the body did
+    #: not carry the key at all. Extension-open at every level, so a runner's per-stuff extras
+    #: (`stuff_code`, `stuff_name`, …) ride `model_extra` rather than being dropped.
+    working_memory: DictWorkingMemoryAbstract | None = None
     #: Bare runner's native pipe output — the full working memory, blocking-execute path only;
     #: `None` on the hosted path. Supplementary: `main_stuff`, the graph pair, the three I/O
-    #: artifacts and the usage pair are all lifted out of it onto fields that read the same on both
-    #: paths; kept for consumers that need the whole working memory. Extension-open, so the Pipelex
+    #: artifacts, the working memory and the usage pair are all lifted out of it onto fields that
+    #: read the same on both paths; kept for consumers that want the runner's envelope exactly as it
+    #: arrived, `pipeline_run_id` and all. Extension-open, so the Pipelex
     #: extension fields the runner rides on it stay reachable via `model_extra` in their **raw**
     #: form — the usage pair, the graph pair, the `pipe_io_artifacts` envelope. Read the lifted
     #: fields instead: same data, validated, and present on the hosted path too.

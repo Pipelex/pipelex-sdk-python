@@ -1598,8 +1598,10 @@ def _map_run_result_to_run_results(response: PipelexExecuteResult) -> RunResults
     `response.main_stuff` resolves the main output out of the returned working memory (and raises
     `MissingMainStuffError` if the run named no locatable main stuff), so the durable and blocking
     paths hand back the same `main_stuff` content shape. The already-parsed `pipe_output` model is
-    carried over as-is — no `.model_dump()` round-trip — so the full working memory stays typed
-    (blocking only; the hosted path has none).
+    carried over as-is — no `.model_dump()` round-trip — so the runner's whole envelope stays typed
+    (blocking only; the hosted path has none), and its `working_memory` is lifted onto the field of
+    that name, where the hosted path relays the artifact as its own key. The standard declares
+    `DictPipeOutputAbstract.working_memory` required, so that lift always carries a value here.
 
     The graph pair (`graph_spec` / `graph_assembly_error`), the usage pair (`tokens_usages` /
     `usage_assembly_error`), the `pipe_io_artifacts` envelope and its `pipe_io_artifacts_error` all
@@ -1630,6 +1632,7 @@ def _map_run_result_to_run_results(response: PipelexExecuteResult) -> RunResults
         input_form=pipe_io_artifacts.get("input_form"),
         output_form=pipe_io_artifacts.get("output_form"),
         pipe_io_artifacts_error=pipe_output_extras.get("pipe_io_artifacts_error"),
+        working_memory=response.pipe_output.working_memory,
         pipe_output=response.pipe_output,
         tokens_usages=pipe_output_extras.get("tokens_usages"),
         usage_assembly_error=pipe_output_extras.get("usage_assembly_error"),
