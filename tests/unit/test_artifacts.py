@@ -268,6 +268,12 @@ class TestArtifacts:
 
     # ── resolve_artifacts ────────────────────────────────────────────
 
+    def test_caps_the_length_after_the_guessed_extension(self) -> None:
+        name = artifact_filename(f"pipelex-storage://org_1/{'a' * 200}", "image/jpeg", 0)
+
+        assert len(name) <= 128
+        assert name.endswith(".jpg")
+
     def test_resolves_a_list_within_the_bound_in_one_call_and_keeps_request_order(self) -> None:
         client = _FakeClient(resolve=_resolver(_resolved(_URI_PNG), _refused(_URI_PDF)))
         items = asyncio.run(resolve_artifacts(client, [_URI_PNG, _URI_PDF, _URI_PNG]))
@@ -356,7 +362,7 @@ class TestArtifacts:
         assert asyncio.run(_read(FetchArtifactOptions(allow_http=True))) == _PDF_BYTES
         assert len(seen) == 1
 
-    @pytest.mark.parametrize("url", ["ftp://store/x.pdf", "not-a-url", "https://user:pass@store/x.pdf"])
+    @pytest.mark.parametrize("url", ["ftp://store/x.pdf", "not-a-url", "https://user:pass@store/x.pdf", "https://[::1", "https://host:abc/file"])
     def test_refuses_an_unusable_link_before_any_request(self, mocker: MockerFixture, url: str) -> None:
         client = _FakeClient(resolve=_resolver(_resolved(_URI_PDF, url=url)))
         seen = _patch_storage(mocker, _serving(_PDF_BYTES))
@@ -469,16 +475,17 @@ class TestArtifacts:
         assert "content-encoding" not in headers
         assert "content-length" not in headers
 
-    def test_keeps_an_encoding_httpx_did_not_decode_beside_its_body(self, mocker: MockerFixture) -> None:
+    @pytest.mark.parametrize("coding", ["exi", "x-gzip"])
+    def test_keeps_an_encoding_httpx_did_not_decode_beside_its_body(self, mocker: MockerFixture, coding: str) -> None:
         client = _FakeClient(resolve=_resolver(_resolved(_URI_PDF)))
-        _patch_storage(mocker, _serving(_PDF_BYTES, headers={"content-type": "application/pdf", "content-encoding": "exi"}))
+        _patch_storage(mocker, _serving(_PDF_BYTES, headers={"content-type": "application/pdf", "content-encoding": coding}))
 
         async def _read() -> httpx.Headers:
             async with fetch_artifact(client, _URI_PDF) as stream:
                 return stream.headers
 
         headers = asyncio.run(_read())
-        assert headers["content-encoding"] == "exi"
+        assert headers["content-encoding"] == coding
         assert headers["content-length"] == str(len(_PDF_BYTES))
 
     # ── download_artifacts ───────────────────────────────────────────
@@ -757,7 +764,7 @@ class TestArtifacts:
         assert error.code == "too_large"
         assert list(target.iterdir()) == []
 
-    def test_enforces_the_total_cap_and_skips_the_items_not_yet_started(self, mocker: MockerFixture, tmp_path: Path) -> None:
+    def test_enforces_the_total_cap_on_each_later_item_by_its_own_size(self, mocker: MockerFixture, tmp_path: Path) -> None:
         third = "pipelex-storage://org_1/runs/01J/outputs/third.pdf"
         client = _FakeClient(resolve=_resolver(_resolved(_URI_PDF), _resolved(_URI_PNG), _resolved(third)))
         _patch_storage(mocker, _serving(b"x" * 8))
@@ -772,9 +779,32 @@ class TestArtifacts:
 
         codes = [artifact.error.code if artifact.error is not None else None for artifact in verdict.artifacts]
         assert codes == [None, "total_limit_exceeded", "total_limit_exceeded"]
-        skipped = verdict.artifacts[2].error
-        assert skipped is not None
-        assert skipped.detail.startswith("Skipped")
+        refused = verdict.artifacts[2].error
+        assert refused is not None
+        assert refused.detail.startswith("Saving this")
+        assert len(verdict.saved_paths) == 1
+
+    def test_a_refused_item_never_skips_a_smaller_one_that_still_fits(self, mocker: MockerFixture, tmp_path: Path) -> None:
+        big = "pipelex-storage://org_1/runs/01J/outputs/big.pdf"
+        small = "pipelex-storage://org_1/runs/01J/outputs/small.pdf"
+        client = _FakeClient(resolve=_resolver(_resolved(big), _resolved(small)))
+
+        def _sized(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"x" * (16 if "big" in request.url.path else 2))
+
+        _patch_storage(mocker, _sized)
+        verdict = asyncio.run(
+            download_artifacts(
+                client,
+                dir_path=tmp_path / "out",
+                results=_results({"items": [_content(big), _content(small)]}),
+                options=DownloadArtifactsOptions(concurrency=1, max_total_bytes=10),
+            )
+        )
+
+        codes = [artifact.error.code if artifact.error is not None else None for artifact in verdict.artifacts]
+        assert codes == ["total_limit_exceeded", None]
+        assert verdict.artifacts[1].size == 2
         assert len(verdict.saved_paths) == 1
 
     def test_enforces_the_total_cap_mid_stream_on_an_undeclared_body(self, mocker: MockerFixture, tmp_path: Path) -> None:

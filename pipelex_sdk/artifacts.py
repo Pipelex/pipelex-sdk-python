@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast
 from urllib.parse import unquote, urlsplit
 
 import httpx
+from httpx._decoders import SUPPORTED_DECODERS  # ruff: ignore[import-private-name]
 from mthds.protocol.exceptions import PipelineRequestError
 from pydantic import BaseModel, ValidationError
 
@@ -64,7 +65,7 @@ from pipelex_sdk.errors import (
 from pipelex_sdk.runs import RunResultCompleted, RunResultFailed, RunResultRunning, RunResults
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator
     from contextlib import AbstractAsyncContextManager
 
     from pipelex_sdk.runs import RunResultState
@@ -102,12 +103,13 @@ _EXTENSION_BY_CONTENT_TYPE: dict[str, str] = {
     "application/json": ".json",
 }
 
-#: The codings httpx decodes for us. A coding it did not decode keeps its header, since the bytes
-#: handed on are still encoded.
-_DECODED_CODINGS = frozenset({"gzip", "x-gzip", "deflate", "br", "zstd"})
+#: The codings the installed httpx decodes for us, read from its own decoder table (the one place
+#: that knows): `br` and `zstd` join it only when their optional packages are installed, and
+#: `x-gzip` never does. A coding it did not decode keeps its header, since the bytes handed on are
+#: still encoded.
+_DECODED_CODINGS = frozenset(SUPPORTED_DECODERS) - {"identity"}
 
 _SKIPPED_CREDENTIAL = "The download stopped on a credential failure before this artifact was fetched."
-_SKIPPED_TOTAL = "Skipped: the download's total byte limit was reached by an earlier artifact."
 
 
 # ── The client surfaces the operations need ──────────────────────────
@@ -199,6 +201,12 @@ def artifact_filename(uri: str, content_type: str | None, index: int) -> str:
     if not name:
         name = f"artifact-{index + 1}"
 
+    if not _extension_of(name) and content_type is not None:
+        guessed = _EXTENSION_BY_CONTENT_TYPE.get(content_type.split(";")[0].strip().lower())
+        if guessed is not None:
+            name += guessed
+
+    # The cap comes last, so a guessed extension is inside it like any other.
     if len(name) > _MAX_FILENAME_LENGTH:
         extension = _extension_of(name)
         # The extension is kept only if there is room left for a stem; a pathological extension is
@@ -207,11 +215,6 @@ def artifact_filename(uri: str, content_type: str | None, index: int) -> str:
             name = name[: _MAX_FILENAME_LENGTH - len(extension)] + extension
         else:
             name = name[:_MAX_FILENAME_LENGTH]
-
-    if not _extension_of(name) and content_type is not None:
-        guessed = _EXTENSION_BY_CONTENT_TYPE.get(content_type.split(";")[0].strip().lower())
-        if guessed is not None:
-            name += guessed
     return name
 
 
@@ -224,7 +227,7 @@ def _extension_of(name: str) -> str:
 # ── resolve_artifacts ────────────────────────────────────────────────
 
 
-async def resolve_artifacts(client: BulkResolveClient, uris: Sequence[str]) -> list[ResolvedArtifact]:
+async def resolve_artifacts(client: BulkResolveClient, uris: list[str]) -> list[ResolvedArtifact]:
     """Resolve a list of references through the bulk route, chunked at `BULK_RESOLVE_MAX_URIS` per
     request, and answer one `ResolvedArtifact` per reference in request order, duplicates included.
 
@@ -333,6 +336,10 @@ async def _stream_resolved_url(
                         msg = f"The artifact is {_format_mib(declared)}, over the {_format_mib(bounds.max_bytes)} cap."
                         raise ArtifactFetchError(msg, uri=uri, code="too_large", status=response.status_code)
                     yield ArtifactStream(uri, response, bounds.max_bytes)
+            except httpx.InvalidURL as exc:
+                # Not an `HTTPError`: httpx refuses the link at request build, before any transport.
+                msg = "The platform resolved the reference to a link that is not a valid absolute URL."
+                raise ArtifactFetchError(msg, uri=uri, code="unsupported_url") from exc
             except httpx.TimeoutException as exc:
                 msg = f"Fetching the artifact timed out after {bounds.timeout_seconds}s."
                 raise ArtifactFetchError(msg, uri=uri, code="timeout") from exc
@@ -411,7 +418,11 @@ def _require_positive(name: str, value: float) -> None:
 
 def _checked_url(uri: str, download_url: str, *, allow_http: bool) -> str:
     """The boundary-approved link, or the typed refusal saying why it is not fetched."""
-    parsed = urlsplit(download_url)
+    try:
+        parsed = urlsplit(download_url)
+    except ValueError as exc:
+        msg = "The platform resolved the reference to a link that is not a valid absolute URL."
+        raise ArtifactFetchError(msg, uri=uri, code="unsupported_url") from exc
     if not parsed.scheme or not parsed.netloc:
         msg = "The platform resolved the reference to a link that is not a valid absolute URL."
         raise ArtifactFetchError(msg, uri=uri, code="unsupported_url")
@@ -498,14 +509,12 @@ class _DownloadBudget:
     `committed` is the bytes of every file saved or being saved, a file in flight counting as the
     larger of its declared length and what it has written. Reserving the declared length up front is
     what stops parallel files from each passing the check and then all being cut together; a file
-    that is unlinked gives its share back. `saved` is the bytes of the files saved so far: the limit
-    is reached for good, and the items not yet started skipped, only when those leave no room.
+    that is unlinked gives its share back. Every item is checked against the room that leaves, on
+    its own declared length: one refused item never skips a smaller one that still fits.
     """
 
     max_total_bytes: int
     committed: int = 0
-    saved: int = 0
-    limit_reached: bool = False
     credential_failure: ApiResponseError | None = None
 
 
@@ -672,8 +681,6 @@ async def _process_one(
     async with semaphore:
         if budget.credential_failure is not None:
             return _item_error(uri, entry.content_type, "aborted", _SKIPPED_CREDENTIAL)
-        if budget.limit_reached:
-            return _item_error(uri, entry.content_type, "total_limit_exceeded", _SKIPPED_TOTAL)
         if entry.error is None and _is_expired(entry.expires_at):
             try:
                 entry = (await resolve_artifacts(client, [uri]))[0]
@@ -683,7 +690,7 @@ async def _process_one(
                     return _item_error(uri, entry.content_type, "aborted", _SKIPPED_CREDENTIAL)
                 msg = f"The expired link could not be re-resolved: {exc}."
                 return _item_error(uri, entry.content_type, "resolve_failed", msg)
-            except (PipelineRequestError, ValidationError) as exc:
+            except (PipelineRequestError, ValidationError, ValueError) as exc:
                 # Anything else the re-resolve can fail with — an unreachable host, a malformed
                 # answer, a body that does not parse — is this one reference's error, never the
                 # whole download's: the other references already have their links.
@@ -781,8 +788,6 @@ async def _save_one(
             declared = _declared_length(stream.headers)
             reserved = declared if declared is not None else 0
             if budget.committed + reserved > budget.max_total_bytes:
-                if budget.saved + reserved > budget.max_total_bytes:
-                    budget.limit_reached = True
                 msg = (
                     f"Saving this {_format_mib(reserved)} artifact would take the download past its "
                     f"{_format_mib(budget.max_total_bytes)} total limit."
@@ -792,7 +797,9 @@ async def _save_one(
             share_taken = True
 
             try:
-                target = await asyncio.to_thread(_open_unique_file, target_dir, artifact_filename(uri, content_type, index))
+                # Synchronous on purpose: a cancellation landing inside a worker thread would leave a file
+                # the handler below cannot see, and an exclusive create is not worth a thread.
+                target = _open_unique_file(target_dir, artifact_filename(uri, content_type, index))
             except OSError as exc:
                 budget.committed -= share()
                 share_taken = False
@@ -803,8 +810,6 @@ async def _save_one(
                 # Only the bytes past this file's reservation are new to the total.
                 growth = max(written + len(chunk), reserved) - share()
                 if budget.committed + growth > budget.max_total_bytes:
-                    if budget.saved + written + len(chunk) > budget.max_total_bytes:
-                        budget.limit_reached = True
                     target.remove()
                     budget.committed -= share()
                     share_taken = False
@@ -851,7 +856,6 @@ async def _save_one(
 
     # A body shorter than it declared gives the unused reservation back.
     budget.committed -= share() - written
-    budget.saved += written
     return DownloadedArtifact(uri=uri, path=str(target.path), content_type=content_type, size=written, error=None)
 
 

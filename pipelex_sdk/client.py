@@ -105,7 +105,7 @@ from pipelex_sdk.upload import upload_file as _upload_file_impl
 from pipelex_sdk.validation_models import PipelexValidationResultAdapter, ValidationErrorItem
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
@@ -1136,7 +1136,7 @@ class PipelexAPIClient(MthdsAPIClient):
         """
         return BulkResolvedStorageUrls.model_validate(await self._request_product("POST", "resolve-storage-url/bulk", body={"uris": uris}))
 
-    async def resolve_artifacts(self, uris: Sequence[str]) -> list[ResolvedArtifact]:
+    async def resolve_artifacts(self, uris: list[str]) -> list[ResolvedArtifact]:
         """Resolve a whole list of `pipelex-storage://` references through the bulk route, chunked at
         its bound, answering one `ResolvedArtifact` per reference in request order with per-reference
         failure as a value. The reading layer of the artifact stack: pair it with `collect_artifacts`

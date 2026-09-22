@@ -129,7 +129,7 @@ class DownloadArtifactsOptions(FetchArtifactOptions):
     #: How many artifacts are in flight at once. Default 4.
     concurrency: int = DEFAULT_DOWNLOAD_CONCURRENCY
     #: Cap on the bytes written by the whole call. Default 4 GiB. The item that would cross it is an
-    #: item error, and the items not yet started are skipped with the same reason.
+    #: item error; every later item is checked against the room the saved files leave.
     max_total_bytes: int = DEFAULT_DOWNLOAD_MAX_TOTAL_BYTES
 
 
