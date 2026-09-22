@@ -160,6 +160,18 @@ class TestRuns:
         assert priced_at_zero.cost == 0.0
         assert priced_at_zero.cost is not None
 
+    @pytest.mark.parametrize("cost", ["0.5", True, "NaN", float("nan"), float("inf")])
+    def test_tokens_usage_record_rejects_a_cost_that_is_not_a_finite_number(self, cost: Any) -> None:
+        """`cost` is strict and finite: a coerced or non-finite value fails the record rather than reaching a sum."""
+        with pytest.raises(ValidationError):
+            TokensUsageRecord.model_validate({**_RATED_RECORD, "cost": cost})
+
+    def test_tokens_usage_record_accepts_an_integer_cost(self) -> None:
+        """A JSON integer is a number, and strict mode keeps reading it as one."""
+        priced = TokensUsageRecord.model_validate({**_RATED_RECORD, "cost": 1})
+
+        assert priced.cost == 1.0
+
     def test_run_results_validates_usage_records(self) -> None:
         """A results body's raw records become typed records; the null branch stays None."""
         results = RunResults.model_validate(
