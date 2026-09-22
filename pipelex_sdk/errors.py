@@ -1,7 +1,7 @@
 """Pipelex SDK errors — the transport and response errors raised by `PipelexAPIClient`.
 
 These are the error classes the Pipelex hosted client adds on top of the `mthds`
-protocol base. Both derive from the protocol base `PipelineRequestError`
+protocol base. They derive from the protocol base `PipelineRequestError`
 (`mthds.protocol.exceptions`), mirroring `pipelex-sdk-js/src/errors.ts`:
 
 - `ApiUnreachableError` — the HTTP exchange never produced a response (DNS / connect
@@ -25,6 +25,10 @@ The codegen tree errors (`CodegenError`, `CodegenLockError`) are not request err
 raised by `pipelex_sdk.codegen_writer`, `pipelex_sdk.codegen_check`, `pipelex_sdk.codegen_lock` and
 `pipelex_sdk.codegen_stamp` over
 bytes and a directory, so they derive from `Exception` rather than from the protocol base.
+
+`FieldNotIncludedError` is raised by `pipelex_sdk.usage` over an already-validated `RunResults`
+whose body did not carry a key the operation needs. Like `MissingMainStuffError`, it reports a
+results read that did not deliver what the caller reads, so it stays under the protocol base.
 """
 
 from __future__ import annotations
@@ -262,3 +266,16 @@ class CodegenLockError(CodegenError):
     plain `CodegenError`: it is a containment violation, not corrupt state a writer may recover from
     by replacing the lock.
     """
+
+
+class FieldNotIncludedError(PipelineRequestError):
+    """A `RunResults` field this operation needs was not carried by the results body it was read from.
+
+    Raised when the field is absent from `results.model_fields_set` — the body did not carry the key —
+    as opposed to relayed as `None`, which is a value. Carries the field's name in `field_name`.
+    """
+
+    def __init__(self, field_name: str) -> None:
+        self.field_name = field_name
+        msg = f"RunResults field `{field_name}` was not in the results body: the read did not carry it"
+        super().__init__(msg)
