@@ -1,0 +1,32 @@
+pipelex_sdk/product_models.py
+  s_414897d69b563e::t_7a02e79725e2c2 209-212
+  s_414897d69b563e::t_5488c79ba23b88 151-169
+  s_414897d69b563e::t_5b3725bc7e97f9 188-196
+  s_414897d69b563e::t_21d2a9375edce9 93-96,106-113
+CHANGELOG.md
+  s_414897d69b563e::t_1b0eea07b90b64 7-11
+tests/unit/test_method_source.py
+  s_414897d69b563e::t_46877568f2c07d 104-112,118,121-126,129,131
+tests/unit/test_method_files.py
+  s_414897d69b563e::t_27b87d8e4ba43f 11,14,16-20
+  s_414897d69b563e::t_418fca7ce86edd 62-95
+docs/architecture.md
+  s_414897d69b563e::t_59e642d94d29c2 232-236
+  s_414897d69b563e::t_321e6f9ce9d239 280
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "f84fd452868c1838c756eccd1328796cde616fad",
+  "prompts": {},
+  "sessions": {
+    "s_414897d69b563e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d629fd4-9a39-4cbd-a222-ee7742869d24",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Louis Choquel <louis@pipelex.com>"
+    }
+  }
+}
