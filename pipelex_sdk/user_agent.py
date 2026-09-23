@@ -36,9 +36,11 @@ MAX_USER_AGENT_LENGTH = 512
 _TOKEN_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 # A comment parameter value is a `token` or a `name/version` product.
 _PARAM_VALUE_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+(/[!#$%&'*+\-.^_`|~0-9A-Za-z]+)?$")
-# A URL rendered as `+url` inside a comment: no whitespace or control character, and none of the
-# characters that would close the comment or start a new parameter.
-_URL_PATTERN = re.compile(r"^[^\s()\\;\x00-\x1f\x7f]+$")
+# A URL rendered as `+url` inside a comment: visible ASCII only (so no whitespace, control or
+# non-ASCII character, which httpx could not encode into the header), and none of the characters
+# that would close the comment or start a new parameter.
+# The class is `!`..`~` (0x21-0x7E) with `(` `)` `;` `\` cut out of it.
+_URL_PATTERN = re.compile(r"^[!-'*-:<-\[\]-~]+$")
 
 
 def is_token(value: str) -> bool:
@@ -58,8 +60,9 @@ class AppInfo(BaseModel):
     """The integrator's own name, placed before this SDK's tokens in the `User-Agent` (Stripe's `appInfo`).
 
     It renders as `name/version (<details>; +url)`, dropping the `/version` and the comment when
-    they are empty. An invalid field raises `ValueError` (pydantic's `ValidationError`, a
-    `ValueError` subclass) at construction — it is never silently dropped or rewritten.
+    they are empty. An empty `version` or `url` counts as absent and is stored as `None`. An
+    invalid field raises `ValueError` (pydantic's `ValidationError`, a `ValueError` subclass) at
+    construction — it is never silently dropped or rewritten.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -80,6 +83,8 @@ class AppInfo(BaseModel):
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: str | None) -> str | None:
+        if value == "":
+            return None
         if value is not None and not is_token(value):
             msg = f"app_info.version {value!r} must be an RFC 9110 token (letters, digits and !#$%&'*+-.^_`|~ only)"
             raise ValueError(msg)
@@ -88,8 +93,10 @@ class AppInfo(BaseModel):
     @field_validator("url")
     @classmethod
     def _validate_url(cls, value: str | None) -> str | None:
+        if value == "":
+            return None
         if value is not None and _URL_PATTERN.fullmatch(value) is None:
-            msg = f"app_info.url {value!r} must be a non-empty URL without whitespace, parentheses, backslashes or semicolons"
+            msg = f"app_info.url {value!r} must be visible ASCII without whitespace, parentheses, backslashes or semicolons"
             raise ValueError(msg)
         return value
 
@@ -122,13 +129,16 @@ def _mthds_version() -> str | None:
 
 
 def _runtime_token() -> str:
-    """`python/<major.minor.micro> (<os>; <arch>)`, dropping the comment when the platform is not readable as tokens."""
+    """`python/<major.minor.micro> (<os>; <arch>)`, keeping each platform part readable as a token.
+
+    A part that is empty or not a token is left out, and the comment with it when neither is readable,
+    matching `mthds-python`'s runtime token.
+    """
     major, minor, micro = sys.version_info[:3]
     runtime = f"python/{major}.{minor}.{micro}"
-    os_name = platform.system().lower()
-    arch = platform.machine()
-    if is_token(os_name) and is_token(arch):
-        return f"{runtime} ({os_name}; {arch})"
+    platform_parts = [part for part in (platform.system().lower(), platform.machine()) if is_token(part)]
+    if platform_parts:
+        return f"{runtime} ({'; '.join(platform_parts)})"
     return runtime
 
 

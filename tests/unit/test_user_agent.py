@@ -46,6 +46,12 @@ class TestUserAgent:
     def test_app_info_renders_name_version_details_url(self, app_info: AppInfo, expected: str) -> None:
         assert app_info.render() == expected
 
+    def test_app_info_empty_optional_fields_count_as_absent(self) -> None:
+        app_info = AppInfo(name="acme", version="", url="", details=[])
+        assert app_info.version is None
+        assert app_info.url is None
+        assert app_info.render() == "acme"
+
     def test_app_info_details_default_is_empty(self) -> None:
         assert AppInfo(name="acme").details == []
 
@@ -56,12 +62,23 @@ class TestUserAgent:
         with pytest.raises(ValueError, match=r"app_info\.name"):
             AppInfo(name=name)
 
-    @pytest.mark.parametrize("app_version", ["", "1 4", "1/4", "1;4"])
+    @pytest.mark.parametrize("app_version", ["1 4", "1/4", "1;4"])
     def test_app_info_refuses_invalid_version(self, app_version: str) -> None:
         with pytest.raises(ValueError, match=r"app_info\.version"):
             AppInfo(name="acme", version=app_version)
 
-    @pytest.mark.parametrize("url", ["", "https://acme.example/a b", "https://acme.example/(x)", "https://acme.example;x", "https://acme.example\n"])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://acme.example/a b",
+            "https://acme.example/(x)",
+            "https://acme.example;x",
+            "https://acme.example\\x",
+            "https://acme.example\n",
+            "https://acme.example/\x01",
+            "https://café.example",
+        ],
+    )
     def test_app_info_refuses_invalid_url(self, url: str) -> None:
         with pytest.raises(ValueError, match=r"app_info\.url"):
             AppInfo(name="acme", url=url)
@@ -106,8 +123,15 @@ class TestUserAgent:
         user_agent = build_user_agent(AppInfo(name="acme-invoicer", version="1.4.0"))
         assert user_agent == "acme-invoicer/1.4.0 pipelex-sdk-python/0.11.0 mthds-python/0.15.0 python/3.12.4 (linux; x86_64)"
 
+    def test_unreadable_platform_part_is_left_out(self, mocker: MockerFixture) -> None:
+        mocker.patch("pipelex_sdk.user_agent.platform.system", return_value="")
+        mocker.patch("pipelex_sdk.user_agent.platform.machine", return_value="x86_64")
+        user_agent = build_user_agent()
+        assert re.search(r" python/\d+\.\d+\.\d+ \(x86_64\)$", user_agent)
+
     def test_unreadable_platform_drops_the_comment(self, mocker: MockerFixture) -> None:
         mocker.patch("pipelex_sdk.user_agent.platform.system", return_value="")
+        mocker.patch("pipelex_sdk.user_agent.platform.machine", return_value="two words")
         user_agent = build_user_agent()
         assert re.search(r" python/\d+\.\d+\.\d+$", user_agent)
 

@@ -4,7 +4,7 @@
 
 ### Added
 
-- **`User-Agent` client identification and `app_info`**: every request `PipelexAPIClient` sends, authenticated or anonymous, now carries a `User-Agent` of the form `[app_info] pipelex-sdk-python/<version> mthds-python/<version> python/<x.y.z> (<os>; <arch>)`, following the workspace client-identification spec, so the platform can attribute SDK traffic in its analytics. The new `app_info` constructor argument takes a `pipelex_sdk.user_agent.AppInfo` (`name`, `version`, `url`, `details`, shaped like Stripe's `appInfo`) that puts the integrator's own name first; an invalid token raises `ValueError` at construction, and the built header is readable as `client.user_agent`. See `docs/client-identification.md`.
+- **`User-Agent` client identification and `app_info`**: every request `PipelexAPIClient` sends, authenticated or anonymous, now carries a `User-Agent` of the form `[app_info] pipelex-sdk-python/<version> mthds-python/<version> python/<x.y.z> (<os>; <arch>)`, following the workspace client-identification spec, so the platform can attribute SDK traffic in its analytics. The new `app_info` constructor argument takes a `pipelex_sdk.user_agent.AppInfo` (`name`, `version`, `url`, `details`, shaped like Stripe's `appInfo`) that puts the integrator's own name first; an invalid token raises `ValueError` at construction, an empty `version`, `url` or `details` counts as absent, and the built header is readable as `client.user_agent`. See `docs/client-identification.md`.
 
 ## [v0.10.2] - 2026-09-22
 
