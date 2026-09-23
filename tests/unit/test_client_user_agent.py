@@ -2,15 +2,15 @@
 
 import asyncio
 import os
-from importlib.metadata import version
 from typing import Any
 
 import httpx
 import pytest
+from mthds.version import __version__ as mthds_version
 from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
-from pipelex_sdk.user_agent import AppInfo, build_user_agent
+from pipelex_sdk.user_agent import AppInfo
 from pipelex_sdk.version import __version__
 
 _BASE_URL = "http://localhost:8081"
@@ -62,16 +62,15 @@ class TestClientUserAgent:
     def test_header_carries_sdk_and_mthds_tokens(self, captured: list[httpx.Request]) -> None:
         client = PipelexAPIClient(base_url=_BASE_URL)
         asyncio.run(self._health_then_me(client))
-        assert captured[0].headers["User-Agent"].startswith(f"pipelex-sdk-python/{__version__} mthds-python/{version('mthds')} python/")
+        assert captured[0].headers["User-Agent"].startswith(f"pipelex-sdk-python/{__version__} mthds-python/{mthds_version} python/")
 
     def test_app_info_leads_the_header(self, captured: list[httpx.Request]) -> None:
-        app_info = AppInfo(name="acme-invoicer", version="1.4.0", details=["batch"], url="https://acme.example")
+        app_info = AppInfo(name="acme-invoicer", version="1.4.0", details=("batch",), url="https://acme.example")
         client = PipelexAPIClient(base_url=_BASE_URL, app_info=app_info)
         asyncio.run(self._health_then_me(client))
         assert client.app_info == app_info
-        assert client.user_agent == build_user_agent(app_info)
         assert captured[1].headers["User-Agent"].startswith(f"acme-invoicer/1.4.0 (batch; +https://acme.example) pipelex-sdk-python/{__version__} ")
 
     def test_over_long_app_info_fails_at_construction(self) -> None:
-        with pytest.raises(ValueError, match="512-character ceiling"):
+        with pytest.raises(ValueError, match="512-character limit"):
             PipelexAPIClient(base_url=_BASE_URL, app_info=AppInfo(name="a" * 600))

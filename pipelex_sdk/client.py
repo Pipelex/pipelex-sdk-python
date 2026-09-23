@@ -102,7 +102,7 @@ from pipelex_sdk.runs import (
 )
 from pipelex_sdk.upload import UploadRecord, UploadSource
 from pipelex_sdk.upload import upload_file as _upload_file_impl
-from pipelex_sdk.user_agent import AppInfo, build_user_agent
+from pipelex_sdk.user_agent import AppInfo, pipelex_sdk_token
 from pipelex_sdk.validation_models import PipelexValidationResultAdapter, ValidationErrorItem
 
 if TYPE_CHECKING:
@@ -233,8 +233,8 @@ class PipelexAPIClient(MthdsAPIClient):
     match the JS SDK exactly. The base URL is validated host-only (no
     path/query/fragment/credentials; http/https only). `request_timeout_seconds` sets the
     per-instance blocking-execute ceiling the inherited protocol routes read (default 20 min).
-    `app_info` (an `AppInfo`) puts the integrator's own name before this SDK's tokens in the
-    `User-Agent` every request carries (see `pipelex_sdk.user_agent`).
+    `app_info` (an `AppInfo`, the `mthds` class re-exported by `pipelex_sdk.user_agent`) puts the
+    integrator's own name before this SDK's tokens in the `User-Agent` every request carries.
     """
 
     def __init__(
@@ -297,14 +297,20 @@ class PipelexAPIClient(MthdsAPIClient):
         self.request_timeout_seconds: float = (
             request_timeout_seconds if request_timeout_seconds is not None else self._DEFAULT_REQUEST_TIMEOUT_SECONDS
         )
-        #: The integrator's own name, placed before this SDK's tokens in the `User-Agent`.
-        self.app_info: AppInfo | None = app_info
-        #: The `User-Agent` sent on every request (spec: `docs/specs/client-identification.md`),
-        #: built once here so an over-long header fails at construction, not on the first call.
-        self.user_agent: str = build_user_agent(app_info)
+        # This `__init__` does not call the base's (whose resolver it must not read), so it
+        # calls the base's seam instead: `init_user_agent` sets `app_info` and builds
+        # `user_agent` from `user_agent_sdk_tokens()` below, once, so an over-long header
+        # fails at construction rather than on the first call.
+        self.init_user_agent(app_info)
         self.client: httpx.AsyncClient | None = None
         #: Cached `/v1/version` handshake outcome — whether the durable lifecycle is served.
         self._lifecycle_available: bool | None = None
+
+    @classmethod
+    @override
+    def user_agent_sdk_tokens(cls) -> tuple[str, ...]:
+        """This SDK's token in front of the base's: `pipelex-sdk-python/<v> mthds-python/<v>`."""
+        return (pipelex_sdk_token(), *super().user_agent_sdk_tokens())
 
     @override
     def start_client(self) -> PipelexAPIClient:
