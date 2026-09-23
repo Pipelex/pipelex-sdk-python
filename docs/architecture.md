@@ -42,6 +42,8 @@ Resolved at construction time, Pipelex-only — the SDK **never** consults the `
 
 A token is **optional** (anonymous access is allowed; protocol routes work against anonymous bare runners, product routes return `401`). The base URL is validated host-only (no path/query/fragment/embedded credentials; http/https only).
 
+`app_info` (constructor argument, an `AppInfo`) names the integrator in the `User-Agent`; it is validated when constructed, and the whole header is built and length-checked when the client is constructed ([`client-identification.md`](client-identification.md)).
+
 `request_timeout_seconds` (constructor argument, default `1200.0` — 20 min) sets the per-instance blocking-execute ceiling the inherited protocol routes (`execute` / `start` / `validate` / `models` / `version`) read; the SDK's own poll and product GETs use the shorter `_POLL_REQUEST_TIMEOUT_SECONDS` instead.
 
 ## Conventions
@@ -58,7 +60,7 @@ The client inherits `mthds`'s `_send` (one raw HTTP request, no status interpret
 - **`_request_product`** — the product-route path. Serializes the body with `pydantic_core.to_json` (supporting PUT/PATCH/DELETE as well as GET/POST), uses the management-call timeout, maps a non-2xx response to `ApiResponseError`, and is **empty-body tolerant** (a 2xx with no body — DELETE / onboarding / update — returns `None`).
 - **`_request_json`** — the plainer path for `health` (and, if ever added, the build extensions). Takes an absolute URL, raises `PipelineRequestError` on a non-2xx response. Transport failures still map to `ApiUnreachableError`.
 
-`start_client` is overridden so the `Authorization` header is sent only when a token is configured — anonymous access (empty token) omits it.
+`start_client` is overridden so the `Authorization` header is sent only when a token is configured — anonymous access (empty token) omits it — and so the spec-conforming `User-Agent` (built once at construction by `pipelex_sdk.user_agent`, with the optional `app_info` in front) is a default header on every request, authenticated or not. See [`client-identification.md`](client-identification.md) and the workspace spec `docs/specs/client-identification.md`.
 
 The `problem+json` / `HTTPException` error body is parsed by `_parse_error_body` into `(error_type, server_message, validation_errors, code)`, handling both `{"detail": {...}}` and `{"detail": "..."}` shapes plus top-level `error_type` / `message` / `code`, and falling through to empty on a non-JSON or non-object body. `validation_errors` is parsed leniently (best-effort error-path enrichment; only reachable via the out-of-scope build-route 422s).
 

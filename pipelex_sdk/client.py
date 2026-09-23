@@ -102,6 +102,7 @@ from pipelex_sdk.runs import (
 )
 from pipelex_sdk.upload import UploadRecord, UploadSource
 from pipelex_sdk.upload import upload_file as _upload_file_impl
+from pipelex_sdk.user_agent import AppInfo, build_user_agent
 from pipelex_sdk.validation_models import PipelexValidationResultAdapter, ValidationErrorItem
 
 if TYPE_CHECKING:
@@ -232,9 +233,17 @@ class PipelexAPIClient(MthdsAPIClient):
     match the JS SDK exactly. The base URL is validated host-only (no
     path/query/fragment/credentials; http/https only). `request_timeout_seconds` sets the
     per-instance blocking-execute ceiling the inherited protocol routes read (default 20 min).
+    `app_info` (an `AppInfo`) puts the integrator's own name before this SDK's tokens in the
+    `User-Agent` every request carries (see `pipelex_sdk.user_agent`).
     """
 
-    def __init__(self, api_key: str | None = None, base_url: str | None = None, request_timeout_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        request_timeout_seconds: float | None = None,
+        app_info: AppInfo | None = None,
+    ) -> None:
         # Pipelex-only resolution — this SDK never reads the mthds resolver (`MTHDS_*`
         # env vars, `~/.mthds/config`). That config stores a (base_url, api_key) pair for
         # whatever runner the vendor-neutral mthds tooling targets; borrowing its key while
@@ -288,6 +297,11 @@ class PipelexAPIClient(MthdsAPIClient):
         self.request_timeout_seconds: float = (
             request_timeout_seconds if request_timeout_seconds is not None else self._DEFAULT_REQUEST_TIMEOUT_SECONDS
         )
+        #: The integrator's own name, placed before this SDK's tokens in the `User-Agent`.
+        self.app_info: AppInfo | None = app_info
+        #: The `User-Agent` sent on every request (spec: `docs/specs/client-identification.md`),
+        #: built once here so an over-long header fails at construction, not on the first call.
+        self.user_agent: str = build_user_agent(app_info)
         self.client: httpx.AsyncClient | None = None
         #: Cached `/v1/version` handshake outcome — whether the durable lifecycle is served.
         self._lifecycle_available: bool | None = None
@@ -295,9 +309,13 @@ class PipelexAPIClient(MthdsAPIClient):
     @override
     def start_client(self) -> PipelexAPIClient:
         """Initialize the HTTP client. The Authorization header is sent only when a key
-        is configured — anonymous access (empty key) omits it, matching the JS SDK.
+        is configured — anonymous access (empty key) omits it, matching the JS SDK. The
+        `User-Agent` is a default header of this one client, so every API request carries it;
+        the object-store client of `artifacts` is separate and keeps httpx's own.
         """
-        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        headers = {"User-Agent": self.user_agent}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         self.client = httpx.AsyncClient(headers=headers)
         return self
 
