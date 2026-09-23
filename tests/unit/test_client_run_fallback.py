@@ -5,10 +5,11 @@ SDK's own enhancement (`supports_run_lifecycle` + `execute_blocking`), mirroring
 """
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
+from mthds.protocol.pipe_io_contracts import PipeIOContract
 from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
@@ -37,6 +38,39 @@ _EXECUTE_BODY: dict[str, object] = {
         "pipeline_run_id": "run-x",
     },
 }
+
+# The executed graph as the runner returns it inside `pipe_output` — the same document a local run
+# writes as `graphspec.json`.
+_GRAPH_SPEC: dict[str, Any] = {
+    "meta": {"format": "mthds", "mode": "live"},
+    "nodes": [{"id": "pipe_1", "status": "COMPLETED"}],
+    "edges": [],
+}
+
+# The runner's `pipe_io_artifacts` envelope: the three I/O artifacts together, since they share a
+# key set and are built in one pass. The hosted results body relays them as three siblings instead.
+_PIPE_IO_ARTIFACTS: dict[str, Any] = {
+    "pipe_io_contracts": {
+        "x.greet": {
+            "inputs": {},
+            "output": {
+                "concept_ref": "native.Text",
+                "multiplicity": "single",
+                "item_count": None,
+                "optional": False,
+                "json_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
+            },
+        },
+    },
+    "input_form": {"x.greet": {"fields": []}},
+    "output_form": {"x.greet": {"field": {"name": "text", "kind": "prose", "required": True}}},
+}
+
+
+def _execute_body_with(**pipe_output_extension_fields: object) -> dict[str, object]:
+    """The completed blocking body with Pipelex extension fields added onto its `pipe_output`."""
+    base_pipe_output = cast("dict[str, object]", _EXECUTE_BODY["pipe_output"])
+    return {**_EXECUTE_BODY, "pipe_output": {**base_pipe_output, **pipe_output_extension_fields}}
 
 
 def _response(status_code: int, *, json: object = None, headers: dict[str, str] | None = None) -> httpx.Response:
@@ -202,6 +236,158 @@ class TestClientRunFallback:
         result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
         assert result.tokens_usages is None
         assert result.usage_assembly_error is None
+
+    def test_blocking_fallback_lifts_the_working_memory_off_pipe_output(self, mocker: MockerFixture) -> None:
+        """The standard declares `pipe_output.working_memory` required, so the SDK lifts it onto
+        `RunResults.working_memory` and the field always carries a value on this path — set in
+        `model_fields_set` like every other lifted field, where the hosted path may leave it unset.
+        """
+        client = self._client()
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(side_effect=[_response(200, json=_BARE_VERSION), _response(200, json=_EXECUTE_BODY)]),
+        )
+
+        result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
+        assert result.working_memory is not None
+        assert "working_memory" in result.model_fields_set
+        assert result.working_memory.root["result"].content == {"text": "hello"}
+        assert result.working_memory.aliases == {"main_stuff": "result"}
+        # The same memory the runner's own envelope carries — lifted, not copied or re-parsed.
+        assert result.pipe_output is not None
+        assert result.working_memory is result.pipe_output.working_memory
+
+    def test_blocking_fallback_lifts_the_executed_graph_off_pipe_output(self, mocker: MockerFixture) -> None:
+        """The runner returns the executed graph inside `pipe_output`; the SDK lifts it onto
+        `RunResults.graph_spec` so the field carries the same document whichever path ran.
+        Regression: this path used to write `graph_spec=None` and drop the graph the runner had
+        already returned.
+        """
+        client = self._client()
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(
+                side_effect=[
+                    _response(200, json=_BARE_VERSION),
+                    _response(200, json=_execute_body_with(graph_spec=_GRAPH_SPEC, graph_assembly_error=None)),
+                ]
+            ),
+        )
+
+        result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
+        assert result.graph_spec == _GRAPH_SPEC
+        assert result.graph_assembly_error is None
+
+    def test_blocking_fallback_lifts_a_graph_assembly_failure_off_pipe_output(self, mocker: MockerFixture) -> None:
+        """A broken assembly and a run with no graph both leave `graph_spec` None; the lifted
+        `graph_assembly_error` is what separates them.
+        """
+        client = self._client()
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(
+                side_effect=[
+                    _response(200, json=_BARE_VERSION),
+                    _response(200, json=_execute_body_with(graph_spec=None, graph_assembly_error="failed to assemble the graph for the run")),
+                ]
+            ),
+        )
+
+        result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
+        assert result.graph_spec is None
+        assert result.graph_assembly_error == "failed to assemble the graph for the run"
+
+    def test_blocking_fallback_unwraps_the_io_artifacts_envelope_off_pipe_output(self, mocker: MockerFixture) -> None:
+        """The runner carries the three I/O artifacts in one `pipe_io_artifacts` envelope; the SDK
+        unwraps it onto the hosted shape's three sibling fields, typed from the standard, so each
+        artifact has one accessor whichever path ran.
+        """
+        client = self._client()
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(
+                side_effect=[
+                    _response(200, json=_BARE_VERSION),
+                    _response(200, json=_execute_body_with(pipe_io_artifacts=_PIPE_IO_ARTIFACTS, pipe_io_artifacts_error=None)),
+                ]
+            ),
+        )
+
+        result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
+        assert result.pipe_io_contracts is not None
+        assert isinstance(result.pipe_io_contracts["x.greet"], PipeIOContract)
+        assert result.pipe_io_contracts["x.greet"].output.concept_ref == "native.Text"
+        assert result.input_form is not None
+        assert result.input_form["x.greet"].fields == []
+        assert result.output_form is not None
+        assert result.output_form["x.greet"].field.name == "text"
+        assert result.pipe_io_artifacts_error is None
+        # The dumped artifacts are the envelope's members, verbatim: unwrapping moved them, nothing else.
+        dumped = result.model_dump(mode="json")
+        assert dumped["pipe_io_contracts"] == _PIPE_IO_ARTIFACTS["pipe_io_contracts"]
+        assert dumped["input_form"] == _PIPE_IO_ARTIFACTS["input_form"]
+        # The envelope itself is not a field of `RunResults`: it stays on the runner's own output.
+        assert "pipe_io_artifacts" not in dumped
+        assert result.pipe_output is not None
+        assert (result.pipe_output.model_extra or {})["pipe_io_artifacts"] == _PIPE_IO_ARTIFACTS
+
+    def test_blocking_fallback_lifts_an_io_artifacts_build_failure_off_pipe_output(self, mocker: MockerFixture) -> None:
+        """A null envelope leaves all three artifacts None, and the lifted `pipe_io_artifacts_error`
+        is what separates a broken build from a run that described nothing.
+        """
+        client = self._client()
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(
+                side_effect=[
+                    _response(200, json=_BARE_VERSION),
+                    _response(
+                        200,
+                        json=_execute_body_with(pipe_io_artifacts=None, pipe_io_artifacts_error="failed to build the I/O artifacts for the run"),
+                    ),
+                ]
+            ),
+        )
+
+        result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
+        assert result.pipe_io_contracts is None
+        assert result.input_form is None
+        assert result.output_form is None
+        assert result.pipe_io_artifacts_error == "failed to build the I/O artifacts for the run"
+
+    def test_blocking_fallback_without_graph_or_artifacts_sets_every_lifted_field_to_none(self, mocker: MockerFixture) -> None:
+        """A blocking response whose `pipe_output` carries neither the graph pair nor the artifacts
+        (tracing off, or an older runner) maps every lifted field to None — never a validation
+        error — and, unlike a hosted body missing the keys, marks each as set: on the blocking path
+        the SDK always answers, as the JS twin writes `null` there.
+        """
+        client = self._client()
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(side_effect=[_response(200, json=_BARE_VERSION), _response(200, json=_EXECUTE_BODY)]),
+        )
+
+        result = asyncio.run(client.start_and_wait(pipe_code="p", mthds_contents=["x"]))
+        assert result.graph_spec is None
+        assert result.graph_assembly_error is None
+        assert result.pipe_io_contracts is None
+        assert result.input_form is None
+        assert result.output_form is None
+        assert result.pipe_io_artifacts_error is None
+        assert {
+            "graph_spec",
+            "graph_assembly_error",
+            "pipe_io_contracts",
+            "input_form",
+            "output_form",
+            "pipe_io_artifacts_error",
+        } <= result.model_fields_set
 
     def test_blocking_fallback_raises_when_main_stuff_unlocatable(self, mocker: MockerFixture) -> None:
         """A completed blocking response whose `main_stuff_name` names no root stuff is a hard fail."""
