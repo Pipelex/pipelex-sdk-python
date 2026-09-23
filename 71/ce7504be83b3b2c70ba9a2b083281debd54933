@@ -1,0 +1,38 @@
+pipelex_sdk/user_agent.py
+  s_249569b913e311::t_6370699e081278 1,3-5,7,9-12,17,21-22,27-29
+tests/unit/test_user_agent.py
+  s_249569b913e311::t_7f98dff431cbe5 1,3,7-8,12-13,16,22-24,26,28-29,31-34,37,40,43,45-49,52,54,57,59-61,63-64,66,68-71,73-77,79-92
+  s_249569b913e311::t_a20cda572eea40 93
+CHANGELOG.md
+  s_249569b913e311::t_fbef9906d58cc3 3-10
+README.md
+  s_249569b913e311::t_a47eb4d903a31a 25,148
+docs/architecture.md
+  s_249569b913e311::t_0216eb902f1896 63
+docs/client-identification.md
+  s_249569b913e311::t_2f44e3b2ad74de 10,14-15,17,23,30,40,42,48
+pipelex_sdk/client.py
+  s_249569b913e311::t_8f1adc4f945885 105,236-237,300-304,309-314
+pyproject.toml
+  s_249569b913e311::t_ff4910c9623c67 21
+tests/unit/test_client_user_agent.py
+  s_249569b913e311::t_11fc780c6c255d 9,13,65,68,75
+uv.lock
+  s_249569b913e311::t_65b84ae81b067f 215,224,226,329
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "71ce7504be83b3b2c70ba9a2b083281debd54933",
+  "prompts": {},
+  "sessions": {
+    "s_249569b913e311": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c96db657-dce9-4864-8d99-e33151cd32db",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
