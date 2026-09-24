@@ -69,8 +69,6 @@ from pipelex_sdk.product_models import (
     BillingPortalResponse,
     ChangePlanResponse,
     CheckoutResponse,
-    GatewayApiKey,
-    GatewayApiKeyStatus,
     InvoiceView,
     Membership,
     MembershipsResponse,
@@ -1122,17 +1120,6 @@ class PipelexAPIClient(MthdsAPIClient):
         Returns the new plaintext `api_key` once; the old key stops working.
         """
         return PipelexApiKeyCreated.model_validate(await self._request_product("POST", f"pipelex-api-keys/{quote(key_id, safe='')}/rotate"))
-
-    async def create_gateway_api_key(self, promo_code: str | None) -> GatewayApiKey:
-        """Provision the gateway (LLM inference) API key — `POST /v1/gateway-api-key`.
-
-        The JSON body is ALWAYS sent (even with `promo_code=None`) — the server 422s an empty body.
-        """
-        return GatewayApiKey.model_validate(await self._request_product("POST", "gateway-api-key", body={"promo_code": promo_code}))
-
-    async def get_gateway_api_key(self) -> GatewayApiKeyStatus:
-        """The gateway key status (`None` until provisioned) — `GET /v1/gateway-api-key`."""
-        return GatewayApiKeyStatus.model_validate(await self._request_product("GET", "gateway-api-key"))
 
     async def submit_onboarding(self, submission: OnboardingSubmission) -> None:
         """Submit the onboarding questionnaire — `POST /v1/onboarding/submit` (empty body)."""

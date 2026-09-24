@@ -374,28 +374,6 @@ class TestClientProduct:
         assert sent.method == "POST"
         assert sent.body is None
 
-    # ── Gateway API key ──────────────────────────────────────────────
-
-    def test_create_gateway_api_key_always_sends_body_even_when_promo_none(self, mocker: MockerFixture) -> None:
-        client = self._client()
-        send = self._mock_send(mocker, client, _response(200, json_body={"gateway_api_key": "gw"}))
-
-        asyncio.run(client.create_gateway_api_key(None))
-
-        sent = self._sent(send)
-        assert sent.method == "POST"
-        assert sent.url == f"{_BASE_URL}/v1/gateway-api-key"
-        assert sent.body == {"promo_code": None}
-
-    def test_get_gateway_api_key_null_until_provisioned(self, mocker: MockerFixture) -> None:
-        client = self._client()
-        send = self._mock_send(mocker, client, _response(200, json_body={"gateway_api_key": None}))
-
-        result = asyncio.run(client.get_gateway_api_key())
-
-        assert self._sent(send).url == f"{_BASE_URL}/v1/gateway-api-key"
-        assert result.gateway_api_key is None
-
     # ── Onboarding ───────────────────────────────────────────────────
 
     def test_submit_onboarding_drops_absent_optionals(self, mocker: MockerFixture) -> None:
