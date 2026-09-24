@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v0.12.0] - 2026-09-24
 
 ### Added
 
@@ -10,7 +10,7 @@
 
 - **`download_artifacts` names each file after the field it fills, and `artifact_filename` takes a location (Breaking)**: a saved file is named after the first path at which its reference sits — `$.rooms[3].staged_photo.url` is saved as `rooms-3-staged_photo.png`, and an output that is one image as `main_stuff.png` — instead of after the last segment of its storage key, which now supplies only the extension, so the same run saves under the same names from either SDK. `artifact_filename(location, content_type, scope)` replaces `artifact_filename(uri, content_type, index)` and raises `ArtifactOperationError` for anything but an `ArtifactLocation` whose first path is in the walk's notation; a field whose name Windows reserves for a device (`aux`, `nul`, `com1` and the like) is saved with a trailing `_` (`aux_.png`); the full rule is on `docs/artifact-download.md`.
 - **`DownloadedArtifact` carries a required `found_at` (Breaking)**: every item of a `download_artifacts` verdict carries its reference's `found_at`, on the saved arm and the error arm alike, so a file that was not saved still says which field it would have filled. `DownloadedArtifact` is now an `ArtifactLocation`, so `artifact_filename` takes a verdict item as it is, and code that builds `DownloadedArtifact` values — a test fake standing in for `download_artifacts` — must now supply the field.
-- **Requires `mthds` 0.15.0 (Breaking).** The pin moves from 0.14.0, and it moves so that `pipelex` and `pipelex-sdk` can be installed together again: `pipelex` pins `mthds` exactly too and has required 0.15.0 since its 0.60.0, so two exact pins on different versions left the pair unresolvable. Nothing in this client changed with it. The release's one breaking cut — `ConceptAbstract` reduced to a name and `StuffAbstract` dumping its concept as the ref string — sits in protocol models this SDK does not build on, and the base client's run-source guard now refuses a protocol arg smuggled through `extra` before building the body rather than while building it, which this client's own guard already did ahead of both. The release also ships the canonical method-files pair as `mthds.protocol.method_files`; this package keeps its own `parse_method_files` / `serialize_method_files` for now, for the reason `docs/architecture.md` gives.
+- **Requires `mthds` 0.15.0 (Breaking)**: the exact pin moves from 0.14.0, so `pipelex-sdk` can again be installed beside `pipelex`, which has pinned `mthds==0.15.0` exactly since its 0.60.0. Nothing in this client's own surface changes: the release's breaking cut to `ConceptAbstract` and `StuffAbstract` sits in protocol models this SDK does not build on, and `parse_method_files` / `serialize_method_files` stay beside the canonical `mthds.protocol.method_files` for the reason `docs/architecture.md` gives.
 
 ## [v0.11.0] - 2026-09-23
 
