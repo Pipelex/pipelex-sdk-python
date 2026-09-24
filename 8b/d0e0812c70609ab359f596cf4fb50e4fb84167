@@ -1,0 +1,46 @@
+pipelex_sdk/client.py
+  s_3081e446389d21::t_2f9eef149f3721 1154-1155,1179-1181
+pipelex_sdk/product_models.py
+  s_3081e446389d21::t_2f9eef149f3721 5
+.claude/skills/release/SKILL.md
+  s_3081e446389d21::t_2f9eef149f3721 19
+tests/e2e/test_artifacts_e2e.py
+  s_3081e446389d21::t_2f9eef149f3721 30,111-113
+tests/unit/test_artifacts.py
+  s_3081e446389d21::t_2f9eef149f3721 14,16,23,27,37,66-68,197-201,208-261,282,286-288,296-347,351-390,393-394,396-412,414-417,419-428,430-432,434,749-752,777,781,789,791,794,798-838,844,849-873,887,889,935,1135,1164
+CHANGELOG.md
+  s_3081e446389d21::t_2f9eef149f3721 11-22,52-54
+  s_3081e446389d21::t_888cc9a448a8de 55
+docs/artifact-download.md
+  s_3081e446389d21::t_2f9eef149f3721 1,3,5,15,17,20-24,27,30-32,34-36,104-131,135,145,172
+docs/HANDOFF.md
+  s_3081e446389d21::t_2f9eef149f3721 38
+pyproject.toml
+  s_3081e446389d21::t_2f9eef149f3721 3
+pipelex_sdk/artifacts.py
+  s_3081e446389d21::t_2f9eef149f3721 4-6,13,29,37,49,71,86-109,160-175,183-199,202,212,215-271,274-275,277-409,413-434,443-451,757,761-763,769-773,776,789,791-796,811,827-829,832,838,881-890,914-916,919-922,925,932,934,940,942,945,951-952,1014-1015,1019-1022,1040,1047,1052,1062,1072,1078,1085,1100,1104
+docs/run-results.md
+  s_3081e446389d21::t_2f9eef149f3721 180
+pipelex_sdk/artifact_models.py
+  s_3081e446389d21::t_2f9eef149f3721 136-154,157-162
+docs/architecture.md
+  s_3081e446389d21::t_2f9eef149f3721 259,261,294
+uv.lock
+  s_3081e446389d21::t_b31f4991e0235b 306
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8bd0e0812c70609ab359f596cf4fb50e4fb84167",
+  "prompts": {},
+  "sessions": {
+    "s_3081e446389d21": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "49b085f0-54e1-480c-94e4-1008edf3ea88",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
