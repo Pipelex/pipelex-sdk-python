@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from pipelex_sdk.artifact_models import ArtifactScope, DownloadArtifactsOptions
-from pipelex_sdk.artifacts import collect_artifacts, download_artifacts, fetch_artifact
+from pipelex_sdk.artifacts import artifact_filename, collect_artifacts, download_artifacts, fetch_artifact
 from pipelex_sdk.client import PipelexAPIClient
 from pipelex_sdk.crate_models import MthdsFileItem
 
@@ -108,6 +108,9 @@ class TestArtifactRoundTripLive:
         assert echoed.size == len(_PDF_BYTES)
         assert echoed.path in verdict.saved_paths
         assert echoed.path is not None
+        # The file is named after the working-memory field the echoed input sits in.
+        assert echoed.found_at[0].startswith("$.")
+        assert Path(echoed.path).name == artifact_filename(echoed, echoed.content_type, ArtifactScope.WORKING_MEMORY)
         assert Path(echoed.path).read_bytes() == _PDF_BYTES
 
     def test_resolves_through_the_bulk_route_and_refuses_a_malformed_reference_as_a_value(self) -> None:
