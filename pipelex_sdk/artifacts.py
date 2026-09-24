@@ -1,15 +1,16 @@
 """The artifact stack — the download twin of `prepare_inputs`, in layers so each operation is
 usable without the next:
 
-- `collect_artifacts(value)` — a pure walk of any JSON-shaped value for the strings that ARE
-  `pipelex-storage://` references. No network, no key.
+- `locate_artifacts(value)` — a pure walk of any JSON-shaped value for the strings that ARE
+  `pipelex-storage://` references, each with every `$`-rooted path it sits at. `collect_artifacts`
+  is the same walk's bare references. No network, no key.
 - `resolve_artifacts(client, uris)` — the platform's bulk resolve route over a whole list,
   chunked at the route's bound, one verdict per reference.
 - `fetch_artifact(client, uri)` — an async context manager yielding a bounded stream for one
   reference: resolved fresh, timed out, redirects refused, the byte cap enforced mid-stream, no
   credentials forwarded, headers neutral.
 - `download_artifacts(client, ...)` — a run's produced files saved under a directory by a bounded
-  pool of tasks, as a produced verdict.
+  pool of tasks, each named after the field it fills (`artifact_filename`), as a produced verdict.
 
 A produced file is never embedded in a run's results: the content carries its durable
 `pipelex-storage://` reference beside a signed `public_url` that expires on the provider's
@@ -25,6 +26,7 @@ instead of a returned `Response` (an httpx stream is only live inside its own bl
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import re
@@ -32,7 +34,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, TypeAlias, cast
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -44,6 +46,7 @@ from pipelex_sdk.artifact_models import (
     BULK_RESOLVE_MAX_URIS,
     PIPELEX_STORAGE_SCHEME,
     ArtifactItemError,
+    ArtifactLocation,
     ArtifactScope,
     BulkResolvedStorageUrls,
     DownloadArtifactsOptions,
@@ -65,7 +68,7 @@ from pipelex_sdk.errors import (
 from pipelex_sdk.runs import RunResultCompleted, RunResultFailed, RunResultRunning, RunResults
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from pipelex_sdk.runs import RunResultState
@@ -79,6 +82,30 @@ _EXPIRY_MARGIN_SECONDS = 10.0
 
 #: Longest filename `download_artifacts` writes, extension included.
 _MAX_FILENAME_LENGTH = 128
+
+#: Longest extension taken from a storage key, dot excluded. Anything longer after the key's last
+#: dot is read as part of a name rather than as an extension, and the content type's extension is
+#: used instead.
+_MAX_EXTENSION_LENGTH = 10
+
+#: Stems Windows reserves for a device, in any case and whatever the extension: `aux.png` there
+#: names the auxiliary device, not a file. A stem is a field name the method author chose, so
+#: `$.aux.url` would otherwise reach one.
+_WINDOWS_DEVICE_STEM = re.compile(r"con|prn|aux|nul|com[0-9]|lpt[0-9]", re.IGNORECASE)
+
+#: An object key rendered as `.key` in a path; any other key is rendered as `["…"]`.
+_IDENTIFIER_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: The three steps a rendered path is read back from, each matched where the last one ended.
+_KEY_STEP = re.compile(r"\.([A-Za-z_][A-Za-z0-9_]*)")
+_INDEX_STEP = re.compile(r"\[([0-9]+)\]")
+_QUOTED_STEP = re.compile(r'\[("(?:[^"\\]|\\.)*")\]', re.DOTALL)
+
+#: A UTF-16 surrogate standing alone in a Python string, which `JSON.stringify` escapes as `\uXXXX`.
+_LONE_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+#: A `%` that does not open a two-digit escape, which makes `decodeURIComponent` refuse the segment.
+_BARE_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 #: Ceiling on collision suffixes before the never-overwrite rule gives up.
 _MAX_UNIQUE_ATTEMPTS = 10_000
@@ -130,7 +157,22 @@ class ArtifactCapableClient(BulkResolveClient, Protocol):
     async def get_run_result(self, run_id: str) -> RunResultState: ...
 
 
-# ── collect_artifacts ────────────────────────────────────────────────
+# ── locate_artifacts / collect_artifacts ─────────────────────────────
+
+#: One step of a path into a walked value: an object key, or an array index.
+_PathSegment: TypeAlias = str | int
+
+
+@dataclass
+class _LocatedReference:
+    """A reference as the walk records it: the raw segments of every path it was found at.
+
+    `download_artifacts` names its files from these segments directly, so it never parses a rendered
+    path back; `found_at` is only their rendering.
+    """
+
+    uri: str
+    paths: list[tuple[_PathSegment, ...]]
 
 
 def is_storage_reference(value: str) -> bool:
@@ -138,9 +180,26 @@ def is_storage_reference(value: str) -> bool:
     return value.startswith(PIPELEX_STORAGE_SCHEME) and len(value) > len(PIPELEX_STORAGE_SCHEME)
 
 
+def locate_artifacts(value: Any) -> list[ArtifactLocation]:
+    """Every `pipelex-storage://` reference inside a JSON-shaped value, each with every path at which
+    it occurs.
+
+    The references are deduplicated and kept in discovery order (the order of their first sighting),
+    and each one's `found_at` lists its paths in walk order, so `found_at[0]` is where it was first
+    seen. The string test is `collect_artifacts`'s: a string counts only when it IS a reference. A
+    path is rooted at `$`, the walked value itself; an object key matching `^[A-Za-z_][A-Za-z0-9_]*$`
+    is written `.key`, any other key `["…"]` in JSON string escaping, and an array index `[n]`. The
+    runtime serializes a produced image or document as content carrying its reference in `url`, so a
+    typical path ends there: `$.rooms[3].staged_photo.url`, `$.items[0].url`, or `$.url` for an
+    output that is one image. Pure — no network, no key. Mappings, sequences and pydantic models are
+    walked alike, a model by its `model_dump()` keys.
+    """
+    return [_render_location(located) for located in _walk_references(value, with_paths=True)]
+
+
 def collect_artifacts(value: Any) -> list[str]:
     """Every `pipelex-storage://` reference inside a JSON-shaped value, deduplicated, in discovery
-    order.
+    order — the references of `locate_artifacts`, without their paths.
 
     A string counts only when it IS a reference — the whole string, scheme first, with something
     after the scheme; text that merely contains one does not. The scheme is unambiguous, so this walk
@@ -150,78 +209,244 @@ def collect_artifacts(value: Any) -> list[str]:
     any of them. Mappings, sequences and pydantic models are walked alike, so `results.main_stuff`
     (a parsed JSON value) and a whole `RunResults` both work.
     """
-    found: dict[str, None] = {}
-    _walk_for_references(value, found)
-    return list(found)
+    return [located.uri for located in _walk_references(value, with_paths=False)]
 
 
-def _walk_for_references(value: Any, found: dict[str, None]) -> None:
-    """Depth-first walk collecting every string that is a storage reference, in discovery order."""
-    if isinstance(value, str):
-        if is_storage_reference(value):
-            found[value] = None
-        return
-    if isinstance(value, BaseModel):
-        _walk_for_references(value.model_dump(), found)
-        return
-    if isinstance(value, dict):
-        for entry in cast("dict[str, Any]", value).values():
-            _walk_for_references(entry, found)
-        return
-    if isinstance(value, (list, tuple)):
-        for item in cast("list[Any]", value):
-            _walk_for_references(item, found)
+def _walk_references(value: Any, *, with_paths: bool) -> list[_LocatedReference]:
+    """The walk both public functions share: depth first, keys in mapping order.
+
+    With `with_paths` off it records each reference once and no path at all, which is what
+    `collect_artifacts` needs: copying the trail for every occurrence costs memory in proportion to
+    occurrences times depth, where the deduplicated list needs only one entry per unique reference.
+    """
+    # A dict keeps insertion order, which is the order of first sighting.
+    by_uri: dict[str, _LocatedReference] = {}
+    trail: list[_PathSegment] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, str):
+            if not is_storage_reference(node):
+                return
+            known = by_uri.get(node)
+            if known is None:
+                known = _LocatedReference(uri=node, paths=[])
+                by_uri[node] = known
+            if with_paths:
+                known.paths.append(tuple(trail))
+            return
+        if isinstance(node, BaseModel):
+            visit(node.model_dump())
+            return
+        if isinstance(node, dict):
+            for key, entry in cast("dict[Any, Any]", node).items():
+                # A JSON object's keys are strings; any other key is read as the string it prints as.
+                trail.append(key if isinstance(key, str) else str(key))
+                visit(entry)
+                trail.pop()
+            return
+        if isinstance(node, (list, tuple)):
+            for index_item, item in enumerate(cast("list[Any]", node)):
+                trail.append(index_item)
+                visit(item)
+                trail.pop()
+
+    visit(value)
+    return list(by_uri.values())
+
+
+def _render_location(located: _LocatedReference) -> ArtifactLocation:
+    return ArtifactLocation(uri=located.uri, found_at=[_render_path(segments) for segments in located.paths])
+
+
+def _render_path(segments: Sequence[_PathSegment]) -> str:
+    """Segments to the `$`-rooted notation `found_at` carries."""
+    rendered = ["$"]
+    for segment in segments:
+        if isinstance(segment, int):
+            rendered.append(f"[{segment}]")
+        elif _IDENTIFIER_KEY.fullmatch(segment):
+            rendered.append(f".{segment}")
+        else:
+            rendered.append(f"[{_json_string(segment)}]")
+    return "".join(rendered)
+
+
+def _json_string(key: str) -> str:
+    r"""A key as `JSON.stringify` writes it, so a path reads the same from either SDK.
+
+    `json.dumps` with `ensure_ascii` off escapes exactly what `JSON.stringify` does — the quote, the
+    backslash and the control characters, the latter as lowercase `\u00XX` — and keeps every other
+    character as typed, except a surrogate standing alone: `JSON.stringify` escapes it, and left raw
+    it would make the path a string no UTF-8 encoder accepts.
+    """
+    dumped = json.dumps(key, ensure_ascii=False)
+    return _LONE_SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", dumped)
+
+
+def _parse_path(path: str) -> list[_PathSegment] | None:
+    """The `$`-rooted notation back to segments, for a location that reaches `artifact_filename` from
+    outside the walk. The rendering is lossless, so this is exact for every path the walk produced;
+    anything else is `None`.
+    """
+    if not path.startswith("$"):
+        return None
+    segments: list[_PathSegment] = []
+    position = 1
+    while position < len(path):
+        key_step = _KEY_STEP.match(path, position)
+        if key_step is not None:
+            segments.append(key_step.group(1))
+            position = key_step.end()
+            continue
+        index_step = _INDEX_STEP.match(path, position)
+        if index_step is not None:
+            segments.append(int(index_step.group(1)))
+            position = index_step.end()
+            continue
+        quoted_step = _QUOTED_STEP.match(path, position)
+        if quoted_step is None:
+            return None
+        try:
+            decoded: Any = json.loads(quoted_step.group(1))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(decoded, str):
+            return None
+        segments.append(decoded)
+        position = quoted_step.end()
+    return segments
 
 
 # ── artifact_filename ────────────────────────────────────────────────
 
 
-def artifact_filename(uri: str, content_type: str | None, index: int) -> str:
-    """The bare filename a storage reference is saved under.
+def artifact_filename(location: ArtifactLocation, content_type: str | None, scope: ArtifactScope) -> str:
+    """The bare filename a reference is saved under, named after the field it fills: the path in
+    `location.found_at[0]`, where the reference was first seen.
 
-    The last segment of the storage key, reduced to a conservative character set so it can never name
-    anything but a regular file directly inside the target directory. Path separators are the split
-    point, so no traversal survives; leading dots are stripped, so no hidden file and no `..`;
-    everything outside `[A-Za-z0-9._-]` becomes `_`; an empty result falls back to a numbered
-    `artifact-N`. Length is capped with the extension preserved, and an extension is added from the
-    content type when the key carries none. A collision on disk is not this function's concern:
-    `download_artifacts` suffixes the stem (`name-1.ext`) on exclusive creation, so a file is never
-    overwritten.
+    1. A final object key `url` is dropped, since the runtime's image and document contents carry
+       their reference there; a reference under any other key keeps that key, and a `url` key that
+       is not final is kept.
+    2. Each key is reduced to `[A-Za-z0-9_]`, every other character (`-` and `.` included) becoming
+       `_`; an index stays its decimal digits.
+    3. The segments are joined with `-`. An empty result — the reference is the walked value itself,
+       or its `url` — becomes the scope's name.
+    4. Over the filename length cap (128 characters, extension included), the tail is kept: whole
+       leading segments are dropped first, since the last ones are the specific ones, and a single
+       segment still too long is cut to fit.
+    5. A stem Windows reserves for a device (`con`, `prn`, `aux`, `nul`, `com0` to `com9`,
+       `lpt0` to `lpt9`, in any case) gets a trailing `_`, so `$.aux.url` is saved as `aux_.png`.
+    6. The extension is the storage key's own, reduced to `[A-Za-z0-9]`, when it has a short one;
+       otherwise the content type's, for the types a run produces; otherwise there is none.
+
+    So `$.rooms[3].staged_photo.url` is saved as `rooms-3-staged_photo.png`, and `$.url` in
+    `main_stuff` as `main_stuff.png`. The stem is ASCII letters, digits, `_` and the `-` joins, never
+    empty and never a device name, so the name can only ever be a regular file directly inside the
+    target directory. A collision on disk is not this function's concern: `download_artifacts`
+    suffixes the stem (`name-1.ext`) on exclusive creation, so a file is never overwritten. A
+    `DownloadedArtifact` is an `ArtifactLocation`, so a verdict item can be passed as it is.
+
+    Raises `ArtifactOperationError` for a location that is not an `ArtifactLocation`, one whose
+    `found_at[0]` is not a path in the notation `locate_artifacts` writes, or an unknown scope.
+    """
+    checked_scope = _require_scope(scope)
+    # A caller can hand anything here — the old signature's bare uri string among them — and every
+    # shape must reach the documented refusal rather than an AttributeError.
+    loose = cast("object", location)
+    if not isinstance(loose, ArtifactLocation):
+        msg = f"artifact_filename needs an ArtifactLocation, as locate_artifacts answers; got a {type(loose).__name__}."
+        raise ArtifactOperationError(msg)
+    first = loose.found_at[0] if loose.found_at else None
+    segments = _parse_path(first) if first is not None else None
+    if segments is None:
+        msg = f'artifact_filename needs a location whose first "found_at" entry is a path such as "$.items[0].url"; got {first!r}.'
+        raise ArtifactOperationError(msg)
+    return _filename_for(segments, loose.uri, content_type, checked_scope)
+
+
+def _filename_for(segments: Sequence[_PathSegment], uri: str, content_type: str | None, scope: ArtifactScope) -> str:
+    """The naming rule of `artifact_filename`, over the walk's own segments."""
+    named = segments[:-1] if segments and segments[-1] == "url" else segments
+    words: list[str] = []
+    for segment in named:
+        word = str(segment) if isinstance(segment, int) else re.sub(r"[^A-Za-z0-9_]", "_", segment)
+        # Only the empty key reduces to nothing, and it says nothing about the field.
+        if word:
+            words.append(word)
+    extension = _extension_for(uri, content_type)
+    stem = _fit_stem(words or [scope], _MAX_FILENAME_LENGTH - len(extension))
+    # A device stem is at most four characters, so the `_` cannot overrun the cap.
+    if _WINDOWS_DEVICE_STEM.fullmatch(stem):
+        stem += "_"
+    return stem + extension
+
+
+def _fit_stem(words: Sequence[str], budget: int) -> str:
+    """The words joined with `-` within `budget` characters, keeping the tail."""
+    start = 0
+    length = sum(len(word) for word in words) + len(words) - 1
+    while length > budget and start < len(words) - 1:
+        length -= len(words[start]) + 1
+        start += 1
+    return "-".join(words[start:])[:budget]
+
+
+def _extension_for(uri: str, content_type: str | None) -> str:
+    """`.ext` for the saved file — the storage key's own, else the content type's — or `""`."""
+    from_key = _storage_key_extension(uri)
+    if from_key:
+        return f".{from_key}"
+    if content_type is None:
+        return ""
+    return _EXTENSION_BY_CONTENT_TYPE.get(content_type.split(";")[0].strip().lower(), "")
+
+
+def _storage_key_extension(uri: str) -> str:
+    r"""The extension the storage key's last segment carries, without its dot, reduced to
+    `[A-Za-z0-9]` — or `""` when it has none, or none that short.
+
+    The segment is what follows the last `/` or `\` once the scheme, query and fragment are gone,
+    percent-decoded when it decodes; a leading dot is not an extension.
     """
     key = uri.removeprefix(PIPELEX_STORAGE_SCHEME)
     key = re.split(r"[?#]", key, maxsplit=1)[0]
-    segments = [part for part in re.split(r"[\\/]", key) if part]
-    # `unquote` keeps a malformed escape as typed, where the JS twin's `decodeURIComponent` throws
-    # and falls back to the same thing; sanitization below handles either.
-    decoded = unquote(segments[-1]) if segments else ""
+    parts = [part for part in re.split(r"[\\/]", key) if part]
+    decoded = _decode_uri_component(parts[-1]) if parts else ""
+    dot = decoded.rfind(".")
+    if dot <= 0:
+        return ""
+    extension = re.sub(r"[^A-Za-z0-9]", "", decoded[dot + 1 :])
+    return extension if len(extension) <= _MAX_EXTENSION_LENGTH else ""
 
-    name = re.sub(r"[^A-Za-z0-9._-]", "_", decoded)
-    name = re.sub(r"^[._-]+", "", name)
-    name = re.sub(r"[._-]+$", "", name)
-    if not name:
-        name = f"artifact-{index + 1}"
 
-    if not _extension_of(name) and content_type is not None:
-        guessed = _EXTENSION_BY_CONTENT_TYPE.get(content_type.split(";")[0].strip().lower())
-        if guessed is not None:
-            name += guessed
+def _decode_uri_component(segment: str) -> str:
+    """`decodeURIComponent`, or the segment as typed where the JS twin's call would throw.
 
-    # The cap comes last, so a guessed extension is inside it like any other.
-    if len(name) > _MAX_FILENAME_LENGTH:
-        extension = _extension_of(name)
-        # The extension is kept only if there is room left for a stem; a pathological extension is
-        # dropped rather than preserved.
-        if len(extension) < _MAX_FILENAME_LENGTH:
-            name = name[: _MAX_FILENAME_LENGTH - len(extension)] + extension
-        else:
-            name = name[:_MAX_FILENAME_LENGTH]
-    return name
+    `unquote` alone is lenient twice over — it keeps a `%` that opens no escape and replaces bytes
+    that are not UTF-8 — where `decodeURIComponent` refuses the whole segment, so the same key would
+    otherwise yield a different extension in each SDK.
+    """
+    if _BARE_PERCENT.search(segment):
+        return segment
+    try:
+        return unquote(segment, errors="strict")
+    except UnicodeDecodeError:
+        return segment
 
 
 def _extension_of(name: str) -> str:
     """`os.path.splitext` for a bare filename: `.ext`, or `""` (a leading dot is not an extension)."""
     dot = name.rfind(".")
     return name[dot:] if dot > 0 else ""
+
+
+def _require_scope(scope: ArtifactScope) -> ArtifactScope:
+    """The scope as the enum, or the refusal naming the two there are."""
+    try:
+        return ArtifactScope(scope)
+    except ValueError as exc:
+        msg = f'"scope" must be "main_stuff" or "working_memory", got {scope!r}.'
+        raise ArtifactOperationError(msg) from exc
 
 
 # ── resolve_artifacts ────────────────────────────────────────────────
@@ -529,24 +754,26 @@ async def download_artifacts(
     """Save a run's produced files under `dir_path`, and answer a produced verdict.
 
     Takes exactly one of `run_id` (the results are re-read, so a run is downloadable days later) or
-    `results` (a `RunResults` in hand); walks the requested scope with `collect_artifacts`; resolves
+    `results` (a `RunResults` in hand); walks the requested scope with `locate_artifacts`; resolves
     the whole set through the bulk route ahead of the tasks; then a bounded number of tasks
     (`concurrency`, held by an `asyncio.Semaphore`) each fetch, create their file exclusively and
     stream the body in, re-resolving any link that has expired by the time a task reaches it. The
-    embedded `public_url` is never used. Files are named by `artifact_filename` and never
-    overwritten; a failed or cancelled download unlinks its partial file.
+    embedded `public_url` is never used. Each file is named after the field it fills, by
+    `artifact_filename`'s rule, and never overwritten; a failed or cancelled download unlinks its
+    partial file.
 
     Returns one entry per reference, errors as values. It raises only when no verdict can be produced:
     `RunStillRunningError` or `RunFailedError` for a run that has not completed, `FieldNotIncludedError`
     when the results read did not carry the scope's key, `ScopeUnavailableError` when the key was
     relayed as `None`, `ArtifactAuthenticationError` (carrying the verdict so far) when the resolve
-    route refuses the credential, `ArtifactOperationError` for an unusable directory or nonsense
-    bounds, and the transport and lifecycle errors of the reads it makes (`ApiResponseError` for a
-    deployment without the bulk route, `RunLifecycleUnavailableError` for a bare runner asked by id,
-    `ApiUnreachableError`). Cancelling the awaiting task raises `asyncio.CancelledError` out of here,
-    with every partial file unlinked first.
+    route refuses the credential, `ArtifactOperationError` for an unusable directory, an unknown
+    scope or nonsense bounds, and the transport and lifecycle errors of the reads it makes
+    (`ApiResponseError` for a deployment without the bulk route, `RunLifecycleUnavailableError` for a
+    bare runner asked by id, `ApiUnreachableError`). Cancelling the awaiting task raises
+    `asyncio.CancelledError` out of here, with every partial file unlinked first.
     """
     opts = options or DownloadArtifactsOptions()
+    scope = _require_scope(opts.scope)
     bounds = _validated_bounds(opts)
     if opts.concurrency < 1:
         msg = f'"concurrency" must be a positive integer, got {opts.concurrency}.'
@@ -559,11 +786,14 @@ async def download_artifacts(
         msg = "download_artifacts takes exactly one of `run_id` (the results are re-read) or `results` (a RunResults in hand)."
         raise ArtifactOperationError(msg)
     read_results = results if results is not None else await _read_completed_results(client, cast("str", run_id))
-    walked = _scope_value(read_results, opts.scope)
+    walked = _scope_value(read_results, scope)
 
-    uris = collect_artifacts(walked)
-    if not uris:
-        return _assemble_verdict(opts.scope, [])
+    # The walk's own record names the files; `locations` is what the verdict reports.
+    located = _walk_references(walked, with_paths=True)
+    if not located:
+        return _assemble_verdict(scope, [])
+    locations = [_render_location(reference) for reference in located]
+    uris = [reference.uri for reference in located]
 
     target_dir = Path(dir_path).resolve()
     try:
@@ -578,7 +808,7 @@ async def download_artifacts(
     except ApiResponseError as exc:
         if not _is_credential_refusal(exc):
             raise
-        verdict = _assemble_verdict(opts.scope, [_item_error(uri, None, "aborted", _SKIPPED_CREDENTIAL) for uri in uris])
+        verdict = _assemble_verdict(scope, [_item_error(location, None, "aborted", _SKIPPED_CREDENTIAL) for location in locations])
         msg = f"The resolve route refused the credential ({exc.status}); no artifact was downloaded."
         raise ArtifactAuthenticationError(msg, status=exc.status, verdict=verdict) from exc
 
@@ -594,17 +824,18 @@ async def download_artifacts(
                     budget=budget,
                     bounds=bounds,
                     target_dir=target_dir,
-                    index=index,
-                    uri=uri,
+                    scope=scope,
+                    location=location,
+                    name_path=located[index].paths[0],
                     entry=resolved[index],
                 )
-                for index, uri in enumerate(uris)
+                for index, location in enumerate(locations)
             ]
         )
     finally:
         await storage_client.aclose()
 
-    verdict = _assemble_verdict(opts.scope, list(outcomes))
+    verdict = _assemble_verdict(scope, list(outcomes))
     if budget.credential_failure is not None:
         status = budget.credential_failure.status
         msg = f"The resolve route refused the credential ({status}) part-way through the download; the verdict so far is on this error."
@@ -647,9 +878,16 @@ def _is_credential_refusal(exc: ApiResponseError) -> bool:
     return exc.status in {401, 403}
 
 
-def _item_error(uri: str, content_type: str | None, code: str, detail: str) -> DownloadedArtifact:
-    """One reference's failure, as a value on the verdict."""
-    return DownloadedArtifact(uri=uri, path=None, content_type=content_type, size=None, error=ArtifactItemError(code=code, detail=detail))
+def _item_error(location: ArtifactLocation, content_type: str | None, code: str, detail: str) -> DownloadedArtifact:
+    """One reference's failure, as a value on the verdict — still saying where the reference sits."""
+    return DownloadedArtifact(
+        uri=location.uri,
+        found_at=location.found_at,
+        path=None,
+        content_type=content_type,
+        size=None,
+        error=ArtifactItemError(code=code, detail=detail),
+    )
 
 
 def _is_expired(expires_at: str | None) -> bool:
@@ -673,41 +911,45 @@ async def _process_one(
     budget: _DownloadBudget,
     bounds: _FetchBounds,
     target_dir: Path,
-    index: int,
-    uri: str,
+    scope: ArtifactScope,
+    location: ArtifactLocation,
+    name_path: Sequence[_PathSegment],
     entry: ResolvedArtifact,
 ) -> DownloadedArtifact:
-    """One reference's whole pipeline — the semaphore's slot, a re-resolve on expiry, then the save."""
+    """One reference's whole pipeline — the semaphore's slot, a re-resolve on expiry, then the save
+    under the name its first path gives it.
+    """
+    uri = location.uri
     async with semaphore:
         if budget.credential_failure is not None:
-            return _item_error(uri, entry.content_type, "aborted", _SKIPPED_CREDENTIAL)
+            return _item_error(location, entry.content_type, "aborted", _SKIPPED_CREDENTIAL)
         if entry.error is None and _is_expired(entry.expires_at):
             try:
                 entry = (await resolve_artifacts(client, [uri]))[0]
             except ApiResponseError as exc:
                 if _is_credential_refusal(exc):
                     budget.credential_failure = exc
-                    return _item_error(uri, entry.content_type, "aborted", _SKIPPED_CREDENTIAL)
+                    return _item_error(location, entry.content_type, "aborted", _SKIPPED_CREDENTIAL)
                 msg = f"The expired link could not be re-resolved: {exc}."
-                return _item_error(uri, entry.content_type, "resolve_failed", msg)
+                return _item_error(location, entry.content_type, "resolve_failed", msg)
             except (PipelineRequestError, ValidationError, ValueError) as exc:
                 # Anything else the re-resolve can fail with — an unreachable host, a malformed
                 # answer, a body that does not parse — is this one reference's error, never the
                 # whole download's: the other references already have their links.
                 msg = f"The expired link could not be re-resolved: {exc}."
-                return _item_error(uri, entry.content_type, "resolve_failed", msg)
+                return _item_error(location, entry.content_type, "resolve_failed", msg)
         if entry.error is not None:
-            return _item_error(uri, None, entry.error.code, entry.error.detail)
+            return _item_error(location, None, entry.error.code, entry.error.detail)
         if entry.url is None:
             msg = "The bulk resolve route answered an item with neither a link nor an error."
-            return _item_error(uri, entry.content_type, "resolve_failed", msg)
+            return _item_error(location, entry.content_type, "resolve_failed", msg)
         return await _save_one(
             storage_client=storage_client,
             budget=budget,
             bounds=bounds,
             target_dir=target_dir,
-            index=index,
-            uri=uri,
+            location=location,
+            filename=_filename_for(name_path, uri, entry.content_type, scope),
             download_url=entry.url,
             content_type=entry.content_type,
         )
@@ -769,12 +1011,15 @@ async def _save_one(
     budget: _DownloadBudget,
     bounds: _FetchBounds,
     target_dir: Path,
-    index: int,
-    uri: str,
+    location: ArtifactLocation,
+    filename: str,
     download_url: str,
     content_type: str | None,
 ) -> DownloadedArtifact:
-    """Fetch one resolved link and write it under the download directory, within the total budget."""
+    """Fetch one resolved link and write it under the download directory as `filename`, suffixed on a
+    collision, within the total budget.
+    """
+    uri = location.uri
     target: _TargetFile | None = None
     written = 0
     reserved = 0
@@ -792,19 +1037,19 @@ async def _save_one(
                     f"Saving this {_format_mib(reserved)} artifact would take the download past its "
                     f"{_format_mib(budget.max_total_bytes)} total limit."
                 )
-                return _item_error(uri, content_type, "total_limit_exceeded", msg)
+                return _item_error(location, content_type, "total_limit_exceeded", msg)
             budget.committed += reserved
             share_taken = True
 
             try:
                 # Synchronous on purpose: a cancellation landing inside a worker thread would leave a file
                 # the handler below cannot see, and an exclusive create is not worth a thread.
-                target = _open_unique_file(target_dir, artifact_filename(uri, content_type, index))
+                target = _open_unique_file(target_dir, filename)
             except OSError as exc:
                 budget.committed -= share()
                 share_taken = False
                 msg = f"The file could not be created: {exc}."
-                return _item_error(uri, content_type, "write_failed", msg)
+                return _item_error(location, content_type, "write_failed", msg)
 
             async for chunk in stream.aiter_bytes():
                 # Only the bytes past this file's reservation are new to the total.
@@ -814,7 +1059,7 @@ async def _save_one(
                     budget.committed -= share()
                     share_taken = False
                     msg = f"This artifact took the download past its {_format_mib(budget.max_total_bytes)} total limit."
-                    return _item_error(uri, content_type, "total_limit_exceeded", msg)
+                    return _item_error(location, content_type, "total_limit_exceeded", msg)
                 budget.committed += growth
                 written += len(chunk)
                 try:
@@ -824,20 +1069,20 @@ async def _save_one(
                     budget.committed -= share()
                     share_taken = False
                     msg = f"The file could not be written: {exc}."
-                    return _item_error(uri, content_type, "write_failed", msg)
+                    return _item_error(location, content_type, "write_failed", msg)
     except ArtifactFetchError as exc:
         if target is not None:
             target.remove()
         if share_taken:
             budget.committed -= share()
-        return _item_error(uri, content_type, exc.code, str(exc))
+        return _item_error(location, content_type, exc.code, str(exc))
     except (httpx.HTTPError, OSError) as exc:
         if target is not None:
             target.remove()
         if share_taken:
             budget.committed -= share()
         msg = f"The artifact could not be read: {exc}."
-        return _item_error(uri, content_type, "network", msg)
+        return _item_error(location, content_type, "network", msg)
     except asyncio.CancelledError:
         # A cancelled download leaves nothing truncated behind, then lets the cancellation through.
         if target is not None:
@@ -852,11 +1097,11 @@ async def _save_one(
         target.remove()
         budget.committed -= share()
         msg = f"The file could not be closed: {exc}."
-        return _item_error(uri, content_type, "write_failed", msg)
+        return _item_error(location, content_type, "write_failed", msg)
 
     # A body shorter than it declared gives the unused reservation back.
     budget.committed -= share() - written
-    return DownloadedArtifact(uri=uri, path=str(target.path), content_type=content_type, size=written, error=None)
+    return DownloadedArtifact(uri=uri, found_at=location.found_at, path=str(target.path), content_type=content_type, size=written, error=None)
 
 
 def _assemble_verdict(scope: ArtifactScope, artifacts: list[DownloadedArtifact]) -> DownloadArtifactsResult:

@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`locate_artifacts` and `ArtifactLocation`**: `pipelex_sdk.artifacts.locate_artifacts(value)` is the artifact walk with its paths — every `pipelex-storage://` reference in a JSON value, deduplicated in discovery order exactly as `collect_artifacts` returns them, each as an `ArtifactLocation` whose `found_at` lists every `$`-rooted path at which it sits (`$.rooms[3].staged_photo.url`, `$.items[0].url`, `$["a key"].url`), written the way `@pipelex/sdk`'s `locateArtifacts` writes them.
+
+### Changed
+
+- **`download_artifacts` names each file after the field it fills, and `artifact_filename` takes a location (Breaking)**: a saved file is named after the first path at which its reference sits — `$.rooms[3].staged_photo.url` is saved as `rooms-3-staged_photo.png`, and an output that is one image as `main_stuff.png` — instead of after the last segment of its storage key, which now supplies only the extension, so the same run saves under the same names from either SDK. `artifact_filename(location, content_type, scope)` replaces `artifact_filename(uri, content_type, index)` and raises `ArtifactOperationError` for anything but an `ArtifactLocation` whose first path is in the walk's notation; a field whose name Windows reserves for a device (`aux`, `nul`, `com1` and the like) is saved with a trailing `_` (`aux_.png`); the full rule is on `docs/artifact-download.md`.
+- **`DownloadedArtifact` carries a required `found_at` (Breaking)**: every item of a `download_artifacts` verdict carries its reference's `found_at`, on the saved arm and the error arm alike, so a file that was not saved still says which field it would have filled. `DownloadedArtifact` is now an `ArtifactLocation`, so `artifact_filename` takes a verdict item as it is, and code that builds `DownloadedArtifact` values — a test fake standing in for `download_artifacts` — must now supply the field.
+
 ## [v0.11.0] - 2026-09-23
 
 ### Added
