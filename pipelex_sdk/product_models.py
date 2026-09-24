@@ -2,7 +2,7 @@
 
 These mirror `pipelex-sdk-js/src/product-models.ts`. They are the management surface
 the hosted product (`/v1/me`, `/v1/methods`, `/v1/organizations`, `/v1/billing/*`,
-`/v1/pipelex-api-keys`, `/v1/gateway-api-key`, `/v1/onboarding/submit`,
+`/v1/pipelex-api-keys`, `/v1/onboarding/submit`,
 `/v1/resolve-storage-url`, `/v1/upload`, `/v1/runs`) drives.
 
 The wire is snake_case. Each model holds only the fields the product actually
@@ -492,27 +492,6 @@ class PipelexApiKeyList(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     keys: list[PipelexApiKey]
-
-
-# ── Gateway API key (`/v1/gateway-api-key`, Portkey/LLM inference key) ────
-
-
-class GatewayApiKey(BaseModel):
-    """The provisioned gateway (LLM inference) API key — `POST /v1/gateway-api-key`."""
-
-    model_config = ConfigDict(extra="allow")
-
-    gateway_api_key: str
-    budget_usd: float | None = None
-
-
-class GatewayApiKeyStatus(BaseModel):
-    """The gateway key status — `GET /v1/gateway-api-key`."""
-
-    model_config = ConfigDict(extra="allow")
-
-    #: None until a gateway key has been provisioned.
-    gateway_api_key: str | None
 
 
 # ── Onboarding (`/v1/onboarding/submit`) ─────────────────────────────────

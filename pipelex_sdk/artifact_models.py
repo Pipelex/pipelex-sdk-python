@@ -133,14 +133,35 @@ class DownloadArtifactsOptions(FetchArtifactOptions):
     max_total_bytes: int = DEFAULT_DOWNLOAD_MAX_TOTAL_BYTES
 
 
-class DownloadedArtifact(BaseModel):
-    """One reference's outcome in a download verdict — one shape with nullable fields, like
-    `ResolvedArtifact`: either `path` and `size` are set and `error` is `None`, or `error` is set and
-    both are `None`. `content_type` is the platform's guess from the reference's extension, known
-    before the fetch, on both arms.
+class ArtifactLocation(BaseModel):
+    """Where one `pipelex-storage://` reference sits in a walked value — what `locate_artifacts`
+    answers per reference. `found_at` lists every path at which the reference occurs, in walk order,
+    and is never empty: `found_at[0]` is where it was first seen, and the path a saved file is named
+    after.
+
+    A path is `$`-rooted: `$` is the walked value itself, an object key matching
+    `^[A-Za-z_][A-Za-z0-9_]*$` is `.key`, any other key is `["…"]` in JSON string escaping, and an
+    array index is `[n]` — `$.rooms[3].staged_photo.url`, `$.items[0].url`, `$["a key"].url`. It is
+    the exact path of the string, the final `url` of a content object included.
     """
 
+    #: The reference, exactly as it appears in the walked value.
     uri: str
+    #: Every `$`-rooted path at which the reference occurs, in walk order.
+    found_at: list[str]
+
+
+class DownloadedArtifact(ArtifactLocation):
+    """One reference's outcome in a download verdict — one shape with nullable fields, like
+    `ResolvedArtifact`: either `path` and `size` are set and `error` is `None`, or `error` is set and
+    both are `None`. `found_at` says where the reference sits in the walked scope, the first path
+    being the one that named the file, and `content_type` is the platform's guess from the
+    reference's extension, known before the fetch; both are on both arms, so an item that was not
+    saved still says which field it would have filled.
+
+    It is an `ArtifactLocation`, so `artifact_filename` takes a verdict item as it is.
+    """
+
     #: Absolute path of the written file.
     path: str | None = None
     content_type: str | None = None

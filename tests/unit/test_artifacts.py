@@ -11,17 +11,20 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import re
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import pytest
 
 from pipelex_sdk.artifact_models import (
     ArtifactItemError,
+    ArtifactLocation,
     ArtifactScope,
     BulkResolvedStorageUrls,
     DownloadArtifactsOptions,
+    DownloadedArtifact,
     FetchArtifactOptions,
     ResolvedArtifact,
 )
@@ -31,6 +34,7 @@ from pipelex_sdk.artifacts import (
     download_artifacts,
     fetch_artifact,
     is_storage_reference,
+    locate_artifacts,
     resolve_artifacts,
 )
 from pipelex_sdk.errors import (
@@ -59,6 +63,9 @@ if TYPE_CHECKING:
 _RUN_ID = "run-01J"
 _URI_PNG = "pipelex-storage://org_1/runs/01J/outputs/illustration.png"
 _URI_PDF = "pipelex-storage://org_1/runs/01J/outputs/report.pdf"
+_URI_INPUT = "pipelex-storage://org_1/uploads/brief.pdf"
+#: A key whose last segment carries no extension, so the content type decides it.
+_URI_BARE = "pipelex-storage://org_1/runs/01J/outputs/report"
 _STORE = "https://store.example.com"
 _PDF_BYTES = b"%PDF-1.4 tiny"
 _PNG_BYTES = b"\x89PNG tiny"
@@ -187,13 +194,71 @@ def _results(main_stuff: Any, *, working_memory: Any = _ABSENT_KEY, run_id: str 
     return RunResults.model_validate(body)
 
 
+def _at(path: str, uri: str = _URI_PNG) -> ArtifactLocation:
+    """A location at one path, for the naming rule's tests."""
+    return ArtifactLocation(uri=uri, found_at=[path])
+
+
 def _content(uri: str) -> dict[str, Any]:
     """A produced file as the runtime serializes it: the durable reference beside an expiring link."""
     return {"url": uri, "public_url": f"{_STORE}/signed-by-the-runtime?sig=stale"}
 
 
 class TestArtifacts:
-    # ── collect_artifacts ────────────────────────────────────────────
+    # ── locate_artifacts / collect_artifacts ─────────────────────────
+
+    def test_locates_every_reference_once_in_discovery_order_with_every_path_it_sits_at(self) -> None:
+        walked = {
+            "image": _content(_URI_PNG),
+            "pages": [{"url": _URI_PNG}, {"deeper": {"url": _URI_PDF}}, _URI_INPUT],
+            "text": "not a reference",
+            "count": 3,
+            "nothing": None,
+        }
+        assert locate_artifacts(walked) == [
+            ArtifactLocation(uri=_URI_PNG, found_at=["$.image.url", "$.pages[0].url"]),
+            ArtifactLocation(uri=_URI_PDF, found_at=["$.pages[1].deeper.url"]),
+            ArtifactLocation(uri=_URI_INPUT, found_at=["$.pages[2]"]),
+        ]
+        assert collect_artifacts(walked) == [location.uri for location in locate_artifacts(walked)]
+
+    @pytest.mark.parametrize(
+        ("walked", "expected"),
+        [
+            (_URI_PNG, "$"),
+            ({"url": _URI_PNG}, "$.url"),
+            ({"items": [{"url": _URI_PNG}]}, "$.items[0].url"),
+            ([[_URI_PNG]], "$[0][0]"),
+        ],
+    )
+    def test_roots_a_path_at_the_walked_value_itself(self, walked: Any, expected: str) -> None:
+        assert locate_artifacts(walked) == [ArtifactLocation(uri=_URI_PNG, found_at=[expected])]
+
+    def test_writes_an_identifier_key_dotted_and_any_other_as_a_json_string_in_brackets(self) -> None:
+        keys = ["_ok", "a key", "2nd", 'say "hi"\\', "", "café 📷", "line\nbreak", "\u2028", "\ud800"]
+        walked = {key: f"pipelex-storage://org_1/{index_key}.png" for index_key, key in enumerate(keys)}
+
+        # `JSON.stringify`'s escaping, so a path reads the same from the JS twin: the quote, the
+        # backslash, the control characters and a lone surrogate are escaped, and nothing else is.
+        assert [location.found_at[0] for location in locate_artifacts(walked)] == [
+            "$._ok",
+            '$["a key"]',
+            '$["2nd"]',
+            '$["say \\"hi\\"\\\\"]',
+            '$[""]',
+            '$["café 📷"]',
+            '$["line\\nbreak"]',
+            '$["\u2028"]',
+            '$["\\ud800"]',
+        ]
+
+    def test_walks_a_pydantic_model_by_its_dumped_keys(self) -> None:
+        assert locate_artifacts(_results({"picture": _content(_URI_PNG)})) == [
+            ArtifactLocation(uri=_URI_PNG, found_at=["$.main_stuff.picture.url"]),
+        ]
+
+    def test_reads_a_key_that_is_not_a_string_as_the_string_it_prints_as(self) -> None:
+        assert locate_artifacts({7: _URI_PNG}) == [ArtifactLocation(uri=_URI_PNG, found_at=['$["7"]'])]
 
     def test_collects_every_reference_once_in_discovery_order(self) -> None:
         walked = {
@@ -214,12 +279,13 @@ class TestArtifacts:
     )
     def test_counts_a_string_only_when_it_is_a_reference(self, value: str, expected: list[str]) -> None:
         assert collect_artifacts(value) == expected
+        assert [location.uri for location in locate_artifacts(value)] == expected
         assert is_storage_reference(value) is (expected != [])
 
     def test_ignores_values_that_carry_no_reference(self) -> None:
-        assert collect_artifacts(None) == []
-        assert collect_artifacts(42) == []
-        assert collect_artifacts({"a": [1, 2.5, True, None]}) == []
+        for value in (None, 42, {"a": [1, 2.5, True, None]}, {"note": f"Saved as {_URI_PDF}."}):
+            assert collect_artifacts(value) == []
+            assert locate_artifacts(value) == []
 
     def test_walks_a_pydantic_model_as_well_as_a_parsed_body(self) -> None:
         results = _results({"picture": _content(_URI_PNG)})
@@ -228,51 +294,144 @@ class TestArtifacts:
     # ── artifact_filename ────────────────────────────────────────────
 
     @pytest.mark.parametrize(
-        ("uri", "content_type", "expected"),
+        ("path", "scope", "expected"),
         [
-            ("pipelex-storage://org_1/runs/01J/outputs/report.pdf", "application/pdf", "report.pdf"),
-            # Path separators are the split point, so no traversal and no absolute path survives.
-            ("pipelex-storage://org_1/../../etc/passwd", None, "passwd"),
-            # An encoded traversal is one segment, decoded after the split: the separators it hid
-            # become underscores and the leading dots go, so it still names a file in the directory.
-            ("pipelex-storage://org_1/x/..%2F..%2Fetc%2Fpasswd", None, "etc_passwd"),
-            ("pipelex-storage://org_1/x/a\\b\\c.txt", None, "c.txt"),
-            # A leading dot is stripped, so no hidden file; odd characters are neutralized.
-            ("pipelex-storage://org_1/.bashrc", None, "bashrc"),
-            ("pipelex-storage://org_1/my file (1).png", "image/png", "my_file__1_.png"),
-            # Percent-decoded, with the query and fragment dropped.
-            ("pipelex-storage://org_1/a%20b.pdf?sig=x#frag", None, "a_b.pdf"),
-            # The extension comes from the content type only when the key carries none.
-            ("pipelex-storage://org_1/outputs/report", "application/pdf", "report.pdf"),
-            ("pipelex-storage://org_1/outputs/report.bin", "application/pdf", "report.bin"),
-            ("pipelex-storage://org_1/outputs/report", "image/png; charset=binary", "report.png"),
-            ("pipelex-storage://org_1/outputs/report", "application/x-unknown", "report"),
-            ("pipelex-storage://org_1/outputs/report", None, "report"),
-            # Nothing usable in the key: the numbered fallback, one-based.
-            ("pipelex-storage://", None, "artifact-3"),
-            ("pipelex-storage://org_1/___", None, "artifact-3"),
+            # The walked value itself, or its `url`, takes the scope's name.
+            ("$", ArtifactScope.MAIN_STUFF, "main_stuff.png"),
+            ("$.url", ArtifactScope.MAIN_STUFF, "main_stuff.png"),
+            ("$.url", ArtifactScope.WORKING_MEMORY, "working_memory.png"),
+            # A list member is named after the envelope and its index.
+            ("$.items[0].url", ArtifactScope.MAIN_STUFF, "items-0.png"),
+            ("$[2].url", ArtifactScope.MAIN_STUFF, "2.png"),
+            # A nested field is named after its whole path.
+            ("$.rooms[3].staged_photo.url", ArtifactScope.MAIN_STUFF, "rooms-3-staged_photo.png"),
+            # Only a final `url` key is dropped: another key, or a `url` key that is not final, is kept.
+            ("$.photo.src", ArtifactScope.MAIN_STUFF, "photo-src.png"),
+            ("$.photo.URL", ArtifactScope.MAIN_STUFF, "photo-URL.png"),
+            ("$.url.original", ArtifactScope.MAIN_STUFF, "url-original.png"),
+            ("$.links.url[0]", ArtifactScope.MAIN_STUFF, "links-url-0.png"),
+            ('$["url"]', ArtifactScope.MAIN_STUFF, "main_stuff.png"),
+            # A key that is not an identifier is reduced to `[A-Za-z0-9_]`, dashes and dots included.
+            ('$["a key"].url', ArtifactScope.MAIN_STUFF, "a_key.png"),
+            ('$["staged-photo.v2"].url', ArtifactScope.MAIN_STUFF, "staged_photo_v2.png"),
+            ('$["café 📷"].url', ArtifactScope.MAIN_STUFF, "caf___.png"),
+            ('$["2nd"]', ArtifactScope.MAIN_STUFF, "2nd.png"),
+            ('$[""].url', ArtifactScope.MAIN_STUFF, "main_stuff.png"),
         ],
     )
-    def test_derives_a_filename_that_can_only_name_a_file_in_the_directory(self, uri: str, content_type: str | None, expected: str) -> None:
-        assert artifact_filename(uri, content_type, 2) == expected
+    def test_names_a_file_after_the_field_it_fills(self, path: str, scope: ArtifactScope, expected: str) -> None:
+        assert artifact_filename(_at(path), "image/png", scope) == expected
 
-    def test_caps_the_filename_length_keeping_the_extension(self) -> None:
-        name = artifact_filename(f"pipelex-storage://org_1/{'a' * 400}.pdf", None, 0)
-        assert len(name) == 128
-        assert name.endswith(".pdf")
+    @pytest.mark.parametrize(
+        "path",
+        ['$["../../etc/passwd"]', '$[".."].url', '$["."]', '$[".env"]', '$["a\\u0000b\\nc"]', '$["C:\\\\Windows"]'],
+    )
+    def test_cannot_name_anything_outside_the_directory_nor_a_hidden_file(self, path: str) -> None:
+        name = artifact_filename(_at(path, "pipelex-storage://x/.."), None, ArtifactScope.MAIN_STUFF)
+        assert re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*(\.[A-Za-z0-9]+)?", name)
 
-    def test_drops_an_extension_that_alone_exceeds_the_cap(self) -> None:
-        name = artifact_filename(f"pipelex-storage://org_1/name.{'z' * 400}", None, 0)
-        assert len(name) == 128
-        assert name.startswith("name.")
+    def test_reduces_a_traversal_key_to_one_plain_name(self) -> None:
+        assert artifact_filename(_at('$["../../etc/passwd"]', _URI_BARE), None, ArtifactScope.MAIN_STUFF) == "______etc_passwd"
 
-    # ── resolve_artifacts ────────────────────────────────────────────
-
-    def test_caps_the_length_after_the_guessed_extension(self) -> None:
-        name = artifact_filename(f"pipelex-storage://org_1/{'a' * 200}", "image/jpeg", 0)
+    def test_keeps_the_tail_of_a_long_name_dropping_whole_leading_segments_first(self) -> None:
+        segments = [f"segment_{index_segment:02d}" for index_segment in range(20)]
+        name = artifact_filename(_at(f"$.{'.'.join(segments)}.url"), None, ArtifactScope.MAIN_STUFF)
 
         assert len(name) <= 128
-        assert name.endswith(".jpg")
+        assert name == f"{'-'.join(segments[9:])}.png"
+
+    def test_cuts_a_single_segment_still_too_long_keeping_the_extension(self) -> None:
+        long_key = "a" * 300
+        assert artifact_filename(_at(f"$.short.{long_key}.url"), None, ArtifactScope.MAIN_STUFF) == f"{'a' * 124}.png"
+        assert artifact_filename(_at(f"$.{long_key}", _URI_BARE), None, ArtifactScope.MAIN_STUFF) == "a" * 128
+
+    @pytest.mark.parametrize(
+        ("uri", "content_type", "expected"),
+        [
+            # The storage key's extension first, then the content type's, else none.
+            (_URI_PNG, "application/pdf", "cover.png"),
+            (_URI_BARE, "application/pdf", "cover.pdf"),
+            (_URI_BARE, "image/png; charset=binary", "cover.png"),
+            (_URI_BARE, "application/x-unknown", "cover"),
+            (_URI_BARE, None, "cover"),
+            # The key's last segment, percent-decoded, its query and fragment dropped.
+            ("pipelex-storage://x/hello%20world.pdf?token=1#frag", None, "cover.pdf"),
+            ("pipelex-storage://x/photo%2Epng", None, "cover.png"),
+            ("pipelex-storage://a/..\\..\\secret.txt", None, "cover.txt"),
+            # Reduced to `[A-Za-z0-9]`, never a leading dot, never empty, never long.
+            ("pipelex-storage://x/photo.P-N_G", None, "cover.PNG"),
+            ("pipelex-storage://x/.env", None, "cover"),
+            ("pipelex-storage://x/report.", None, "cover"),
+            (f"pipelex-storage://x/stem.{'z' * 300}", None, "cover"),
+            (f"pipelex-storage://x/stem.{'z' * 300}", "text/csv", "cover.csv"),
+            # Where `decodeURIComponent` would throw — a stray `%`, bytes that are not UTF-8 — the
+            # segment is read as typed, so both SDKs find the same extension.
+            ("pipelex-storage://x/bad%zz.pdf", None, "cover.pdf"),
+            ("pipelex-storage://x/a%2Eb%zz", None, "cover"),
+            ("pipelex-storage://x/photo.p%FFng", None, "cover.pFFng"),
+        ],
+    )
+    def test_takes_the_extension_from_the_storage_key_then_the_content_type(self, uri: str, content_type: str | None, expected: str) -> None:
+        assert artifact_filename(_at("$.cover.url", uri), content_type, ArtifactScope.MAIN_STUFF) == expected
+
+    @pytest.mark.parametrize(
+        ("path", "uri", "expected"),
+        [
+            ("$.aux.url", _URI_PNG, "aux_.png"),
+            ("$.NUL", _URI_PNG, "NUL_.png"),
+            ("$.Com1.url", _URI_PNG, "Com1_.png"),
+            ("$.lpt9", _URI_BARE, "lpt9_"),
+            ('$[""].con.url', _URI_PNG, "con_.png"),
+            # The cap drops every leading segment and leaves the device name alone.
+            (f"$.{'x' * 130}.prn.url", _URI_PNG, "prn_.png"),
+            # Only the whole stem is a device name: a join or a longer word is not one.
+            ("$.a.nul.url", _URI_PNG, "a-nul.png"),
+            ("$.auxiliary.url", _URI_PNG, "auxiliary.png"),
+            ("$.com10.url", _URI_PNG, "com10.png"),
+        ],
+    )
+    def test_suffixes_a_stem_windows_reserves_for_a_device(self, path: str, uri: str, expected: str) -> None:
+        assert artifact_filename(_at(path, uri), None, ArtifactScope.MAIN_STUFF) == expected
+
+    @pytest.mark.parametrize(
+        "location",
+        [
+            ArtifactLocation(uri=_URI_PNG, found_at=[]),
+            _at("rooms.url"),
+            _at("$.rooms["),
+            _at("$[-1]"),
+            _at('$["unterminated]'),
+            _at('$["\\x"]'),
+            _at("$.a b"),
+            # The old signature's bare uri.
+            cast("ArtifactLocation", _URI_PNG),
+        ],
+    )
+    def test_refuses_a_location_whose_first_path_is_not_in_the_walks_notation(self, location: ArtifactLocation) -> None:
+        with pytest.raises(ArtifactOperationError):
+            artifact_filename(location, None, ArtifactScope.MAIN_STUFF)
+
+    @pytest.mark.parametrize("scope", ["other", 0])
+    def test_refuses_an_unknown_scope(self, scope: object) -> None:
+        with pytest.raises(ArtifactOperationError, match='"scope" must be'):
+            artifact_filename(_at("$.url"), None, cast("ArtifactScope", scope))
+
+    def test_names_every_location_the_walk_writes_through_the_round_trip_of_its_notation(self) -> None:
+        walked = {
+            'say "hi"\\': {"url": "pipelex-storage://org_1/a.png"},
+            "line\nbreak": {"url": "pipelex-storage://org_1/b.png"},
+            "\u2028": {"url": "pipelex-storage://org_1/c.png"},
+            "[0]": {"url": "pipelex-storage://org_1/d.png"},
+            "\ud800": {"url": "pipelex-storage://org_1/e.png"},
+        }
+        names = [artifact_filename(location, None, ArtifactScope.MAIN_STUFF) for location in locate_artifacts(walked)]
+        assert names == ["say__hi__.png", "line_break.png", "_.png", "_0_.png", "_.png"]
+
+    def test_takes_a_verdict_item_as_its_location(self) -> None:
+        item = DownloadedArtifact(uri=_URI_BARE, found_at=["$.report.url"], content_type="application/pdf", error=None)
+        assert artifact_filename(item, item.content_type, ArtifactScope.MAIN_STUFF) == "report.pdf"
+
+    # ── resolve_artifacts ────────────────────────────────────────────
 
     def test_resolves_a_list_within_the_bound_in_one_call_and_keeps_request_order(self) -> None:
         client = _FakeClient(resolve=_resolver(_resolved(_URI_PNG), _refused(_URI_PDF)))
@@ -587,9 +746,10 @@ class TestArtifacts:
         assert [artifact.uri for artifact in verdict.artifacts] == [_URI_PNG, _URI_PDF]
         assert [artifact.size for artifact in verdict.artifacts] == [len(_PNG_BYTES), len(_PDF_BYTES)]
         assert [artifact.content_type for artifact in verdict.artifacts] == ["image/png", "application/pdf"]
-        assert verdict.saved_paths == [str(target / "illustration.png"), str(target / "report.pdf")]
-        assert (target / "illustration.png").read_bytes() == _PNG_BYTES
-        assert (target / "report.pdf").read_bytes() == _PDF_BYTES
+        assert [artifact.found_at for artifact in verdict.artifacts] == [["$.items[0].url"], ["$.items[1].url"]]
+        assert verdict.saved_paths == [str(target / "items-0.png"), str(target / "items-1.pdf")]
+        assert (target / "items-0.png").read_bytes() == _PNG_BYTES
+        assert (target / "items-1.pdf").read_bytes() == _PDF_BYTES
 
     def test_takes_results_in_hand_without_re_reading_and_creates_the_directory(self, mocker: MockerFixture, tmp_path: Path) -> None:
         client = _FakeClient(resolve=_resolver(_resolved(_URI_PDF)))
@@ -614,10 +774,11 @@ class TestArtifacts:
         )
         client = _FakeClient(resolve=_resolver(_resolved(_URI_PDF), _resolved(_URI_PNG, content_type="image/png")))
         _patch_storage(mocker, _serving(_PDF_BYTES))
+        target = tmp_path / "out"
         verdict = asyncio.run(
             download_artifacts(
                 client,
-                dir_path=tmp_path / "out",
+                dir_path=target,
                 results=results,
                 options=DownloadArtifactsOptions(scope=ArtifactScope.WORKING_MEMORY),
             )
@@ -625,27 +786,91 @@ class TestArtifacts:
 
         assert verdict.scope == ArtifactScope.WORKING_MEMORY
         assert [artifact.uri for artifact in verdict.artifacts] == [_URI_PDF, _URI_PNG]
+        assert [artifact.found_at for artifact in verdict.artifacts] == [["$.root.doc.content.url"], ["$.root.picture.content.url"]]
         assert verdict.all_saved is True
+        assert verdict.saved_paths == [str(target / "root-doc-content.pdf"), str(target / "root-picture-content.png")]
 
     def test_never_overwrites_a_name_already_on_disk(self, mocker: MockerFixture, tmp_path: Path) -> None:
-        other = "pipelex-storage://org_1/runs/01J/second/report.pdf"
-        client = _FakeClient(resolve=_resolver(_resolved(_URI_PDF), _resolved(other)))
+        client = _FakeClient(resolve=_resolver(_resolved(_URI_PDF)))
         _patch_storage(mocker, _serving(_PDF_BYTES))
         target = tmp_path / "out"
         target.mkdir()
-        (target / "report.pdf").write_bytes(b"do not touch me")
+        (target / "main_stuff.pdf").write_bytes(b"do not touch me")
+        (target / "main_stuff-1.pdf").write_bytes(b"nor me")
+
+        verdict = asyncio.run(download_artifacts(client, dir_path=target, results=_results(_content(_URI_PDF))))
+
+        assert verdict.saved_paths == [str(target / "main_stuff-2.pdf")]
+        assert (target / "main_stuff.pdf").read_bytes() == b"do not touch me"
+        assert (target / "main_stuff-1.pdf").read_bytes() == b"nor me"
+
+    def test_names_each_file_after_the_field_it_fills_and_reports_every_path_on_both_arms(self, mocker: MockerFixture, tmp_path: Path) -> None:
+        client = _FakeClient(
+            resolve=_resolver(
+                _resolved(_URI_INPUT),
+                _resolved(_URI_PNG, content_type="image/png"),
+                _refused(_URI_PDF, detail="another organization"),
+            )
+        )
+        _patch_storage(mocker, _serving(_PNG_BYTES))
+        target = tmp_path / "out"
+        main_stuff = {
+            "rooms": [
+                {"original_photo": _content(_URI_INPUT), "staged_photo": _content(_URI_PNG)},
+                {"original_photo": _content(_URI_PDF)},
+            ],
+            "cover": _content(_URI_PNG),
+        }
+
+        verdict = asyncio.run(download_artifacts(client, dir_path=target, results=_results(main_stuff)))
+
+        assert [(artifact.uri, artifact.found_at, artifact.path) for artifact in verdict.artifacts] == [
+            (_URI_INPUT, ["$.rooms[0].original_photo.url"], str(target / "rooms-0-original_photo.pdf")),
+            (_URI_PNG, ["$.rooms[0].staged_photo.url", "$.cover.url"], str(target / "rooms-0-staged_photo.png")),
+            (_URI_PDF, ["$.rooms[1].original_photo.url"], None),
+        ]
+        assert sorted(entry.name for entry in target.iterdir()) == ["rooms-0-original_photo.pdf", "rooms-0-staged_photo.png"]
+
+    def test_tells_apart_two_paths_that_reduce_to_one_name_with_the_suffix_rule(self, mocker: MockerFixture, tmp_path: Path) -> None:
+        second = "pipelex-storage://org_1/runs/01J/outputs/second.png"
+        client = _FakeClient(resolve=_resolver(_resolved(_URI_PNG), _resolved(second)))
+        _patch_storage(mocker, _serving(_PNG_BYTES))
+        target = tmp_path / "out"
 
         verdict = asyncio.run(
             download_artifacts(
                 client,
                 dir_path=target,
-                results=_results({"items": [_content(_URI_PDF), _content(other)]}),
+                results=_results({"staged photo": _content(_URI_PNG), "staged-photo": _content(second)}),
                 options=DownloadArtifactsOptions(concurrency=1),
             )
         )
 
-        assert verdict.saved_paths == [str(target / "report-1.pdf"), str(target / "report-2.pdf")]
-        assert (target / "report.pdf").read_bytes() == b"do not touch me"
+        assert verdict.saved_paths == [str(target / "staged_photo.png"), str(target / "staged_photo-1.png")]
+
+    def test_saves_every_file_under_the_name_artifact_filename_gives_its_location(self, mocker: MockerFixture, tmp_path: Path) -> None:
+        uris = ["pipelex-storage://org_1/a.png", "pipelex-storage://org_1/b", "pipelex-storage://org_1/c.pdf"]
+        client = _FakeClient(resolve=_resolver(*[_resolved(uri, content_type=None) for uri in uris]))
+        _patch_storage(mocker, _serving(_PNG_BYTES))
+        target = tmp_path / "out"
+        main_stuff = {'say "hi"\\': {"url": uris[0]}, "line\nbreak": [{"url": uris[1]}], "url": uris[2]}
+
+        verdict = asyncio.run(download_artifacts(client, dir_path=target, results=_results(main_stuff)))
+
+        predicted = [artifact_filename(location, None, ArtifactScope.MAIN_STUFF) for location in locate_artifacts(main_stuff)]
+        assert predicted == ["say__hi__.png", "line_break-0", "main_stuff.pdf"]
+        assert verdict.saved_paths == [str(target / name) for name in predicted]
+        # A verdict item is a location too, and names its own file.
+        assert [artifact_filename(artifact, artifact.content_type, verdict.scope) for artifact in verdict.artifacts] == predicted
+
+    def test_refuses_an_unknown_scope_before_reading_anything(self, tmp_path: Path) -> None:
+        client = _FakeClient()
+        # Pydantic refuses the unknown scope at construction; only an unvalidated model reaches here.
+        options = DownloadArtifactsOptions.model_construct(scope=cast("ArtifactScope", "everything"))
+
+        with pytest.raises(ArtifactOperationError, match='"scope" must be'):
+            asyncio.run(download_artifacts(client, dir_path=tmp_path, run_id=_RUN_ID, options=options))
+        assert client.run_result_calls == []
 
     def test_keeps_a_per_reference_refusal_as_that_items_error_beside_the_saved_ones(self, mocker: MockerFixture, tmp_path: Path) -> None:
         client = _FakeClient(resolve=_resolver(_refused(_URI_PNG), _resolved(_URI_PDF)))
@@ -659,8 +884,9 @@ class TestArtifacts:
         assert first.error is not None
         assert first.error.code == "forbidden"
         assert first.path is None
+        assert first.found_at == ["$.items[0].url"]
         assert verdict.artifacts[1].error is None
-        assert len(verdict.saved_paths) == 1
+        assert verdict.saved_paths == [str(tmp_path / "out" / "items-1.pdf")]
 
     def test_re_resolves_a_link_that_has_expired_by_the_time_its_task_reaches_it(self, mocker: MockerFixture, tmp_path: Path) -> None:
         answers = [
@@ -706,6 +932,7 @@ class TestArtifacts:
         assert caught.value.status == 403
         assert verdict.saved_paths == []
         assert [artifact.error.code for artifact in verdict.artifacts if artifact.error is not None] == ["aborted", "aborted"]
+        assert [artifact.found_at for artifact in verdict.artifacts] == [["$.items[0].url"], ["$.items[1].url"]]
 
     def test_raises_a_credential_failure_part_way_through_carrying_the_verdict_so_far(self, mocker: MockerFixture, tmp_path: Path) -> None:
         def _resolve(uris: list[str]) -> BulkResolvedStorageUrls:
@@ -905,7 +1132,7 @@ class TestArtifacts:
         async def _cancel_midway() -> bool:
             task = asyncio.create_task(download_artifacts(client, dir_path=target, results=_results({"doc": _content(_URI_PDF)})))
             await asyncio.sleep(0.12)
-            assert (target / "report.pdf").exists()
+            assert (target / "doc.pdf").exists()
             task.cancel()
             try:
                 await task
@@ -934,7 +1161,7 @@ class TestArtifacts:
         verdict = asyncio.run(api_client.download_artifacts(dir_path=target, results=_results({"doc": _content(_URI_PDF)})))
 
         assert verdict.all_saved is True
-        assert verdict.saved_paths == [str(target / "report.pdf")]
+        assert verdict.saved_paths == [str(target / "doc.pdf")]
         method, url = spy.call_args.args[0], spy.call_args.args[1]
         assert method == "POST"
         assert url.endswith("/v1/resolve-storage-url/bulk")

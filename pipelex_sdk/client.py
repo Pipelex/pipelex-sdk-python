@@ -69,8 +69,6 @@ from pipelex_sdk.product_models import (
     BillingPortalResponse,
     ChangePlanResponse,
     CheckoutResponse,
-    GatewayApiKey,
-    GatewayApiKeyStatus,
     InvoiceView,
     Membership,
     MembershipsResponse,
@@ -1129,17 +1127,6 @@ class PipelexAPIClient(MthdsAPIClient):
         """
         return PipelexApiKeyCreated.model_validate(await self._request_product("POST", f"pipelex-api-keys/{quote(key_id, safe='')}/rotate"))
 
-    async def create_gateway_api_key(self, promo_code: str | None) -> GatewayApiKey:
-        """Provision the gateway (LLM inference) API key — `POST /v1/gateway-api-key`.
-
-        The JSON body is ALWAYS sent (even with `promo_code=None`) — the server 422s an empty body.
-        """
-        return GatewayApiKey.model_validate(await self._request_product("POST", "gateway-api-key", body={"promo_code": promo_code}))
-
-    async def get_gateway_api_key(self) -> GatewayApiKeyStatus:
-        """The gateway key status (`None` until provisioned) — `GET /v1/gateway-api-key`."""
-        return GatewayApiKeyStatus.model_validate(await self._request_product("GET", "gateway-api-key"))
-
     async def submit_onboarding(self, submission: OnboardingSubmission) -> None:
         """Submit the onboarding questionnaire — `POST /v1/onboarding/submit` (empty body)."""
         body = submission.model_dump(mode="json", exclude_none=True)
@@ -1164,7 +1151,8 @@ class PipelexAPIClient(MthdsAPIClient):
         """Resolve a whole list of `pipelex-storage://` references through the bulk route, chunked at
         its bound, answering one `ResolvedArtifact` per reference in request order with per-reference
         failure as a value. The reading layer of the artifact stack: pair it with `collect_artifacts`
-        to mint fresh links for everything a run produced. See `docs/artifact-download.md`.
+        (or `locate_artifacts`, which also says where each reference sits) to mint fresh links for
+        everything a run produced. See `docs/artifact-download.md`.
         """
         return await _resolve_artifacts_impl(self, uris)
 
@@ -1188,8 +1176,9 @@ class PipelexAPIClient(MthdsAPIClient):
 
         Keyed on a `run_id` (the results are re-read, so it works days after the run) or a `RunResults`
         in hand; walks the `main_stuff` scope by default, `working_memory` on request; resolves every
-        link fresh (never the embedded `public_url`); and returns a produced verdict, one entry per
-        reference, errors as values. See `docs/artifact-download.md`.
+        link fresh (never the embedded `public_url`); names each file after the field it fills; and
+        returns a produced verdict, one entry per reference with the paths it sits at, errors as
+        values. See `docs/artifact-download.md`.
         """
         return await _download_artifacts_impl(self, dir_path=dir_path, run_id=run_id, results=results, options=options)
 

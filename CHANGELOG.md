@@ -8,6 +8,18 @@
 - **`pipelex_sdk.user_agent.AppInfo` is the `mthds` class (Breaking)**: the module re-exports `mthds.runners.api.user_agent.AppInfo`, so the import keeps working but `details` is typed `tuple[str, ...]` instead of `list[str]` and the model is no longer strict — a tuple is now accepted, a list is still accepted at run time and stored as a tuple, and a type checker flags a list.
 - **`pipelex_sdk.user_agent` slimmed to this SDK's token (Breaking)**: `build_user_agent`, `is_token`, `MAX_USER_AGENT_LENGTH`, `MTHDS_TOKEN_NAME` and `AppInfo.render()` are removed in favour of their `mthds.runners.api.user_agent` counterparts (`build_user_agent`, `render_app_info`, `MAX_USER_AGENT_LENGTH`), the module keeps `SDK_TOKEN_NAME` and adds `pipelex_sdk_token()`, and a platform value that is not a token is no longer dropped from the `(<os>; <arch>)` comment by this SDK, only an empty one.
 
+## [v0.12.0] - 2026-09-24
+
+### Added
+
+- **`locate_artifacts` and `ArtifactLocation`**: `pipelex_sdk.artifacts.locate_artifacts(value)` is the artifact walk with its paths — every `pipelex-storage://` reference in a JSON value, deduplicated in discovery order exactly as `collect_artifacts` returns them, each as an `ArtifactLocation` whose `found_at` lists every `$`-rooted path at which it sits (`$.rooms[3].staged_photo.url`, `$.items[0].url`, `$["a key"].url`), written the way `@pipelex/sdk`'s `locateArtifacts` writes them.
+
+### Changed
+
+- **`download_artifacts` names each file after the field it fills, and `artifact_filename` takes a location (Breaking)**: a saved file is named after the first path at which its reference sits — `$.rooms[3].staged_photo.url` is saved as `rooms-3-staged_photo.png`, and an output that is one image as `main_stuff.png` — instead of after the last segment of its storage key, which now supplies only the extension, so the same run saves under the same names from either SDK. `artifact_filename(location, content_type, scope)` replaces `artifact_filename(uri, content_type, index)` and raises `ArtifactOperationError` for anything but an `ArtifactLocation` whose first path is in the walk's notation; a field whose name Windows reserves for a device (`aux`, `nul`, `com1` and the like) is saved with a trailing `_` (`aux_.png`); the full rule is on `docs/artifact-download.md`.
+- **`DownloadedArtifact` carries a required `found_at` (Breaking)**: every item of a `download_artifacts` verdict carries its reference's `found_at`, on the saved arm and the error arm alike, so a file that was not saved still says which field it would have filled. `DownloadedArtifact` is now an `ArtifactLocation`, so `artifact_filename` takes a verdict item as it is, and code that builds `DownloadedArtifact` values — a test fake standing in for `download_artifacts` — must now supply the field.
+- **Requires `mthds` 0.15.0 (Breaking)**: the exact pin moves from 0.14.0, so `pipelex-sdk` can again be installed beside `pipelex`, which has pinned `mthds==0.15.0` exactly since its 0.60.0. Nothing in this client's own surface changes: the release's breaking cut to `ConceptAbstract` and `StuffAbstract` sits in protocol models this SDK does not build on, and `parse_method_files` / `serialize_method_files` stay beside the canonical `mthds.protocol.method_files` for the reason `docs/architecture.md` gives.
+
 ## [v0.11.0] - 2026-09-23
 
 ### Added
@@ -36,6 +48,10 @@
 
 - **The blocking path stops dropping the executed graph.** Against a bare runner, `start_and_wait` now lifts `pipe_output.graph_spec` onto `RunResults.graph_spec` instead of writing `None` — the runner has always returned the graph there — so the field carries the same document whichever path ran.
 - **A stored source nested too deeply to decode now fails as a `ValidationError`**: `parse_method_files` converts the JSON decoder's `RecursionError` into the `ValueError` its contract documents, so `MethodData`'s validator surfaces it as a `pydantic.ValidationError` like any other malformed response body instead of letting a bare `RecursionError` escape `get_method` past a caller's `except ValidationError`.
+
+### Removed
+
+- **The Pipelex Gateway inference key is gone from the client (Breaking)**: `create_gateway_api_key` and `get_gateway_api_key`, with the `GatewayApiKey` and `GatewayApiKeyStatus` models, are removed — the `POST` and `GET /v1/gateway-api-key` routes behind them no longer exist on the hosted API. A caller brings its own provider keys, or runs against the hosted API with a Pipelex API key (`list_pipelex_api_keys` and friends, which are untouched). This has nothing to do with the hosted HTTP gateway's synchronous-execute ceiling, which is unchanged.
 
 ## [v0.10.0] - 2026-09-13
 
