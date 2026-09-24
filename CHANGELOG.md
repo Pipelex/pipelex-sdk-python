@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **`User-Agent` built through the `mthds` client seam**: `PipelexAPIClient` now overrides `user_agent_sdk_tokens()` to put `pipelex-sdk-python/<version>` before `mthds-python/<version>` and calls `init_user_agent(app_info)` from its constructor, so the builder, the runtime token and the 512-character ceiling are those of `mthds.runners.api.user_agent`; the header keeps its shape, `[app_info] pipelex-sdk-python/<version> mthds-python/<version> python/<x.y.z> (<os>; <arch>)`, and the `mthds` pin moves from `0.14.0` to `0.16.0`.
+- **`pipelex_sdk.user_agent.AppInfo` is the `mthds` class (Breaking)**: the module re-exports `mthds.runners.api.user_agent.AppInfo`, so the import keeps working but `details` is typed `tuple[str, ...]` instead of `list[str]` and the model is no longer strict — a tuple is now accepted, a list is still accepted at run time and stored as a tuple, and a type checker flags a list.
+- **`pipelex_sdk.user_agent` slimmed to this SDK's token (Breaking)**: `build_user_agent`, `is_token`, `MAX_USER_AGENT_LENGTH`, `MTHDS_TOKEN_NAME` and `AppInfo.render()` are removed in favour of their `mthds.runners.api.user_agent` counterparts (`build_user_agent`, `render_app_info`, `MAX_USER_AGENT_LENGTH`), the module keeps `SDK_TOKEN_NAME` and adds `pipelex_sdk_token()`, and a platform value that is not a token is no longer dropped from the `(<os>; <arch>)` comment by this SDK, only an empty one.
+
 ## [v0.12.0] - 2026-09-24
 
 ### Added

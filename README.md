@@ -22,7 +22,7 @@ The SDK never reads the `mthds` resolver (`MTHDS_API_KEY` / `MTHDS_BASE_URL` / `
 
 `request_timeout_seconds` (constructor argument, default 20 min) sets the per-instance blocking-execute ceiling the inherited protocol routes (`execute` / `start` / `validate` / `models` / `version`) use.
 
-`app_info` (constructor argument, an `AppInfo` from `pipelex_sdk.user_agent`) puts your application's name in front of the SDK's own tokens in the `User-Agent` that every request carries — `acme-invoicer/1.4.0 pipelex-sdk-python/0.11.0 mthds-python/0.15.0 python/3.12.4 (linux; x86_64)` — which the platform uses to attribute traffic in its analytics. The header follows the workspace spec `docs/specs/client-identification.md`; see [`docs/client-identification.md`](docs/client-identification.md).
+`app_info` (constructor argument, an `AppInfo`, the `mthds` class re-exported from `pipelex_sdk.user_agent`) puts your application's name in front of the SDK's own tokens in the `User-Agent` that every request carries — `acme-invoicer/1.4.0 pipelex-sdk-python/0.11.0 mthds-python/0.16.0 python/3.12.4 (linux; x86_64)` — which the platform uses to attribute traffic in its analytics. The header follows the workspace spec `docs/specs/client-identification.md`; see [`docs/client-identification.md`](docs/client-identification.md).
 
 The client is **async-only** (httpx `AsyncClient`) and is an async context manager.
 
@@ -145,7 +145,7 @@ There is no barrel import — package `__init__.py` files stay empty. Import eac
 - **Codegen tree** — `from pipelex_sdk.codegen_writer import write_codegen_tree, CodegenTreeWriteReport` to write one, `from pipelex_sdk.codegen_check import run_codegen_check, CodegenCheckReport, CodegenDrift, DriftCategory` to verify one, with the format primitives in `pipelex_sdk.codegen_lock` (`CodegenLock`, `parse_lock`, `load_lock`, `validate_artifact_path`, ...) and `pipelex_sdk.codegen_stamp` (`STAMPABLE_SUFFIXES`, `is_stampable_artifact_path`, `compute_content_hash`, `parse_stamped`, ...)
 - **Typed errors** — `from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError, PipelineExecuteTimeoutError, PagingNotTerminatingError, RunFailedError, RunTimeoutError, RunLifecycleUnavailableError, RunStillRunningError, CodegenError, CodegenLockError, ...`
 - **Version** — `from pipelex_sdk.version import __version__`
-- **Client identification** — `from pipelex_sdk.user_agent import AppInfo, build_user_agent, is_token`
+- **Client identification** — `from pipelex_sdk.user_agent import AppInfo, SDK_TOKEN_NAME, pipelex_sdk_token` (`AppInfo` is `mthds.runners.api.user_agent.AppInfo`, re-exported)
 - **Protocol surface** (the MTHDS standard's wire types) comes from the `mthds` dependency — e.g. `from mthds.protocol.exceptions import PipelineRequestError`, `from mthds.protocol.models import ValidationResult` (the neutral verdict union that `PipelexValidationResult` narrows).
 - **Input-form descriptors and pipe I/O contracts** come from `mthds` too, because they are the standard's artifacts and this SDK only carries them: `from mthds.protocol.input_form import InputForm, InputFormField, ListField, TextField, ...` and `from mthds.protocol.pipe_io_contracts import PipeIOContracts, PipeInputContract, PresenceMarker, IOMultiplicity, ...`. `PipelexValidationReport.input_form` and `.pipe_io_contracts` are typed with them, so a node narrows on its `kind` and a slot's presence and multiplicity read as enums — but `pipelex_sdk` does not re-export the vocabulary, and importing it from here is the one supported path.
 
