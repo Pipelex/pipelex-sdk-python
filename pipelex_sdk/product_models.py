@@ -24,6 +24,7 @@ from typing import Any, cast
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_serializer, field_validator
 
 from pipelex_sdk._pydantic_utils import empty_list_factory_of
+from pipelex_sdk.error_models import RunErrorReport
 from pipelex_sdk.runs import RunStatus
 
 # ── User profile (`/v1/me`) ─────────────────────────────────────────────
@@ -601,18 +602,6 @@ class PipeStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     SKIPPED = "skipped"
-
-
-class RunErrorReport(BaseModel):
-    """A failed run's error, narrowed to the two fields a consumer may rely on.
-
-    The runner's own report is considerably more verbose; only these two are contractual.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    message: str | None = None
-    error_type: str | None = None
 
 
 class PipelineRun(BaseModel):

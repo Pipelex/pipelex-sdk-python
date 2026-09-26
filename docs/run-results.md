@@ -80,10 +80,15 @@ match state:
     case RunResultRunning():
         print(f"not finished — poll again in {state.retry_after_seconds or 2}s")
     case RunResultFailed():
-        print(f"run ended as {state.status}: {state.message}")
+        # `state.message` already names the status and the reason; `state.error` is the run's report.
+        print(state.message)
+        if state.error is not None and state.error.user_action is not None:
+            print(f"next step: {state.error.user_action.detail}")
 ```
 
 `get_run_result` is the single-shot lookup and returns that discriminated state. `wait_for_result(run_id)` drives the same lookup in a loop, honouring the server's `Retry-After`, and returns the `RunResults` directly — raising `RunFailedError` on a terminal non-completed status and `RunTimeoutError` when the budget runs out.
+
+A run that ended without a result has no `RunResults`, but it does have a reason. The results read answers it with a `409` whose problem document carries the run's status and its stored error report, and the failed arm carries both: `status` is the typed `RunStatus`, `message` is the platform's sentence (`Run finished with status FAILED: <message>`), and `error` is the report typed whole as `RunErrorReport` (`pipelex_sdk.error_models`) — `error_type`, `title`, `type_uri`, `error_domain`, `error_category`, `retryable`, `user_action`, `model`, `provider`, `provider_metadata`, `validation_errors`, and anything newer on `model_extra`. It is `None` for a run that ended with no report, such as a cancelled one. `RunFailedError` carries the same three as `status`, its message and `error`. Branch on `error_domain`, `type_uri` and `retryable`, never on the wording of `message`; the report is the runner's verbose one, provider text included, so what a person sees of it is the application's decision.
 
 ## `working_memory` — every named stuff of the run
 

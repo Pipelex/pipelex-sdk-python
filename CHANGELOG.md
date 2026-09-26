@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **A failed run's error report on `RunFailedError`, `RunResultFailed` and `RunRead`**: `RunFailedError.error`, `RunResultFailed.error` and `RunRead.error` (declared on `RunPublic`) carry the run's stored error report typed as `RunErrorReport`, so `wait_for_result`, `start_and_wait` and `download_artifacts` now raise with the reason the runner recorded, not only the status. The message of the error is the platform's `detail`, which names the status and then the report's message. `None` means the run ended with no report, such as a cancelled run. See `docs/run-results.md`.
+- **`ApiResponseError` carries the problem document's members**: `request_id` (read from the body, or from the `X-Request-ID` header when the body has none), `type_uri` (the problem's `type`), `title`, `error_domain`, `error_category`, `retryable`, `user_action`, `errors` (the platform's field-level list, typed as `FieldError`) and `problem`, the decoded document whole, for any member the SDK does not name. Branch on `error_domain` and `type_uri`, as the README now says; `code` and `error_type` remain each surface's finer native code.
+
+### Changed
+
+- **`RunErrorReport` carries every field of the runner's report and moves to `pipelex_sdk.error_models` (Breaking)**: import it from `pipelex_sdk.error_models` instead of `pipelex_sdk.product_models`. Beside `message` and `error_type` it now declares `title`, `type_uri`, `error_domain`, `error_category`, `retryable`, `user_action`, `model`, `provider`, `provider_metadata`, `caller_facing_message`, `validation_errors` and `migration`, every one optional and the model open to fields the runner adds, so `PipelineRun.error` in the run lists reads the whole report too.
+- **A failed run's status comes from the results read's `run_status` member (Breaking)**: `get_run_result` no longer parses the status out of the `409`'s `detail` sentence; it reads the problem document's `run_status` member, and a `409` without a status this SDK knows reads as `FAILED`.
+
 ## [v0.12.0] - 2026-09-24
 
 ### Added

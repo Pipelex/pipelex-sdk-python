@@ -43,3 +43,5 @@ class TestParseErrorBody:
         assert parsed.server_message is None
         assert parsed.code is None
         assert parsed.validation_errors is None
+        assert parsed.problem is None
+        assert parsed.request_id is None

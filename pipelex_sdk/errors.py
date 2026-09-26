@@ -7,9 +7,10 @@ protocol base. They derive from the protocol base `PipelineRequestError`
 - `ApiUnreachableError` — the HTTP exchange never produced a response (DNS / connect
   / TLS / timeout). Distinguished from `ApiResponseError`, which represents a non-2xx
   response that *did* come back.
-- `ApiResponseError` — a non-2xx response from the API, carrying the parsed
-  problem-details and, for the product routes, the stable RFC 9457 `code` discriminant
-  a consumer branches on (decoupled from the HTTP status).
+- `ApiResponseError` — a non-2xx response from the API, carrying the members of its
+  RFC 9457 problem document: the branch fields `error_domain` and `type_uri` (the
+  problem's `type`), the surface-native `code` / `error_type`, the request id, and the
+  rest (decoupled from the HTTP status).
 - `PipelineExecuteTimeoutError` — a blocking `execute()` killed by the hosted gateway's
   ~30s synchronous-request ceiling; points the caller at the durable start+poll path.
 - `PagingNotTerminatingError` — a paged-list iterator hit its runaway backstop, meaning
@@ -47,7 +48,10 @@ from mthds.protocol.exceptions import PipelineRequestError
 from mthds.runners.api.exceptions import RunStillRunningError as RunStillRunningError  # ruff: ignore[useless-import-alias]
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from pipelex_sdk.artifact_models import ArtifactScope, DownloadArtifactsResult
+    from pipelex_sdk.error_models import FieldError, RunErrorReport, UserAction
     from pipelex_sdk.runs import RunStatus
     from pipelex_sdk.validation_models import ValidationErrorItem
 
@@ -70,15 +74,31 @@ class ApiUnreachableError(PipelineRequestError):
 
 
 class ApiResponseError(PipelineRequestError):
-    """A non-2xx response that DID come back from the API.
+    """A non-2xx response that DID come back from the API, with its problem document parsed.
 
-    Carries the parsed RFC 7807 problem-details (`error_type`, `server_message`) and,
-    for the build routes' 422s, the structured `validation_errors` list.
+    Every error the hosted API answers is an RFC 9457 `application/problem+json` document, and this
+    error carries its members as typed attributes, each `None` when the document did not carry it:
 
-    `code` is the product routes' stable RFC 9457 `problem+json` discriminant
-    (`conflict`, `not_found`, `pipelex_api_key_limit_reached`, …) — the field a
-    consumer branches on, decoupled from the HTTP status. `None` for any error body
-    that carries no `code` (the protocol/build routes' `detail`-shaped problems).
+    - **The branch fields.** `error_domain` is the coarse class a consumer branches on — `input` (the
+      caller can fix it), `config` (a configuration change is needed), `runtime` (a failure during
+      execution) — and `type_uri` (the problem's `type`) is the stable URI naming the error class.
+      `retryable` says whether a blind retry can succeed, `None` meaning unknown. Branch on these,
+      never on the HTTP status or on the wording of a message.
+    - **The native codes.** `code` is the platform's own closed code (`conflict`, `not_found`,
+      `pipelex_api_key_limit_reached`, …) and `error_type` the runner's open exception class name.
+      Each is finer than `error_domain` and specific to the surface that emits it.
+    - **For a person.** `title` is the stable label of the error class, `server_message` the
+      per-occurrence `detail`, `user_action` the advised next step, and `error_category` a finer
+      classification of an inference failure.
+    - **For support.** `request_id` correlates the response with the server's logs; it is read from
+      the body, or from the `X-Request-ID` response header when the body has none.
+    - **Per-item failures.** `errors` is the platform's field-level list (`field`, `code`, `detail`),
+      and `validation_errors` the structured diagnostics of a bundle that failed validation.
+
+    `problem` is the decoded document whole, so a member this SDK does not name — `instance`, or the
+    `run_status` and `error` of a failed run's results read — stays reachable; `response_body` is the
+    raw text, and `status` / `status_text` the transport's. `problem` is `None` when the body was not
+    a JSON object.
     """
 
     def __init__(
@@ -93,6 +113,15 @@ class ApiResponseError(PipelineRequestError):
         server_message: str | None = None,
         validation_errors: list[ValidationErrorItem] | None = None,
         code: str | None = None,
+        request_id: str | None = None,
+        type_uri: str | None = None,
+        title: str | None = None,
+        error_domain: str | None = None,
+        error_category: str | None = None,
+        retryable: bool | None = None,
+        user_action: UserAction | None = None,
+        errors: list[FieldError] | None = None,
+        problem: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.api_url = api_url
@@ -103,6 +132,15 @@ class ApiResponseError(PipelineRequestError):
         self.server_message = server_message
         self.validation_errors = validation_errors
         self.code = code
+        self.request_id = request_id
+        self.type_uri = type_uri
+        self.title = title
+        self.error_domain = error_domain
+        self.error_category = error_category
+        self.retryable = retryable
+        self.user_action = user_action
+        self.errors = errors
+        self.problem = problem
 
 
 class PipelineExecuteTimeoutError(PipelineRequestError):
@@ -123,16 +161,30 @@ class PipelineExecuteTimeoutError(PipelineRequestError):
 class RunFailedError(PipelineRequestError):
     """Raised when a run reaches a terminal state that is not `COMPLETED`.
 
-    Surfaced from `wait_for_result` / `get_run_result` when the platform answers a
-    result lookup with HTTP 409 (`FAILED`, `CANCELLED`, `TERMINATED`,
-    `TIMED_OUT`). `run_id` and `status` let callers report the outcome precisely;
-    `status` stays the typed `RunStatus` enum so callers can match/case on it.
+    Surfaced by `wait_for_result`, `start_and_wait` and `download_artifacts` when the platform
+    answers the results read with HTTP 409 (`FAILED`, `CANCELLED`, `TERMINATED`, `TIMED_OUT`).
+
+    - `status` is the run's terminal status, the typed `RunStatus` enum, read from the problem's
+      `run_status` member — so callers can match/case on it.
+    - `error` is the run's stored error report, typed whole as `RunErrorReport`: the runner's
+      `error_type`, `message`, `title`, `type_uri`, `error_domain`, `error_category`, `retryable`,
+      `user_action`, `model`, `provider`, `provider_metadata`, `validation_errors` and anything newer
+      on `model_extra`. Branch on `error.error_domain`, `error.type_uri` and `error.retryable`; show
+      `error.user_action` as the next step. It is the runner's VERBOSE report, so `message` and
+      `provider_metadata` can hold a provider's raw text — deciding what a person sees is yours.
+      `None` when the run ended with no stored report (a cancelled, terminated or timed-out run, or
+      one the platform finalized itself).
+    - The exception's own message is the problem's `detail`, which names the status and then the
+      report's message (`Run finished with status FAILED: <message>`), so printing the error already
+      tells the reason.
+    - `run_id` locates the run, for a status read or a support request.
     """
 
-    def __init__(self, message: str, run_id: str, status: RunStatus) -> None:
+    def __init__(self, message: str, run_id: str, status: RunStatus, error: RunErrorReport | None = None) -> None:
         super().__init__(message)
         self.run_id = run_id
         self.status = status
+        self.error = error
 
 
 class RunTimeoutError(PipelineRequestError):
