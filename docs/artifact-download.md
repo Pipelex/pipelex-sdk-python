@@ -138,7 +138,7 @@ Per-item `error.code` is the fetch vocabulary above plus the download's own: `re
 
 **What it raises.** Only conditions with no verdict, all typed:
 
-- `RunStillRunningError` (with the retry hint) or `RunFailedError` — a `run_id` naming a run that has not completed;
+- `RunStillRunningError` (with the retry hint) or `RunFailedError` — a `run_id` naming a run that has not completed, the latter carrying the run's status and, as `error`, its stored error report;
 - `FieldNotIncludedError` — the results read never carried the scope's key, so it is absent from `results.model_fields_set`. This is the Python reading of the JS `undefined`: ask for the key and read again;
 - `ScopeUnavailableError` — the key WAS relayed and its value is `None`, which is the platform saying it has no such artifact for this run (`scope` and `run_id` on the error). Reading by `run_id`, a null `main_stuff` is already `MissingMainStuffError` from `get_run_result`;
 - `ArtifactAuthenticationError` — the resolve route refused the credential (`401` / `403`), on the first resolve or on a re-resolve part-way through. It carries `verdict`, the result as it stood: the refusal stops the remaining references being taken but lets the fetches already running finish, since they are on presigned links that do not carry the credential, so every file saved is real and listed and the rest are marked `aborted` with a detail naming the credential failure;

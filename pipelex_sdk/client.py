@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 from time import monotonic
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 from urllib.parse import quote, urlencode, urlparse
@@ -52,6 +51,7 @@ from pipelex_sdk.crate_models import (
     ResolveResponse,
     ResolveResponseAdapter,
 )
+from pipelex_sdk.error_models import FieldError, UserAction
 from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
@@ -140,6 +140,7 @@ _POLL_REQUEST_TIMEOUT_SECONDS = 30.0  # single status/result/product GETs; the h
 # non-empty pages: neither iterator's adjacent-cursor check sees a non-adjacent repeat.
 _MAX_LIST_PAGES: int = 10_000
 _DEFAULT_DEGRADED_RETRY_SECONDS = 5  # matches the platform's `_DEGRADE_RETRY_AFTER_SECONDS`.
+_REQUEST_ID_HEADER = "x-request-id"  # httpx headers are case-insensitive; the platform sends `X-Request-ID`.
 
 # The hosted gateway caps synchronous requests at ~30s. A blocking-`execute` failure at/after
 # this elapsed threshold is the gateway cut-off, not a transient outage — the threshold guards
@@ -373,6 +374,9 @@ class PipelexAPIClient(MthdsAPIClient):
         parsed = _parse_error_body(body_text)
         detail = parsed.server_message or body_text or response.reason_phrase
         msg = f"API {method} /{_API_PREFIX}/{endpoint} failed ({response.status_code}): {detail}"
+        # The platform stamps the same correlation id on the `X-Request-ID` header as in the body;
+        # a problem rendered without the member (or a body that is no problem at all) still has it.
+        request_id = parsed.request_id or response.headers.get(_REQUEST_ID_HEADER) or None
         raise ApiResponseError(
             msg,
             api_url=self.base_url,
@@ -383,6 +387,15 @@ class PipelexAPIClient(MthdsAPIClient):
             server_message=parsed.server_message,
             validation_errors=parsed.validation_errors,
             code=parsed.code,
+            request_id=request_id,
+            type_uri=parsed.type_uri,
+            title=parsed.title,
+            error_domain=parsed.error_domain,
+            error_category=parsed.error_category,
+            retryable=parsed.retryable,
+            user_action=parsed.user_action,
+            errors=parsed.errors,
+            problem=parsed.problem,
         )
 
     def _raise_if_lifecycle_unavailable(self, response: httpx.Response, url: str) -> None:
@@ -749,7 +762,8 @@ class PipelexAPIClient(MthdsAPIClient):
         - HTTP 202 → `running` (in-flight, with the `Retry-After` hint)
         - HTTP 503 → `running` (DynamoDB/Temporal degraded — retry, never fail a poller)
         - HTTP 200 → `completed` (with the result artifacts)
-        - HTTP 409 → `failed` (terminal non-`COMPLETED`)
+        - HTTP 409 → `failed` (terminal non-`COMPLETED`), carrying the problem's `detail` as `message`,
+          its `run_status` member as `status` and its `error` member, the run's stored report, typed
 
         Raises:
             RunLifecycleUnavailableError: If the lifecycle routes are absent (a bare runner).
@@ -767,12 +781,7 @@ class PipelexAPIClient(MthdsAPIClient):
                 retry_after_seconds=retry_after if retry_after is not None else _DEFAULT_DEGRADED_RETRY_SECONDS,
             )
         if status_code == 409:
-            message = _parse_error_message(response) or "Run finished without a result."
-            return RunResultFailed(
-                pipeline_run_id=run_id,
-                status=_extract_run_status_from_message(message),
-                message=message,
-            )
+            return _run_result_failed(run_id, response)
 
         self._raise_if_lifecycle_unavailable(response, url)
         response.raise_for_status()
@@ -790,7 +799,8 @@ class PipelexAPIClient(MthdsAPIClient):
     async def wait_for_result(self, run_id: str, options: WaitForResultOptions | None = None) -> RunResults:
         """Poll a run to a terminal state and return its result.
 
-        Resolves on `COMPLETED`, raises `RunFailedError` on any other terminal status, and raises
+        Resolves on `COMPLETED`, raises `RunFailedError` on any other terminal status — carrying the
+        run's status and its stored error report, typed, as `error` — and raises
         `RunTimeoutError` if `timeout_seconds` elapses first (the run keeps executing server-side —
         resume later by `run_id`). Honors the server's `Retry-After`. Async-native: cancelling the
         awaiting task raises `asyncio.CancelledError` out of this loop, leaving the run resumable.
@@ -814,7 +824,7 @@ class PipelexAPIClient(MthdsAPIClient):
                 return state.result
             if isinstance(state, RunResultFailed):
                 msg = state.message
-                raise RunFailedError(msg, run_id=run_id, status=state.status)
+                raise RunFailedError(msg, run_id=run_id, status=state.status, error=state.error)
 
             # state is RunResultRunning — decide whether to keep waiting.
             attempt += 1
@@ -1567,17 +1577,23 @@ def _parse_retry_after(headers: httpx.Headers) -> int | None:
     return seconds if seconds >= 0 else None
 
 
-def _parse_error_message(response: httpx.Response) -> str | None:
-    """Extract a human message from an error body — handles the platform's problem+json (`detail`
-    string) and the runner's `{"detail": {"message": ...}}` / `{"message": ...}` shapes.
-    """
+def _decode_object(text: str) -> dict[str, Any] | None:
+    """Decode an error body into its JSON object, or `None` for an empty, non-JSON or non-object body."""
+    if not text:
+        return None
     try:
-        raw = response.json()
+        parsed = json.loads(text)
     except ValueError:
         return None
-    if not isinstance(raw, dict):
+    if not isinstance(parsed, dict):
         return None
-    body = cast("dict[str, Any]", raw)
+    return cast("dict[str, Any]", parsed)
+
+
+def _error_message_of(body: dict[str, Any]) -> str | None:
+    """Extract a human message from an error body — the platform's problem+json (`detail` string)
+    and the runner's `{"detail": {"message": ...}}` / `{"message": ...}` shapes.
+    """
     detail = body.get("detail")
     if isinstance(detail, str):
         return detail
@@ -1589,14 +1605,24 @@ def _parse_error_message(response: httpx.Response) -> str | None:
     return top_message if isinstance(top_message, str) else None
 
 
-def _extract_run_status_from_message(message: str) -> RunStatus:
-    """Pull the status word out of a 409 detail ("Run finished with status FAILED; ..."), defaulting
-    to FAILED if the shape ever changes.
+def _run_result_failed(run_id: str, response: httpx.Response) -> RunResultFailed:
+    """Build the failed arm from the results read's `409` problem document.
+
+    The platform's document carries `detail` (`Run finished with status <STATUS>: <message>`, or
+    `...; no result available` when the run has no report) and two extension members: `run_status`,
+    the run's terminal status — named so because a problem's own `status` is the HTTP status — and
+    `error`, the run's stored error report or `null`. The status is read from `run_status`, never
+    parsed back out of the sentence. A `409` without that member (the one this route answers for a
+    stored result it refuses to read, or one from a platform that predates the member) or with a
+    status this SDK does not know reads as `FAILED`, and its `detail` still says what happened.
     """
-    match = re.search(r"status\s+([A-Z_]+)", message)
-    if match and match.group(1) in _KNOWN_RUN_STATUS_NAMES:
-        return RunStatus(match.group(1))
-    return RunStatus.FAILED
+    body = _decode_object(response.text) or {}
+    message = _error_message_of(body) or "Run finished without a result."
+    raw_status = body.get("run_status")
+    status = RunStatus(raw_status) if isinstance(raw_status, str) and raw_status in _KNOWN_RUN_STATUS_NAMES else RunStatus.FAILED
+    # `error` is validated by the field's own lenient type (`LenientRunErrorReport`): a report whose
+    # known fields do not fit keeps the ones that do, and one that is not a report reads as `None`.
+    return RunResultFailed.model_validate({"pipeline_run_id": run_id, "status": status, "message": message, "error": body.get("error")})
 
 
 def _is_valid_base_url(value: str) -> bool:
@@ -1630,61 +1656,69 @@ def _origin_of(base_url: str) -> str:
 
 
 class _ParsedErrorBody(NamedTuple):
-    """The fields pulled out of a `problem+json` / `HTTPException` error body."""
+    """The members pulled out of a `problem+json` / `HTTPException` error body."""
 
     error_type: str | None
     server_message: str | None
     validation_errors: list[ValidationErrorItem] | None
     code: str | None
+    request_id: str | None
+    type_uri: str | None
+    title: str | None
+    error_domain: str | None
+    error_category: str | None
+    retryable: bool | None
+    user_action: UserAction | None
+    errors: list[FieldError] | None
+    problem: dict[str, Any] | None
 
 
-_EMPTY_ERROR_BODY = _ParsedErrorBody(error_type=None, server_message=None, validation_errors=None, code=None)
+_EMPTY_ERROR_BODY = _ParsedErrorBody(
+    error_type=None,
+    server_message=None,
+    validation_errors=None,
+    code=None,
+    request_id=None,
+    type_uri=None,
+    title=None,
+    error_domain=None,
+    error_category=None,
+    retryable=None,
+    user_action=None,
+    errors=None,
+    problem=None,
+)
 
-# The build routes' 422s carry a top-level `validation_errors[]`. Validated leniently
-# (best-effort error-path enrichment) so an odd shape never masks the underlying failure.
+# The structured members below are read leniently (best-effort error-path enrichment): an odd shape
+# reads as `None` and never masks the underlying failure, which `server_message` and the raw
+# `problem` still carry. `validation_errors` items are a closed shape, so the list is validated whole;
+# a `FieldError` reads each field leniently, so only a non-object item sets `errors` to `None`.
 _VALIDATION_ERRORS_ADAPTER: TypeAdapter[list[ValidationErrorItem]] = TypeAdapter(list[ValidationErrorItem])
+_FIELD_ERRORS_ADAPTER: TypeAdapter[list[FieldError]] = TypeAdapter(list[FieldError])
 
 
 def _parse_error_body(body: str) -> _ParsedErrorBody:
-    """Extract `error_type` / `message` / `validation_errors` / `code` from an error body.
+    """Extract the members of an error body into `_ParsedErrorBody`.
 
-    The API serializes errors as `{"detail": {"error_type": ..., "message": ...}}`
-    (HTTPException with dict detail) or `{"detail": "..."}` (auth 401s and RFC 7807
-    problems); both shapes are handled, with top-level `error_type` / `message`
-    fallbacks. The product routes' RFC 9457 `problem+json` adds a stable top-level
-    `code` discriminant. Falls through to empty on a non-JSON or non-object body.
+    The API serializes errors as RFC 9457 problem documents — the platform's (`type`, `title`,
+    `status`, `code`, `detail`, `instance`, `request_id`, `errors[]`) and the runner's (the same
+    standard slots plus `error_type`, `error_domain`, `error_category`, `retryable`, `user_action`,
+    `validation_errors`, …) — and, on older routes, as `{"detail": {"error_type": ..., "message":
+    ...}}` (HTTPException with dict detail). Both shapes are handled, with top-level `error_type` /
+    `message` fallbacks. A string member of the wrong type reads as `None`; the whole decoded object
+    rides `problem`, so no member is lost for being unnamed here. Falls through to empty on a
+    non-JSON or non-object body.
     """
-    if not body:
+    root = _decode_object(body)
+    if root is None:
         return _EMPTY_ERROR_BODY
-    try:
-        parsed = json.loads(body)
-    except ValueError:
-        return _EMPTY_ERROR_BODY
-    if not isinstance(parsed, dict):
-        return _EMPTY_ERROR_BODY
-    root = cast("dict[str, Any]", parsed)
 
     error_type: str | None = None
-    server_message: str | None = None
     detail = root.get("detail")
     if isinstance(detail, dict):
-        detail_dict = cast("dict[str, Any]", detail)
-        raw_error_type = detail_dict.get("error_type")
-        if isinstance(raw_error_type, str):
-            error_type = raw_error_type
-        raw_message = detail_dict.get("message")
-        if isinstance(raw_message, str):
-            server_message = raw_message
-    elif isinstance(detail, str):
-        server_message = detail
+        error_type = _str_member(cast("dict[str, Any]", detail), "error_type")
     if error_type is None:
-        top_error_type = root.get("error_type")
-        if isinstance(top_error_type, str):
-            error_type = top_error_type
-    if server_message is None:
-        top_message = root.get("message")
-        if isinstance(top_message, str):
-            server_message = top_message
+        error_type = _str_member(root, "error_type")
 
     validation_errors: list[ValidationErrorItem] | None = None
     raw_validation_errors = root.get("validation_errors")
@@ -1692,14 +1726,40 @@ def _parse_error_body(body: str) -> _ParsedErrorBody:
         try:
             validation_errors = _VALIDATION_ERRORS_ADAPTER.validate_python(raw_validation_errors)
         except ValidationError:
-            # Best-effort error-path enrichment: an odd validation_errors shape (only
-            # reachable via the out-of-scope /v1/build/* 422s) must not mask the
-            # underlying API failure — server_message still carries the problem.
             validation_errors = None
 
-    code: str | None = None
-    raw_code = root.get("code")
-    if isinstance(raw_code, str):
-        code = raw_code
+    errors: list[FieldError] | None = None
+    raw_errors = root.get("errors")
+    if isinstance(raw_errors, list):
+        try:
+            errors = _FIELD_ERRORS_ADAPTER.validate_python(raw_errors)
+        except ValidationError:
+            errors = None
 
-    return _ParsedErrorBody(error_type=error_type, server_message=server_message, validation_errors=validation_errors, code=code)
+    # `UserAction` reads each field leniently, so any object validates; a non-object reads as `None`.
+    raw_user_action = root.get("user_action")
+    user_action = UserAction.model_validate(raw_user_action) if isinstance(raw_user_action, dict) else None
+
+    raw_retryable = root.get("retryable")
+
+    return _ParsedErrorBody(
+        error_type=error_type,
+        server_message=_error_message_of(root),
+        validation_errors=validation_errors,
+        code=_str_member(root, "code"),
+        request_id=_str_member(root, "request_id"),
+        type_uri=_str_member(root, "type"),
+        title=_str_member(root, "title"),
+        error_domain=_str_member(root, "error_domain"),
+        error_category=_str_member(root, "error_category"),
+        retryable=raw_retryable if isinstance(raw_retryable, bool) else None,
+        user_action=user_action,
+        errors=errors,
+        problem=root,
+    )
+
+
+def _str_member(body: dict[str, Any], key: str) -> str | None:
+    """A string member of a decoded body, or `None` when it is absent or not a string."""
+    value = body.get(key)
+    return value if isinstance(value, str) else None
