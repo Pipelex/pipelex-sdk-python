@@ -51,7 +51,7 @@ from pipelex_sdk.crate_models import (
     ResolveResponse,
     ResolveResponseAdapter,
 )
-from pipelex_sdk.error_models import FieldError, RunErrorReport, UserAction
+from pipelex_sdk.error_models import FieldError, UserAction
 from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
@@ -1620,20 +1620,9 @@ def _run_result_failed(run_id: str, response: httpx.Response) -> RunResultFailed
     message = _error_message_of(body) or "Run finished without a result."
     raw_status = body.get("run_status")
     status = RunStatus(raw_status) if isinstance(raw_status, str) and raw_status in _KNOWN_RUN_STATUS_NAMES else RunStatus.FAILED
-    return RunResultFailed(pipeline_run_id=run_id, status=status, message=message, error=_run_error_report_of(body.get("error")))
-
-
-def _run_error_report_of(raw: object) -> RunErrorReport | None:
-    """Type a stored error report, best-effort: this is the failure path, so a report whose known
-    fields do not fit their types must not mask the failure it explains — `detail` still carries the
-    report's message, and the run's status read serves the report again.
-    """
-    if not isinstance(raw, dict):
-        return None
-    try:
-        return RunErrorReport.model_validate(raw)
-    except ValidationError:
-        return None
+    # `error` is validated by the field's own lenient type (`LenientRunErrorReport`): a report whose
+    # known fields do not fit keeps the ones that do, and one that is not a report reads as `None`.
+    return RunResultFailed.model_validate({"pipeline_run_id": run_id, "status": status, "message": message, "error": body.get("error")})
 
 
 def _is_valid_base_url(value: str) -> bool:
@@ -1700,9 +1689,10 @@ _EMPTY_ERROR_BODY = _ParsedErrorBody(
     problem=None,
 )
 
-# The structured members below are validated leniently (best-effort error-path enrichment): an odd
-# shape reads as `None` and never masks the underlying failure, which `server_message` and the raw
-# `problem` still carry.
+# The structured members below are read leniently (best-effort error-path enrichment): an odd shape
+# reads as `None` and never masks the underlying failure, which `server_message` and the raw
+# `problem` still carry. `validation_errors` items are a closed shape, so the list is validated whole;
+# a `FieldError` reads each field leniently, so only a non-object item sets `errors` to `None`.
 _VALIDATION_ERRORS_ADAPTER: TypeAdapter[list[ValidationErrorItem]] = TypeAdapter(list[ValidationErrorItem])
 _FIELD_ERRORS_ADAPTER: TypeAdapter[list[FieldError]] = TypeAdapter(list[FieldError])
 
@@ -1746,13 +1736,9 @@ def _parse_error_body(body: str) -> _ParsedErrorBody:
         except ValidationError:
             errors = None
 
-    user_action: UserAction | None = None
+    # `UserAction` reads each field leniently, so any object validates; a non-object reads as `None`.
     raw_user_action = root.get("user_action")
-    if isinstance(raw_user_action, dict):
-        try:
-            user_action = UserAction.model_validate(raw_user_action)
-        except ValidationError:
-            user_action = None
+    user_action = UserAction.model_validate(raw_user_action) if isinstance(raw_user_action, dict) else None
 
     raw_retryable = root.get("retryable")
 

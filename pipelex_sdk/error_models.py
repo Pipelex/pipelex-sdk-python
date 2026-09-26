@@ -15,6 +15,14 @@ say what went wrong. The enum-ish fields (`error_domain`, `error_category`, `use
 open sets on the wire and stay plain `str`, never frozen enums, so a value the runner adds is not an
 SDK break; their known values are listed where they are declared.
 
+**A report never fails the read that carries it.** The platform stores the report as the runner
+that wrote it sent it and never migrates it, so a row can outlive the runner version it was written
+by. Every field of these models is therefore read leniently: a known field whose value does not fit
+its type — a validation item with a category this SDK does not know, a `status_code` that is not a
+number, a `user_action` that is not an object — reads as `None`, and the rest of the report stands.
+`LenientRunErrorReport` extends that to the report as a whole: an `error` that is not an object at
+all reads as `None`, so a status read, a run list page or a results read still answers.
+
 **Nothing is stripped.** The platform serves the runner's VERBOSE report, so `message` and
 `provider_metadata` can hold the provider's raw text. Deciding what of it a person should see is
 each consumer's presentation, not this SDK's; the report arrives here whole.
@@ -22,21 +30,38 @@ each consumer's presentation, not this SDK's; the report arrives here whole.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, TypeAlias
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError, ValidatorFunctionWrapHandler, WrapValidator, field_validator
 
 from pipelex_sdk.validation_models import ValidationErrorItem
 
 
-class UserAction(BaseModel):
+def _none_when_it_does_not_fit(value: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+    """Validate `value`, or read it as `None` when it does not fit its declared type."""
+    try:
+        return handler(value)
+    except ValidationError:
+        return None
+
+
+class _LenientReportPart(BaseModel):
+    """Base of every model here: extension-open, and a known field that does not fit its type reads as `None`."""
+
+    model_config = ConfigDict(extra="allow")
+
+    @field_validator("*", mode="wrap")
+    @classmethod
+    def _read_a_field_that_does_not_fit_as_none(cls, value: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+        return _none_when_it_does_not_fit(value, handler)
+
+
+class UserAction(_LenientReportPart):
     """The next step a report advises — the runner's `UserAction`.
 
     `kind` names the category of advice, so a consumer can render consistent guidance; `detail` is
     the free-form, error-specific text (a billing URL, a retry hint, the model to change).
     """
-
-    model_config = ConfigDict(extra="allow")
 
     #: Known values: `wait_and_retry`, `check_billing`, `check_credentials`, `change_input`,
     #: `change_model`, `contact_support`, `unknown`.
@@ -44,15 +69,13 @@ class UserAction(BaseModel):
     detail: str | None = None
 
 
-class ProviderErrorMetadata(BaseModel):
+class ProviderErrorMetadata(_LenientReportPart):
     """What the inference provider's SDK said about a failed call — the runner's `ProviderErrorMetadata`.
 
     Present on a report whose failure came back from a model provider. `message` is the provider
     SDK's own text, relayed raw. The provider's response body never crosses the wire: the runner
     excludes it from every serialization.
     """
-
-    model_config = ConfigDict(extra="allow")
 
     provider: str | None = None
     sdk_exception_type: str | None = None
@@ -65,15 +88,13 @@ class ProviderErrorMetadata(BaseModel):
     provider_error_code: str | None = None
 
 
-class MigrationErrorBlock(BaseModel):
+class MigrationErrorBlock(_LenientReportPart):
     """A pending configuration migration that explains the failure — the runner's `MigrationErrorBlock`.
 
     Present only on a configuration failure whose raiser scanned the host's configuration
     directories; a consumer branches on its presence. `plans` is carried opaquely: it is the shape
     `pipelex-agent migrate --dry-run --format json` emits, which no published package declares.
     """
-
-    model_config = ConfigDict(extra="allow")
 
     #: The command that applies whatever can be applied without a decision.
     remedy: str | None = None
@@ -84,7 +105,7 @@ class MigrationErrorBlock(BaseModel):
     plans: list[dict[str, Any]] | None = None
 
 
-class RunErrorReport(BaseModel):
+class RunErrorReport(_LenientReportPart):
     """Why a run failed — the runner's `ErrorReport`, typed with every field it carries.
 
     The one type for a failed run's report wherever the SDK hands it back: `RunPublic.error` (and so
@@ -99,8 +120,6 @@ class RunErrorReport(BaseModel):
     A report is `None` where the run has none — a cancelled, terminated or timed-out run, or one the
     platform finalized itself — so the absence of a report says nothing about why.
     """
-
-    model_config = ConfigDict(extra="allow")
 
     #: The runner's exception class name (`LLMCompletionError`, `SandboxProvisioningError`, …) — an
     #: open set, for display and support, not for branching.
@@ -134,15 +153,19 @@ class RunErrorReport(BaseModel):
     migration: MigrationErrorBlock | None = None
 
 
-class FieldError(BaseModel):
+class FieldError(_LenientReportPart):
     """One field-level failure of a request, an item of the platform problem document's `errors[]`.
 
     `field` is the dotted path to the offending attribute, `code` a stable sub-code
     (`invalid_format`, `out_of_range`, …), `detail` optional human text.
     """
 
-    model_config = ConfigDict(extra="allow")
-
     field: str | None = None
     code: str | None = None
     detail: str | None = None
+
+
+#: The type of every `error` field that holds a run's report: `RunPublic.error`, `PipelineRun.error`
+#: and `RunResultFailed.error`. A report is read field by field as `RunErrorReport` says, and a value
+#: that is not a report at all reads as `None`, so the read carrying it always answers.
+LenientRunErrorReport: TypeAlias = Annotated[RunErrorReport | None, WrapValidator(_none_when_it_does_not_fit)]

@@ -24,7 +24,7 @@ from typing import Any, cast
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_serializer, field_validator
 
 from pipelex_sdk._pydantic_utils import empty_list_factory_of
-from pipelex_sdk.error_models import RunErrorReport
+from pipelex_sdk.error_models import LenientRunErrorReport
 from pipelex_sdk.runs import RunStatus
 
 # ── User profile (`/v1/me`) ─────────────────────────────────────────────
@@ -623,7 +623,7 @@ class PipelineRun(BaseModel):
     workflow_id: str | None = None
     status: RunStatus
     result_url: str | None = None
-    error: RunErrorReport | None = None
+    error: LenientRunErrorReport = None
     pipe_statuses: dict[str, PipeStatus] | None = None
     created_at: str
     finished_at: str | None = None

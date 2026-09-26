@@ -3,6 +3,7 @@
 from typing import Any
 
 from pipelex_sdk.error_models import RunErrorReport
+from pipelex_sdk.product_models import RunPage
 
 # A configuration failure carrying the migration block, the one report field the recorded run
 # responses do not exercise.
@@ -57,6 +58,31 @@ class TestErrorModels:
         assert report.error_category == "brand_new"
         assert report.user_action is not None
         assert report.user_action.kind == "wait_for_quota"
+
+    def test_a_run_list_page_answers_whatever_its_reports_hold(self) -> None:
+        """One run whose stored report drifted, or is not a report at all, never fails the page it sits on."""
+        page = RunPage.model_validate(
+            {
+                "items": [
+                    {
+                        "pipeline_run_id": "run_1",
+                        "status": "FAILED",
+                        "created_at": "2026-06-10T00:00:00Z",
+                        "error": {"message": "boom", "validation_errors": [{"category": "brand_new", "message": "x"}]},
+                    },
+                    {"pipeline_run_id": "run_2", "status": "FAILED", "created_at": "2026-06-10T00:00:00Z", "error": "not a report"},
+                    {"pipeline_run_id": "run_3", "status": "COMPLETED", "created_at": "2026-06-10T00:00:00Z"},
+                ],
+                "next_cursor": None,
+            }
+        )
+
+        first, second, third = page.items
+        assert first.error is not None
+        assert first.error.message == "boom"
+        assert first.error.validation_errors is None
+        assert second.error is None
+        assert third.error is None
 
     def test_an_empty_report_parses(self) -> None:
         report = RunErrorReport.model_validate({})

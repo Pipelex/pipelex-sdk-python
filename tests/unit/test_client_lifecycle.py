@@ -195,6 +195,34 @@ class TestClientLifecycle:
         assert run.error.model_dump(exclude_none=True) == _BUNDLE_FAULT_REPORT
         assert run.model_extra == {}
 
+    def test_get_run_status_with_a_report_from_another_runner_version_still_answers(self, mocker: MockerFixture) -> None:
+        """A stored report whose known fields drifted keeps what fits: the status read never fails on its report."""
+        client = self._client()
+        drifted: dict[str, Any] = {
+            "error_type": "ValidateBundleError",
+            "message": "Pipe 'summarize' is invalid.",
+            "error_domain": "input",
+            "retryable": "perhaps",
+            "user_action": "Fix the bundle.",
+            "provider_metadata": {"provider": "openai", "status_code": "unknown"},
+            "validation_errors": [{"category": "a_category_from_a_newer_runner", "message": "x"}],
+        }
+        body = {"pipeline_run_id": "run_1", "status": "FAILED", "created_at": "2026-06-10T00:00:00Z", "error": drifted}
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=body)))
+
+        run = asyncio.run(client.get_run_status("run_1"))
+        assert run.status == RunStatus.FAILED
+        assert run.error is not None
+        assert run.error.error_type == "ValidateBundleError"
+        assert run.error.message == "Pipe 'summarize' is invalid."
+        assert run.error.error_domain == "input"
+        assert run.error.retryable is None
+        assert run.error.user_action is None
+        assert run.error.provider_metadata is not None
+        assert run.error.provider_metadata.provider == "openai"
+        assert run.error.provider_metadata.status_code is None
+        assert run.error.validation_errors is None
+
     def test_get_run_status_without_error_reads_none(self, mocker: MockerFixture) -> None:
         """A run that has not failed carries no report: `error` is None, whether absent or null."""
         client = self._client()
@@ -388,16 +416,31 @@ class TestClientLifecycle:
         assert state.message == body["detail"]
         assert state.error is None
 
-    def test_get_run_result_failed_with_a_malformed_report_still_fails_with_its_reason(self, mocker: MockerFixture) -> None:
-        """A report whose known fields do not fit their types reads as None; the failure and its detail survive."""
+    def test_get_run_result_failed_with_a_drifted_report_keeps_what_fits(self, mocker: MockerFixture) -> None:
+        """A report field that does not fit its type reads as None and the rest of the report stands; the failure survives."""
         client = self._client()
-        body = _failed_results_problem("FAILED", {"message": "boom", "validation_errors": "not a list"})
+        body = _failed_results_problem("FAILED", {"message": "boom", "error_domain": "runtime", "validation_errors": "not a list"})
         mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(409, json=body)))
 
         state = asyncio.run(client.get_run_result("run_1"))
         assert isinstance(state, RunResultFailed)
         assert state.status == RunStatus.FAILED
         assert state.message == "Run finished with status FAILED: boom"
+        assert state.error is not None
+        assert state.error.message == "boom"
+        assert state.error.error_domain == "runtime"
+        assert state.error.validation_errors is None
+
+    def test_get_run_result_failed_with_an_error_that_is_not_a_report_reads_none(self, mocker: MockerFixture) -> None:
+        """An `error` member that is not an object reads as None; the failed arm still answers."""
+        client = self._client()
+        body = _failed_results_problem("FAILED", None)
+        body["error"] = "the runner crashed"
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(409, json=body)))
+
+        state = asyncio.run(client.get_run_result("run_1"))
+        assert isinstance(state, RunResultFailed)
+        assert state.status == RunStatus.FAILED
         assert state.error is None
 
     def test_get_run_result_lifecycle_unavailable_on_missing_route(self, mocker: MockerFixture) -> None:

@@ -47,7 +47,7 @@ from mthds.protocol.pipe_io_contracts import PipeIOContracts
 from mthds.runners.api.models import DictPipeOutputAbstract, DictWorkingMemoryAbstract
 from pydantic import BaseModel, ConfigDict, Field
 
-from pipelex_sdk.error_models import RunErrorReport
+from pipelex_sdk.error_models import LenientRunErrorReport
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -150,8 +150,9 @@ class RunPublic(BaseModel):
     finished_at: str | None = None
     #: Why the run failed — the runner's report as the platform stored it, whole and typed (see
     #: `pipelex_sdk.error_models`). `None` for a run that has not failed, and for one that ended with
-    #: no stored report (cancelled, terminated, timed out, or finalized by the platform itself).
-    error: RunErrorReport | None = None
+    #: no stored report (cancelled, terminated, timed out, or finalized by the platform itself). Read
+    #: leniently, so a report written by another runner version never fails the read carrying it.
+    error: LenientRunErrorReport = None
 
 
 class RunRead(RunPublic):
@@ -358,7 +359,7 @@ class RunResultFailed(BaseModel):
     pipeline_run_id: str
     status: RunStatus
     message: str
-    error: RunErrorReport | None = None
+    error: LenientRunErrorReport = None
 
 
 RunResultState: TypeAlias = Annotated[

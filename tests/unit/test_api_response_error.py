@@ -120,7 +120,7 @@ class TestApiResponseError:
         "body",
         [
             {"detail": "x", "retryable": "no", "user_action": "retry later", "errors": "none", "error_domain": 3, "type": None},
-            {"detail": "x", "user_action": {"kind": 5}, "errors": [7]},
+            {"detail": "x", "user_action": ["retry"], "errors": [7]},
         ],
     )
     def test_members_of_the_wrong_shape_read_as_none(self, mocker: MockerFixture, body: dict[str, Any]) -> None:
@@ -134,3 +134,13 @@ class TestApiResponseError:
         assert err.type_uri is None
         assert err.request_id is None
         assert err.problem == body
+
+    def test_a_user_action_field_that_does_not_fit_reads_as_none_and_the_rest_stands(self, mocker: MockerFixture) -> None:
+        body = {"detail": "x", "user_action": {"kind": 5, "detail": "Retry in a minute."}, "errors": [{"field": "body.label", "code": 3}]}
+        err = self._raise_from(mocker, _response(422, json_body=body))
+
+        assert err.user_action is not None
+        assert err.user_action.kind is None
+        assert err.user_action.detail == "Retry in a minute."
+        assert err.errors is not None
+        assert [(item.field, item.code) for item in err.errors] == [("body.label", None)]

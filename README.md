@@ -138,9 +138,9 @@ except RunFailedError as exc:
 
 Branch on `error_domain` (`input`, `config`, `runtime`), `type_uri` and `retryable`, never on the wording of `message`. The report is the runner's verbose one, so `message` and `provider_metadata` can hold a model provider's raw text: what a person should see of it is your application's decision. The same report is on `RunRead.error` when you read the run's status, on `RunResultFailed.error` from `get_run_result`, and on `PipelineRun.error` in the run lists.
 
-### API errors: branch on `error_domain` and `type_uri`, not the HTTP status
+### API errors: branch on `type_uri` and `error_domain`, not the HTTP status
 
-A non-2xx answer raises a typed `ApiResponseError` carrying the members of the RFC 9457 problem document. Two of them are the branch fields, the same on every surface of the hosted API: `error_domain`, the coarse class (`input` means the caller can fix it, `config` that a configuration change is needed, `runtime` that execution failed), and `type_uri`, the problem's `type`, a stable URI naming the error class and present on every problem. `error_domain` is `None` on a problem that carries none, so branch on `type_uri` for one specific condition and on `error_domain` for the class:
+A non-2xx answer raises a typed `ApiResponseError` carrying the members of the RFC 9457 problem document. The branch fields are `type_uri`, the problem's `type`, a stable URI naming the error class that every problem carries, and `error_domain`, the coarse class (`input` means the caller can fix it, `config` that a configuration change is needed, `runtime` that execution failed). `error_domain` is carried only by the problems the runner renders — those of `codegen` and `resolve`, which the hosted API relays from the runner — and is `None` on the platform's own problems, such as those of the account, billing and API-key routes, which name their class by `type_uri` alone:
 
 ```python
 from pipelex_sdk.errors import ApiResponseError
@@ -151,14 +151,14 @@ try:
 except ApiResponseError as exc:
     if exc.type_uri == "https://pipelex.com/errors/pipelex_api_key_limit_reached":
         print("Per-account key limit reached — revoke an old key first.")
-    elif exc.error_domain == "input":
+    elif exc.type_uri == "https://pipelex.com/errors/validation_failed":
         print(f"Fix the request: {exc.server_message}")
     else:
         print(f"Unexpected failure, request id {exc.request_id}")
         raise
 ```
 
-The rest of the document rides beside them: `server_message` (the `detail`), `title`, `retryable`, `user_action`, `error_category`, the platform's field-level `errors`, `validation_errors` for a bundle fault, and `request_id` for a support request, read from the body or from the `X-Request-ID` header. `code` (the platform's closed code, such as `conflict`) and `error_type` (the runner's exception class name) are each surface's own finer code — useful for display and support, not the field to branch on. `problem` is the decoded document whole, for any member the SDK does not name.
+On a problem the runner rendered, branch on `error_domain` for the class — `if exc.error_domain == "input":` shows the caller what to fix, whatever the exact error. The rest of the document rides beside them: `server_message` (the `detail`), `title`, `retryable`, `user_action`, `error_category`, the platform's field-level `errors`, `validation_errors` for a bundle fault, and `request_id` for a support request, read from the body or from the `X-Request-ID` header. `code` (the platform's closed code, such as `conflict`) and `error_type` (the runner's exception class name) are each surface's own finer code — useful for display and support, not the field to branch on. `problem` is the decoded document whole, for any member the SDK does not name.
 
 ## Public import paths (no barrel)
 

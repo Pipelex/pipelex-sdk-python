@@ -8,9 +8,9 @@ protocol base. They derive from the protocol base `PipelineRequestError`
   / TLS / timeout). Distinguished from `ApiResponseError`, which represents a non-2xx
   response that *did* come back.
 - `ApiResponseError` — a non-2xx response from the API, carrying the members of its
-  RFC 9457 problem document: the branch fields `error_domain` and `type_uri` (the
-  problem's `type`), the surface-native `code` / `error_type`, the request id, and the
-  rest (decoupled from the HTTP status).
+  RFC 9457 problem document: the branch fields `type_uri` (the problem's `type`) and,
+  on a runner-rendered problem, `error_domain`; the surface-native `code` / `error_type`;
+  the request id; and the rest (decoupled from the HTTP status).
 - `PipelineExecuteTimeoutError` — a blocking `execute()` killed by the hosted gateway's
   ~30s synchronous-request ceiling; points the caller at the durable start+poll path.
 - `PagingNotTerminatingError` — a paged-list iterator hit its runaway backstop, meaning
@@ -79,11 +79,12 @@ class ApiResponseError(PipelineRequestError):
     Every error the hosted API answers is an RFC 9457 `application/problem+json` document, and this
     error carries its members as typed attributes, each `None` when the document did not carry it:
 
-    - **The branch fields.** `error_domain` is the coarse class a consumer branches on — `input` (the
-      caller can fix it), `config` (a configuration change is needed), `runtime` (a failure during
-      execution) — and `type_uri` (the problem's `type`) is the stable URI naming the error class.
-      `retryable` says whether a blind retry can succeed, `None` meaning unknown. Branch on these,
-      never on the HTTP status or on the wording of a message.
+    - **The branch fields.** `type_uri` (the problem's `type`) is the stable URI naming the error
+      class, on every problem. `error_domain` is the coarse class — `input` (the caller can fix it),
+      `config` (a configuration change is needed), `runtime` (a failure during execution) — carried
+      by the problems the runner renders and `None` on the platform's own, which name their class by
+      `type_uri` alone. `retryable` says whether a blind retry can succeed, `None` meaning unknown.
+      Branch on these, never on the HTTP status or on the wording of a message.
     - **The native codes.** `code` is the platform's own closed code (`conflict`, `not_found`,
       `pipelex_api_key_limit_reached`, …) and `error_type` the runner's open exception class name.
       Each is finer than `error_domain` and specific to the surface that emits it.
