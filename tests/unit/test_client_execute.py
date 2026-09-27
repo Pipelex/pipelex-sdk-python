@@ -2,8 +2,10 @@
 
 Mirrors `pipelex-sdk-js/tests/client.test.ts` "execute gateway 30s timeout": a 503/504 — or a
 client-side request timeout — at/after the ~28s ceiling becomes a clear `PipelineExecuteTimeoutError`
-pointing at start+poll, while a fast 503 stays the inherited `httpx.HTTPStatusError` (runner down,
-not a timeout) and the 202 async-degrade stays the inherited `RunStillRunningError`.
+pointing at start+poll, while a fast 503 stays the `ApiResponseError` every non-2xx raises (runner down,
+not a timeout) and the 202 async-degrade stays the inherited `RunStillRunningError`. The translation reads
+the typed error the inherited route raises through the client's `_raise_api_response_error` override, so
+each case here proves it still fires on that error rather than on httpx's.
 """
 
 import asyncio
@@ -13,7 +15,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
-from pipelex_sdk.errors import MissingMainStuffError, PipelineExecuteTimeoutError, RunStillRunningError
+from pipelex_sdk.errors import ApiResponseError, MissingMainStuffError, PipelineExecuteTimeoutError, RunStillRunningError
 
 _BASE_URL = "http://localhost:8081"
 
@@ -56,14 +58,20 @@ class TestClientExecute:
         assert error.elapsed_seconds == 31.0
         assert "30s" in str(error)
         assert "wait_for_result" in str(error)
+        # The gateway's answer is kept as the cause, typed.
+        assert isinstance(error.__cause__, ApiResponseError)
+        assert error.__cause__.status == 503
+        assert error.__cause__.request_url == f"{_BASE_URL}/v1/execute"
 
     def test_gateway_504_past_ceiling_translates_to_timeout(self, mocker: MockerFixture) -> None:
         client = self._client()
         mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(504)))
         mocker.patch("pipelex_sdk.client.monotonic", side_effect=[0.0, 29.0])
 
-        with pytest.raises(PipelineExecuteTimeoutError):
+        with pytest.raises(PipelineExecuteTimeoutError) as exc_info:
             asyncio.run(client.execute(pipe_code="p"))
+        assert isinstance(exc_info.value.__cause__, ApiResponseError)
+        assert exc_info.value.__cause__.status == 504
 
     def test_client_timeout_past_ceiling_translates_to_timeout(self, mocker: MockerFixture) -> None:
         client = self._client()
@@ -73,15 +81,16 @@ class TestClientExecute:
         with pytest.raises(PipelineExecuteTimeoutError):
             asyncio.run(client.execute(pipe_code="p"))
 
-    def test_fast_503_stays_inherited_http_status_error(self, mocker: MockerFixture) -> None:
+    def test_fast_503_stays_an_api_response_error(self, mocker: MockerFixture) -> None:
         client = self._client()
         mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(503)))
         # Failure at 2s — under the ceiling: a genuinely-down runner, not a gateway timeout.
         mocker.patch("pipelex_sdk.client.monotonic", side_effect=[0.0, 2.0])
 
-        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        with pytest.raises(ApiResponseError) as exc_info:
             asyncio.run(client.execute(pipe_code="p"))
-        assert not isinstance(exc_info.value, PipelineExecuteTimeoutError)
+        assert exc_info.value.status == 503
+        assert str(exc_info.value) == "API POST /v1/execute failed (503): Service Unavailable"
 
     def test_success_resolves_main_stuff(self, mocker: MockerFixture) -> None:
         client = self._client()

@@ -13,7 +13,7 @@ from mthds.protocol.pipe_io_contracts import PipeIOContract
 from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
-from pipelex_sdk.errors import ApiUnreachableError, MissingMainStuffError, RunLifecycleUnavailableError
+from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError, MissingMainStuffError, RunLifecycleUnavailableError
 from pipelex_sdk.runs import TokensUsageRecord
 
 _BASE_URL = "http://localhost:8081"
@@ -459,9 +459,11 @@ class TestClientRunFallback:
         client = self._client()
         mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(500, json={"detail": "boom"})))
 
-        # version 500 → assume hosted → start hits the same 500 → raise_for_status → HTTPStatusError.
-        with pytest.raises(httpx.HTTPStatusError):
+        # version 500 → assume hosted → start hits the same 500 → ApiResponseError, naming the start.
+        with pytest.raises(ApiResponseError) as exc_info:
             asyncio.run(client.start_and_wait(pipe_code="p"))
+        assert str(exc_info.value) == "API POST /v1/start failed (500): boom"
+        assert client._lifecycle_available is True
 
     def test_lifecycle_primitives_raise_unavailable_on_bare_404(self, mocker: MockerFixture) -> None:
         """The poll primitives surface a clear RunLifecycleUnavailableError on the bare-runner 404."""

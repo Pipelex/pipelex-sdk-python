@@ -10,6 +10,7 @@ from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
 from pipelex_sdk.errors import (
+    ApiResponseError,
     MissingMainStuffError,
     RunFailedError,
     RunLifecycleUnavailableError,
@@ -147,15 +148,23 @@ class TestClientLifecycle:
         with pytest.raises(RunLifecycleUnavailableError) as exc_info:
             asyncio.run(client.start(pipe_code="answer"))
         assert exc_info.value.api_url == _BASE_URL
+        assert f"{_BASE_URL}/v1/start returned 404" in str(exc_info.value)
+        # Translated from the typed error the inherited route raised, which stays reachable.
+        assert isinstance(exc_info.value.__context__, ApiResponseError)
+        assert exc_info.value.__context__.status == 404
 
-    def test_start_structured_404_stays_http_status_error(self, mocker: MockerFixture) -> None:
-        """A structured platform 404 (carries `code`) is a normal HTTP error, not lifecycle-unavailable."""
+    def test_start_structured_404_stays_api_response_error(self, mocker: MockerFixture) -> None:
+        """A structured platform 404 (carries `code`) is a normal API error, not lifecycle-unavailable."""
         client = self._client()
         body = {"code": "NOT_FOUND", "detail": "The requested resource does not exist."}
         mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(404, json=body)))
 
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(ApiResponseError) as exc_info:
             asyncio.run(client.start(pipe_code="answer"))
+        assert not isinstance(exc_info.value, RunLifecycleUnavailableError)
+        assert exc_info.value.status == 404
+        assert exc_info.value.code == "NOT_FOUND"
+        assert str(exc_info.value) == "API POST /v1/start failed (404): The requested resource does not exist."
 
     # ── get_run_status ───────────────────────────────────────────
 
@@ -239,6 +248,27 @@ class TestClientLifecycle:
 
         with pytest.raises(RunLifecycleUnavailableError):
             asyncio.run(client.get_run_status("run_1"))
+
+    def test_get_run_status_run_not_found_is_api_response_error(self, mocker: MockerFixture) -> None:
+        """The platform's structured run-not-found 404 raises the typed error, naming the read and the problem's code."""
+        client = self._client()
+        body = {
+            "type": "https://pipelex.com/errors/run_not_found",
+            "title": "Not found",
+            "status": 404,
+            "code": "run_not_found",
+            "detail": "Run not found.",
+        }
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(404, json=body)))
+
+        with pytest.raises(ApiResponseError) as exc_info:
+            asyncio.run(client.get_run_status("run 1"))
+        exc = exc_info.value
+        assert not isinstance(exc, RunLifecycleUnavailableError)
+        assert exc.code == "run_not_found"
+        assert exc.type_uri == "https://pipelex.com/errors/run_not_found"
+        assert exc.request_url == f"{_BASE_URL}/v1/runs/run%201/status"
+        assert str(exc) == "API GET /v1/runs/run%201/status failed (404): Run not found."
 
     # ── get_run_result status mapping ────────────────────────────
 
@@ -450,6 +480,17 @@ class TestClientLifecycle:
 
         with pytest.raises(RunLifecycleUnavailableError):
             asyncio.run(client.get_run_result("run_1"))
+
+    def test_get_run_result_server_fault_is_api_response_error(self, mocker: MockerFixture) -> None:
+        """A non-2xx the poll does not map to a state (here a 500) raises the typed error."""
+        client = self._client()
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(500, json={"detail": "boom", "request_id": "req-500"})))
+
+        with pytest.raises(ApiResponseError) as exc_info:
+            asyncio.run(client.get_run_result("run_1"))
+        assert exc_info.value.status == 500
+        assert exc_info.value.request_id == "req-500"
+        assert str(exc_info.value) == "API GET /v1/runs/run_1/results failed (500): boom"
 
     # ── execute 202 degrade → re-exported RunStillRunningError ────
 
