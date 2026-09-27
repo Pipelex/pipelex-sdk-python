@@ -451,11 +451,10 @@ async def prepare_inputs(
             selected; or a value at a file position is unusable. HTTP(S) URLs and existing
             `pipelex-storage://` URIs pass through unchanged, and every failure is raised
             BEFORE any run is created.
-        httpx.HTTPStatusError: A no-verdict condition from `/v1/validate` — a malformed
+        ApiResponseError: A no-verdict condition from `/v1/validate` — a malformed
             selector, an unknown or foreign-org `method_id` (`404`), a stored method with no
-            source, a fetch failure at the address. `validate` is 200-diagnostic and stays on
-            the inherited protocol error regime, so a no-verdict failure arrives as the raw
-            status error rather than the product routes' `ApiResponseError`.
+            source, a fetch failure at the address. `validate` is 200-diagnostic, so only a
+            failure to produce any verdict arrives here, as the typed error every route raises.
     """
     selected_files, selected_method_ref, selected_method_id = _resolve_selector(files=files, method_ref=method_ref, method_id=method_id)
     # Normalized here rather than at its use below, so a mistyped `pipe_ref` is refused on the

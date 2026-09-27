@@ -10,6 +10,7 @@ from mthds.protocol.exceptions import PipelineRequestError
 from pytest_mock import MockerFixture, MockType
 
 from pipelex_sdk.client import MthdsFile, PipelexAPIClient
+from pipelex_sdk.errors import ApiResponseError
 from pipelex_sdk.validation_models import VALIDATION_VIEW_INPUT_FORM, PipelexInvalidReport, PipelexValidationReport
 
 _BASE_URL = "http://localhost:8081"
@@ -201,6 +202,37 @@ class TestClientValidate:
         assert "mthds_contents" not in body
         # A produced invalid verdict still parses into the union's invalid arm.
         assert isinstance(result, PipelexInvalidReport)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "status", "problem"),
+        [
+            (
+                {"method_id": "mt_missing"},
+                404,
+                {
+                    "type": "https://pipelex.com/errors/not_found",
+                    "title": "Not found",
+                    "status": 404,
+                    "code": "not_found",
+                    "detail": "Method not found.",
+                },
+            ),
+            ({"mthds_contents": ["bundle"]}, 422, {"title": "Unprocessable entity", "status": 422, "detail": "mthds_sources length mismatch."}),
+        ],
+    )
+    def test_a_no_verdict_answer_raises_api_response_error(
+        self, mocker: MockerFixture, kwargs: dict[str, object], status: int, problem: dict[str, object]
+    ) -> None:
+        """Both wire paths — the selector one built here and the inline one on the inherited seam — raise the typed error."""
+        client = self._client()
+        response = httpx.Response(status, json=problem, request=httpx.Request("POST", f"{_BASE_URL}/v1/validate"))
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=response))
+
+        with pytest.raises(ApiResponseError) as exc_info:
+            asyncio.run(client.validate(**kwargs))  # type: ignore[arg-type]
+        assert exc_info.value.status == status
+        assert exc_info.value.request_url == f"{_BASE_URL}/v1/validate"
+        assert str(exc_info.value) == f"API POST /v1/validate failed ({status}): {problem['detail']}"
 
     @pytest.mark.parametrize(
         "kwargs",

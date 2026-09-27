@@ -8,9 +8,10 @@ protocol base. They derive from the protocol base `PipelineRequestError`
   / TLS / timeout). Distinguished from `ApiResponseError`, which represents a non-2xx
   response that *did* come back.
 - `ApiResponseError` — a non-2xx response from the API, carrying the members of its
-  RFC 9457 problem document: the branch fields `type_uri` (the problem's `type`) and,
-  on a runner-rendered problem, `error_domain`; the surface-native `code` / `error_type`;
-  the request id; and the rest (decoupled from the HTTP status).
+  RFC 9457 problem document. It subclasses `mthds`'s own `ApiResponseError`, narrowing its
+  `validation_errors` to this SDK's `ValidationErrorItem` and adding the Pipelex members the
+  standard's client leaves out (`code`, `error_category`, `errors`), so every route —
+  protocol, lifecycle and product alike — raises this one class.
 - `PipelineExecuteTimeoutError` — a blocking `execute()` killed by the hosted gateway's
   ~30s synchronous-request ceiling; points the caller at the durable start+poll path.
 - `PagingNotTerminatingError` — a paged-list iterator hit its runaway backstop, meaning
@@ -42,18 +43,22 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mthds.protocol.exceptions import PipelineRequestError
+from mthds.runners.api.exceptions import ApiResponseError as MthdsApiResponseError
 
 # Explicit re-export (PEP 484 `as` self-alias): the protocol 202-degrade error stays owned by
 # `mthds`, surfaced here so consumers have a single import home for the run/lifecycle errors.
 from mthds.runners.api.exceptions import RunStillRunningError as RunStillRunningError  # ruff: ignore[useless-import-alias]
 
+from pipelex_sdk.validation_models import ValidationErrorItem
+
 if TYPE_CHECKING:
     from typing import Any
 
+    from mthds.runners.api.problem import UserAction
+
     from pipelex_sdk.artifact_models import ArtifactScope, DownloadArtifactsResult
-    from pipelex_sdk.error_models import FieldError, RunErrorReport, UserAction
+    from pipelex_sdk.error_models import FieldError, RunErrorReport
     from pipelex_sdk.runs import RunStatus
-    from pipelex_sdk.validation_models import ValidationErrorItem
 
 
 class ApiUnreachableError(PipelineRequestError):
@@ -73,12 +78,23 @@ class ApiUnreachableError(PipelineRequestError):
         self.code = code
 
 
-class ApiResponseError(PipelineRequestError):
+class ApiResponseError(MthdsApiResponseError[ValidationErrorItem]):
     """A non-2xx response that DID come back from the API, with its problem document parsed.
 
-    Every error the hosted API answers is an RFC 9457 `application/problem+json` document, and this
-    error carries its members as typed attributes, each `None` when the document did not carry it:
+    Every route of `PipelexAPIClient` raises it on a non-2xx answer: the protocol routes it inherits
+    from `mthds` (`execute`, `start`, `validate`, `models`, `version`), the run status and results
+    reads, and the product routes. It is `mthds`'s own `ApiResponseError` narrowed to this SDK, so a
+    handler written against the standard's client (`except mthds.runners.api.exceptions.ApiResponseError`)
+    catches it too. Every error the hosted API answers is an RFC 9457 `application/problem+json`
+    document, and this error carries its members as typed attributes, each `None` when the document
+    did not carry it:
 
+    - **What happened, for a person.** `str(exc)` names the request and the status, gives the reason
+      (the problem's `detail`, else its `title`, else the raw body, else the status text) and, when
+      the server advised one, the next step on its own line (`Next step: …`). `server_message` is the
+      `detail` alone, `title` the stable label of the error class, `user_action` the advised next
+      step (`kind` and `detail`, the `mthds` `UserAction`), and `error_category` a finer
+      classification of an inference failure.
     - **The branch fields.** `type_uri` (the problem's `type`) is the stable URI naming the error
       class, on every problem. `error_domain` is the coarse class — `input` (the caller can fix it),
       `config` (a configuration change is needed), `runtime` (a failure during execution) — carried
@@ -88,18 +104,20 @@ class ApiResponseError(PipelineRequestError):
     - **The native codes.** `code` is the platform's own closed code (`conflict`, `not_found`,
       `pipelex_api_key_limit_reached`, …) and `error_type` the runner's open exception class name.
       Each is finer than `error_domain` and specific to the surface that emits it.
-    - **For a person.** `title` is the stable label of the error class, `server_message` the
-      per-occurrence `detail`, `user_action` the advised next step, and `error_category` a finer
-      classification of an inference failure.
     - **For support.** `request_id` correlates the response with the server's logs; it is read from
-      the body, or from the `X-Request-ID` response header when the body has none.
-    - **Per-item failures.** `errors` is the platform's field-level list (`field`, `code`, `detail`),
-      and `validation_errors` the structured diagnostics of a bundle that failed validation.
+      the body, or from the `X-Request-ID` response header when the body has none. `instance` names
+      the occurrence.
+    - **Per-item failures.** `validation_errors` holds the structured diagnostics of a run route's
+      refusal to run an invalid method (a `422` from `execute` or `start`), typed as
+      `ValidationErrorItem`, so the failing pipe reads as `validation_errors[0].pipe_code`; it is
+      `None` when the refusal is not itemized, or when an item does not fit that type (the raw list
+      stays on `problem`). `errors` is the platform's field-level list (`field`, `code`, `detail`).
 
-    `problem` is the decoded document whole, so a member this SDK does not name — `instance`, or the
-    `run_status` and `error` of a failed run's results read — stays reachable; `response_body` is the
-    raw text, and `status` / `status_text` the transport's. `problem` is `None` when the body was not
-    a JSON object.
+    `problem` is the decoded document whole, so a member this SDK does not name — the `run_status`
+    and `error` of a failed run's results read, say — stays reachable; `response_body` is the raw
+    text, `status` / `status_text` the transport's, `headers` the answer's headers (lower-case
+    names), `request_url` the URL requested and `api_url` the configured base URL. `problem` is
+    `None` when the body was not a JSON object.
     """
 
     def __init__(
@@ -110,38 +128,72 @@ class ApiResponseError(PipelineRequestError):
         status: int,
         status_text: str,
         response_body: str,
+        headers: dict[str, str] | None = None,
+        request_url: str | None = None,
         error_type: str | None = None,
         server_message: str | None = None,
         validation_errors: list[ValidationErrorItem] | None = None,
-        code: str | None = None,
-        request_id: str | None = None,
         type_uri: str | None = None,
         title: str | None = None,
+        instance: str | None = None,
+        request_id: str | None = None,
         error_domain: str | None = None,
-        error_category: str | None = None,
         retryable: bool | None = None,
         user_action: UserAction | None = None,
-        errors: list[FieldError] | None = None,
         problem: dict[str, Any] | None = None,
+        code: str | None = None,
+        error_category: str | None = None,
+        errors: list[FieldError] | None = None,
     ) -> None:
-        super().__init__(message)
-        self.api_url = api_url
-        self.status = status
-        self.status_text = status_text
-        self.response_body = response_body
-        self.error_type = error_type
-        self.server_message = server_message
-        self.validation_errors = validation_errors
+        """Build the error: the `mthds` members, then the Pipelex ones.
+
+        Args:
+            message: What failed and why, e.g. `API POST /v1/start failed (422): <reason>`. The next
+                step is appended on its own line unless `message` already ends with it.
+            api_url: The configured base URL of the API that answered.
+            status: The HTTP status code of the answer.
+            status_text: The HTTP reason phrase of the answer.
+            response_body: The answer's body, as text.
+            headers: The answer's headers, names in lower case.
+            request_url: The URL the request was sent to.
+            error_type: The runner's exception class name.
+            server_message: The problem's `detail`, the reason for this occurrence.
+            validation_errors: The per-error diagnostics of a refused run.
+            type_uri: The problem's `type`, the stable URI of the error class.
+            title: The problem's `title`, the stable label of the error class.
+            instance: The problem's `instance`, the occurrence.
+            request_id: The request's correlation id.
+            error_domain: Who can fix the failure: `input`, `config` or `runtime`.
+            retryable: Whether the same request can succeed later; `None` when unknown.
+            user_action: The next step the server advises.
+            problem: The decoded problem document whole.
+            code: The platform's closed native code.
+            error_category: The finer classification of an inference failure.
+            errors: The platform's field-level failures.
+        """
+        super().__init__(
+            message,
+            api_url=api_url,
+            status=status,
+            status_text=status_text,
+            response_body=response_body,
+            headers=headers,
+            request_url=request_url,
+            error_type=error_type,
+            server_message=server_message,
+            validation_errors=validation_errors,
+            type_uri=type_uri,
+            title=title,
+            instance=instance,
+            request_id=request_id,
+            error_domain=error_domain,
+            retryable=retryable,
+            user_action=user_action,
+            problem=problem,
+        )
         self.code = code
-        self.request_id = request_id
-        self.type_uri = type_uri
-        self.title = title
-        self.error_domain = error_domain
         self.error_category = error_category
-        self.retryable = retryable
-        self.user_action = user_action
         self.errors = errors
-        self.problem = problem
 
 
 class PipelineExecuteTimeoutError(PipelineRequestError):
