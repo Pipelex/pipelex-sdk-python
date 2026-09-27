@@ -47,6 +47,8 @@ from mthds.protocol.pipe_io_contracts import PipeIOContracts
 from mthds.runners.api.models import DictPipeOutputAbstract, DictWorkingMemoryAbstract
 from pydantic import BaseModel, ConfigDict, Field
 
+from pipelex_sdk.error_models import LenientRunErrorReport
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -146,6 +148,11 @@ class RunPublic(BaseModel):
     status: RunStatus
     created_at: str
     finished_at: str | None = None
+    #: Why the run failed — the runner's report as the platform stored it, whole and typed (see
+    #: `pipelex_sdk.error_models`). `None` for a run that has not failed, and for one that ended with
+    #: no stored report (cancelled, terminated, timed out, or finalized by the platform itself). Read
+    #: leniently, so a report written by another runner version never fails the read carrying it.
+    error: LenientRunErrorReport = None
 
 
 class RunRead(RunPublic):
@@ -339,12 +346,20 @@ class RunResultCompleted(BaseModel):
 
 
 class RunResultFailed(BaseModel):
-    """HTTP 409 — the run reached a terminal non-`COMPLETED` status."""
+    """HTTP 409 — the run reached a terminal non-`COMPLETED` status.
+
+    Built from the platform's problem document: `message` is its `detail`, which names the status and
+    then the report's own message (`Run finished with status FAILED: <message>`), `status` is its
+    `run_status` member, and `error` is its `error` member, the run's stored report typed whole — the
+    same object the status read serves as `RunRead.error`. `error` is `None` for a run that ended with
+    no stored report.
+    """
 
     state: Literal["failed"] = "failed"
     pipeline_run_id: str
     status: RunStatus
     message: str
+    error: LenientRunErrorReport = None
 
 
 RunResultState: TypeAlias = Annotated[

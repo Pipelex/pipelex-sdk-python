@@ -37,6 +37,7 @@ from pipelex_sdk.artifacts import (
     locate_artifacts,
     resolve_artifacts,
 )
+from pipelex_sdk.error_models import RunErrorReport
 from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
@@ -680,11 +681,14 @@ class TestArtifacts:
             asyncio.run(download_artifacts(client, dir_path=tmp_path, run_id=_RUN_ID))
 
     def test_raises_run_failed_for_a_run_that_ended_without_a_result(self, tmp_path: Path) -> None:
-        client = _FakeClient(run_result=RunResultFailed(pipeline_run_id=_RUN_ID, status=RunStatus.FAILED, message="the run failed"))
+        report = RunErrorReport(error_type="SandboxProvisioningError", message="Snapshot is building", error_domain="runtime", retryable=True)
+        failed = RunResultFailed(pipeline_run_id=_RUN_ID, status=RunStatus.FAILED, message="the run failed", error=report)
+        client = _FakeClient(run_result=failed)
         with pytest.raises(RunFailedError) as caught:
             asyncio.run(download_artifacts(client, dir_path=tmp_path, run_id=_RUN_ID))
         assert caught.value.status == RunStatus.FAILED
         assert caught.value.run_id == _RUN_ID
+        assert caught.value.error == report
 
     def test_raises_field_not_included_when_the_scope_key_was_never_relayed(self, tmp_path: Path) -> None:
         client = _FakeClient()

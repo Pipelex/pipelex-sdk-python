@@ -852,7 +852,7 @@ async def _read_completed_results(client: ArtifactCapableClient, run_id: str) ->
         msg = f"Run {run_id} is still running, so it has no artifacts to download yet{hint}"
         raise RunStillRunningError(msg, run_id=run_id, retry_after_seconds=retry)
     if isinstance(state, RunResultFailed):
-        raise RunFailedError(state.message, run_id=run_id, status=state.status)
+        raise RunFailedError(state.message, run_id=run_id, status=state.status, error=state.error)
     completed: RunResultCompleted = state
     return completed.result
 
