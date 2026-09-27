@@ -297,7 +297,10 @@ class PipelexAPIClient(MthdsAPIClient):
             request_timeout_seconds if request_timeout_seconds is not None else self._DEFAULT_REQUEST_TIMEOUT_SECONDS
         )
         #: The integrator's own name, placed before this SDK's tokens in the `User-Agent`.
-        self.app_info: AppInfo | None = app_info
+        # Since `mthds` 0.16.0 the base declares `app_info` as its own `AppInfo`, which it only ever
+        # writes (in `init_user_agent`, never called here). This SDK keeps its own model and builder
+        # until it adopts the base's `user_agent_sdk_tokens` seam, so the narrow ignore covers that one divergence.
+        self.app_info: AppInfo | None = app_info  # type: ignore[assignment]
         #: The `User-Agent` sent on every request (spec: `docs/specs/client-identification.md`),
         #: built once here so an over-long header fails at construction, not on the first call.
         self.user_agent: str = build_user_agent(app_info)
