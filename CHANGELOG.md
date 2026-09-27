@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v0.13.0] - 2026-09-27
 
 ### Added
 
@@ -12,6 +12,10 @@
 - **`RunErrorReport` carries every field of the runner's report and moves to `pipelex_sdk.error_models` (Breaking)**: import it from `pipelex_sdk.error_models` instead of `pipelex_sdk.product_models`. Beside `message` and `error_type` it now declares `title`, `type_uri`, `error_domain`, `error_category`, `retryable`, `user_action`, `model`, `provider`, `provider_metadata`, `caller_facing_message`, `validation_errors` and `migration`, every one optional, the model open to fields the runner adds, and each field read leniently — a value that does not fit its type reads as `None` rather than failing the status read, the run list or the results read that carries the report — so `PipelineRun.error` in the run lists reads the whole report too.
 - **`RunRead.error` is the typed report, no longer a raw dict (Breaking)**: `error` is now declared on `RunPublic`, so the status read's report is a `RunErrorReport` rather than the dict that rode `model_extra`; read `run.error.message` where code read `run.error["message"]` or `run.model_extra["error"]`.
 - **A failed run's status comes from the results read's `run_status` member (Breaking)**: `get_run_result` no longer parses the status out of the `409`'s `detail` sentence; it reads the problem document's `run_status` member, and a `409` without a status this SDK knows reads as `FAILED`.
+
+### Removed
+
+- **The Pipelex Gateway inference key is gone from the client (Breaking)**: `create_gateway_api_key` and `get_gateway_api_key`, with the `GatewayApiKey` and `GatewayApiKeyStatus` models, are removed — the `POST` and `GET /v1/gateway-api-key` routes behind them no longer exist on the hosted API. A caller brings its own provider keys, or runs against the hosted API with a Pipelex API key (`list_pipelex_api_keys` and friends, which are untouched). This has nothing to do with the hosted HTTP gateway's synchronous-execute ceiling, which is unchanged.
 
 ## [v0.12.0] - 2026-09-24
 
@@ -53,10 +57,6 @@
 
 - **The blocking path stops dropping the executed graph.** Against a bare runner, `start_and_wait` now lifts `pipe_output.graph_spec` onto `RunResults.graph_spec` instead of writing `None` — the runner has always returned the graph there — so the field carries the same document whichever path ran.
 - **A stored source nested too deeply to decode now fails as a `ValidationError`**: `parse_method_files` converts the JSON decoder's `RecursionError` into the `ValueError` its contract documents, so `MethodData`'s validator surfaces it as a `pydantic.ValidationError` like any other malformed response body instead of letting a bare `RecursionError` escape `get_method` past a caller's `except ValidationError`.
-
-### Removed
-
-- **The Pipelex Gateway inference key is gone from the client (Breaking)**: `create_gateway_api_key` and `get_gateway_api_key`, with the `GatewayApiKey` and `GatewayApiKeyStatus` models, are removed — the `POST` and `GET /v1/gateway-api-key` routes behind them no longer exist on the hosted API. A caller brings its own provider keys, or runs against the hosted API with a Pipelex API key (`list_pipelex_api_keys` and friends, which are untouched). This has nothing to do with the hosted HTTP gateway's synchronous-execute ceiling, which is unchanged.
 
 ## [v0.10.0] - 2026-09-13
 
