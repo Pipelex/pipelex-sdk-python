@@ -135,12 +135,66 @@ class TestApiResponseError:
         assert err.request_id is None
         assert err.problem == body
 
-    def test_a_user_action_field_that_does_not_fit_reads_as_none_and_the_rest_stands(self, mocker: MockerFixture) -> None:
-        body = {"detail": "x", "user_action": {"kind": 5, "detail": "Retry in a minute."}, "errors": [{"field": "body.label", "code": 3}]}
+    @pytest.mark.parametrize(
+        "user_action",
+        [{"kind": 5, "detail": "Retry in a minute."}, {"kind": "wait_and_retry", "detail": ""}, {"kind": "wait_and_retry"}],
+    )
+    def test_a_user_action_that_is_no_next_step_reads_as_none_and_the_rest_stands(self, mocker: MockerFixture, user_action: dict[str, Any]) -> None:
+        body = {"detail": "x", "user_action": user_action, "errors": [{"field": "body.label", "code": 3}]}
         err = self._raise_from(mocker, _response(422, json_body=body))
 
-        assert err.user_action is not None
-        assert err.user_action.kind is None
-        assert err.user_action.detail == "Retry in a minute."
+        # The `mthds` `UserAction` is kept only whole — a string `kind` and a non-empty `detail`.
+        assert err.user_action is None
+        assert str(err) == "API GET /v1/billing/subscription failed (422): x"
+        # A field-level item keeps the fields that fit.
         assert err.errors is not None
         assert [(item.field, item.code) for item in err.errors] == [("body.label", None)]
+
+    def test_the_message_carries_the_next_step_on_its_own_line(self, mocker: MockerFixture) -> None:
+        err = self._raise_from(mocker, _response(422, json_body=_RUNNER_PROBLEM))
+
+        assert str(err) == (
+            "API GET /v1/billing/subscription failed (422): Input 'document' expects a Document, got an Image.\n"
+            "Next step: Send a PDF for the 'document' input."
+        )
+
+    @pytest.mark.parametrize(
+        ("response", "reason"),
+        [
+            (_response(409, json_body={"title": "Conflict", "status": 409}), "Conflict"),
+            (_response(502, text="<html>Bad Gateway</html>"), "<html>Bad Gateway</html>"),
+            (_response(502, text="x" * 600), "x" * 500 + "…"),
+            (_response(503, text="   "), "Service Unavailable"),
+            (_response(418, json_body={"detail": {"error_type": "PipeRunError", "message": "the input is empty"}}), "the input is empty"),
+        ],
+    )
+    def test_the_reason_falls_back_from_detail_to_title_to_body_to_status_text(
+        self, mocker: MockerFixture, response: httpx.Response, reason: str
+    ) -> None:
+        err = self._raise_from(mocker, response)
+
+        assert str(err) == f"API GET /v1/billing/subscription failed ({response.status_code}): {reason}"
+
+    def test_the_older_detail_object_shape_reads_its_error_type_and_message(self, mocker: MockerFixture) -> None:
+        err = self._raise_from(mocker, _response(500, json_body={"detail": {"error_type": "PipeRunError", "message": "the input is empty"}}))
+
+        assert err.error_type == "PipeRunError"
+        assert err.server_message == "the input is empty"
+        assert err.code is None
+        assert err.validation_errors is None
+
+    def test_validation_errors_whose_category_this_sdk_does_not_know_read_as_none(self, mocker: MockerFixture) -> None:
+        items = [{"category": "a_category_from_tomorrow", "message": "boom", "pipe_code": "summarize"}]
+        err = self._raise_from(mocker, _response(422, json_body={"detail": "refused", "validation_errors": items}))
+
+        assert err.validation_errors is None
+        # The raw list stays reachable on the decoded document.
+        assert err.problem is not None
+        assert err.problem["validation_errors"] == items
+
+    def test_headers_and_request_url_are_kept_as_plain_data(self, mocker: MockerFixture) -> None:
+        err = self._raise_from(mocker, _response(429, json_body={"detail": "slow down"}, headers={"Retry-After": "12"}))
+
+        assert err.headers["retry-after"] == "12"
+        assert err.request_url == f"{_BASE_URL}/v1/billing/subscription"
+        assert err.api_url == _BASE_URL

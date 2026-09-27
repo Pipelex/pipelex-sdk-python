@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.14.0] - 2026-09-27
+
+### Changed
+
+- **Every route raises `ApiResponseError`, and a refused run says why (Breaking)**: the protocol routes (`execute`, `start`, `validate`, `models`, `version`), the run status and results reads and `start_and_wait` raise `ApiResponseError` on a non-2xx answer instead of `httpx.HTTPStatusError`, so a method the plane refuses to run raises an error whose message gives the reason and, on its own line, the next step (`Next step: …`), and whose `validation_errors[0].pipe_code` names the failing pipe. A caller that caught `httpx.HTTPStatusError` catches `ApiResponseError` and reads `exc.status`, `exc.headers` and `exc.request_url` where it read `exc.response.status_code`, `exc.response.headers` and `exc.request.url`; the gateway-timeout translation of `execute` and the bare-runner `404` translation of `start` are unchanged.
+- **`ApiResponseError` is `mthds`'s own error narrowed (Breaking)**: `pipelex_sdk.errors.ApiResponseError` now subclasses `mthds.runners.api.exceptions.ApiResponseError[ValidationErrorItem]`, adding `code`, `error_category` and `errors`, so `except mthds.runners.api.exceptions.ApiResponseError` catches it too. It gains `instance`, `headers` and `request_url`; its message is the base's (`API <METHOD> /v1/<endpoint> failed (<status>): <reason>`, the reason falling back from `detail` to `title` to the raw body to the status text); its `user_action` is the `mthds` `UserAction`, kept only when the answer carries a string `kind` and a non-empty `detail`, so one missing either now reads as `None`; and an empty `code` or `error_category` reads as `None`.
+- **Requires `mthds` 0.17.0 (Breaking)**: the exact pin moves from 0.16.0 to the release that adds the typed `ApiResponseError` this client builds on.
+
+### Fixed
+
+- **A runner's 404 on `start` is no longer read as a missing run store**: a 404 carrying the runner's `error_type` — a `method_ref` whose package does not exist, relayed by the hosted API without a platform `code` — raised `RunLifecycleUnavailableError`, and `start_and_wait` then moved the client onto blocking `execute` for the rest of its life. Only a 404 whose body carries neither `code` nor `error_type` now counts as a missing route; any other raises `ApiResponseError`, and the client keeps using the durable path.
+
 ## [v0.13.0] - 2026-09-27
 
 ### Added

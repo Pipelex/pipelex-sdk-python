@@ -117,6 +117,35 @@ ack = await client.start(pipe_code="long_pipe", inputs={...})
 result = await client.wait_for_result(ack.pipeline_run_id)
 ```
 
+### When a run is refused: `ApiResponseError` says why and what to do next
+
+A method the plane will not run — a bundle naming a model the deck does not serve, a pipe whose output cannot be assembled — is refused before any result exists: `start`, `execute` and `start_and_wait` raise `ApiResponseError` on the `422`. Its message names the request, gives the reason and, on its own line, the next step the plane advises, so printing the error is already actionable:
+
+```text
+API POST /v1/start failed (422): Pipe 'draft_pitch' (PipeLLM), field 'model': Model handle 'gpt-5.1' was not found in the model deck
+
+Did you mean: gpt-5.5, gpt-5.4, gpt-5.6-sol, gpt-5.4-pro, gpt-5.6-luna
+Next step: Edit the bundle as each validation error says: apply its suggested fix where it has one, after confirming an unsafe one
+```
+
+A program reads the same thing as fields:
+
+```python
+from pipelex_sdk.errors import ApiResponseError
+
+try:
+    result = await client.start_and_wait(pipe_code="pitch_product", mthds_contents=[bundle])
+except ApiResponseError as exc:
+    if exc.error_domain == "input":
+        for item in exc.validation_errors or []:
+            print(f"{item.pipe_code}: {item.message}")  # the failing pipe, typed as ValidationErrorItem
+        if exc.user_action is not None:
+            print(f"Next step: {exc.user_action.detail}")
+    raise
+```
+
+`validation_errors` is set when the runner itemized its refusal at load; a run that failed during execution carries the pipe in `server_message` instead (`Pipe 'analyze_topics' failed (review_topics → analyze_topics): …`).
+
 ### When a run fails: `RunFailedError` carries the run's report
 
 A run that ends without a result — `FAILED`, `CANCELLED`, `TERMINATED` or `TIMED_OUT` — makes `wait_for_result`, `start_and_wait` and `download_artifacts` raise `RunFailedError`. Its message already names the status and the reason (`Run finished with status FAILED: <message>`), `status` is the typed `RunStatus`, and `error` is the run's stored error report, typed whole as `RunErrorReport` (`pipelex_sdk.error_models`): the runner's `error_type`, `message`, `title`, `type_uri`, `error_domain`, `error_category`, `retryable`, `user_action`, `model`, `provider`, `provider_metadata`, `validation_errors`, and anything newer on `model_extra`. `error` is `None` for a run that ended with no report, such as a cancelled one.
@@ -140,7 +169,7 @@ Branch on `error_domain` (`input`, `config`, `runtime`), `type_uri` and `retryab
 
 ### API errors: branch on `type_uri` and `error_domain`, not the HTTP status
 
-A non-2xx answer from a product route — the account, methods, organization, billing, API-key, onboarding, storage and upload methods, `codegen` and `resolve`, and the run records (`list_runs`, `iterate_runs`, `get_run_detail`, `update_run`) — raises a typed `ApiResponseError` carrying the members of the RFC 9457 problem document. The protocol routes (`execute`, `start`, `validate`, `models`, `version`) and the run status and results reads keep raising `httpx.HTTPStatusError` for a failure they do not translate, and `health` raises `PipelineRequestError`; `docs/architecture.md` lists the error regimes. The branch fields are `type_uri`, the problem's `type`, a stable URI naming the error class that every problem carries, and `error_domain`, the coarse class (`input` means the caller can fix it, `config` that a configuration change is needed, `runtime` that execution failed). `error_domain` is carried only by the problems the runner renders — those of `codegen` and `resolve`, which the hosted API relays from the runner — and is `None` on the platform's own problems, such as those of the account, billing and API-key routes, which name their class by `type_uri` alone:
+Every `/v1` route raises a typed `ApiResponseError` on a non-2xx answer, carrying the members of the RFC 9457 problem document: the protocol routes (`execute`, `start`, `validate`, `models`, `version`), the run status and results reads, and the product routes — the account, methods, organization, billing, API-key, onboarding, storage and upload methods, `codegen` and `resolve`, and the run records (`list_runs`, `iterate_runs`, `get_run_detail`, `update_run`). It is `mthds`'s own `ApiResponseError` narrowed, so `except mthds.runners.api.exceptions.ApiResponseError` catches it too; `health` raises `PipelineRequestError`, and `docs/architecture.md` lists the error regimes. The branch fields are `type_uri`, the problem's `type`, a stable URI naming the error class that every problem carries, and `error_domain`, the coarse class (`input` means the caller can fix it, `config` that a configuration change is needed, `runtime` that execution failed). `error_domain` is carried only by the problems the runner renders — a run route's refusal, and those of `codegen` and `resolve`, which the hosted API relays from the runner — and is `None` on the platform's own problems, such as those of the account, billing and API-key routes, which name their class by `type_uri` alone:
 
 ```python
 from pipelex_sdk.errors import ApiResponseError
@@ -158,7 +187,7 @@ except ApiResponseError as exc:
         raise
 ```
 
-On a problem the runner rendered, branch on `error_domain` for the class — `if exc.error_domain == "input":` shows the caller what to fix, whatever the exact error. The rest of the document rides beside them: `server_message` (the `detail`), `title`, `retryable`, `user_action`, `error_category`, the platform's field-level `errors`, `validation_errors` for a bundle fault, and `request_id` for a support request, read from the body or from the `X-Request-ID` header. `code` (the platform's closed code, such as `conflict`) and `error_type` (the runner's exception class name) are each surface's own finer code — useful for display and support, not the field to branch on. `problem` is the decoded document whole, for any member the SDK does not name.
+On a problem the runner rendered, branch on `error_domain` for the class — `if exc.error_domain == "input":` shows the caller what to fix, whatever the exact error. The rest of the document rides beside them: `server_message` (the `detail`), `title`, `instance`, `retryable`, `user_action` (the `mthds` `UserAction`, kept only when it has a `kind` and a non-empty `detail`), `error_category`, the platform's field-level `errors`, `validation_errors` for a bundle fault, and `request_id` for a support request, read from the body or from the `X-Request-ID` header. The answer itself stays reachable as plain data: `status`, `headers` (lower-case names, so `exc.headers.get("retry-after")` reads a `429`'s delay) and `request_url`. `code` (the platform's closed code, such as `conflict`) and `error_type` (the runner's exception class name) are each surface's own finer code — useful for display and support, not the field to branch on. `problem` is the decoded document whole, for any member the SDK does not name.
 
 ## Public import paths (no barrel)
 

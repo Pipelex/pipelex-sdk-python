@@ -8,8 +8,9 @@ validation), the richer transport/error layer, the durable run lifecycle, the pr
 surface, and `health`.
 
 This module holds construction, the transport extension helpers (`_request_product`,
-`_request_json`, `_send_or_unreachable`), the `problem+json` error-body parser, the
-`execute` override (hosted gateway-timeout translation), the durable run lifecycle, the
+`_request_json`, `_send_or_unreachable`), the `_raise_api_response_error` override that
+every route raises through, the `execute` override (hosted gateway-timeout translation),
+the `start` override (bare-runner 404 translation), the durable run lifecycle, the
 `validate` override (markdown-render injection + `validate_files`), the Pipelex product
 surface (methods, organizations, billing, API keys, onboarding, storage, run records),
 and the origin-level `health` probe.
@@ -18,15 +19,15 @@ and the origin-level `health` probe.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from time import monotonic
-from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 from mthds.protocol.exceptions import PipelineRequestError
 from mthds.runners.api.client import MthdsAPIClient
+from mthds.runners.api.problem import ProblemDocument
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import to_json
 from typing_extensions import override
@@ -51,7 +52,7 @@ from pipelex_sdk.crate_models import (
     ResolveResponse,
     ResolveResponseAdapter,
 )
-from pipelex_sdk.error_models import FieldError, UserAction
+from pipelex_sdk.error_models import FieldError
 from pipelex_sdk.errors import (
     ApiResponseError,
     ApiUnreachableError,
@@ -108,6 +109,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
+    from mthds.protocol.models import ValidationDiagnostic
     from mthds.protocol.pipe_output import VariableMultiplicity
     from mthds.protocol.pipeline_inputs import PipelineInputs
     from mthds.protocol.stuff import StuffType
@@ -140,7 +142,10 @@ _POLL_REQUEST_TIMEOUT_SECONDS = 30.0  # single status/result/product GETs; the h
 # non-empty pages: neither iterator's adjacent-cursor check sees a non-adjacent repeat.
 _MAX_LIST_PAGES: int = 10_000
 _DEFAULT_DEGRADED_RETRY_SECONDS = 5  # matches the platform's `_DEGRADE_RETRY_AFTER_SECONDS`.
-_REQUEST_ID_HEADER = "x-request-id"  # httpx headers are case-insensitive; the platform sends `X-Request-ID`.
+
+# How much of a body that is no problem document an error's message quotes; `response_body` keeps it
+# whole. The same limit as the `mthds` base, so a refusal reads the same from either client.
+_REASON_BODY_LIMIT = 500
 
 # The hosted gateway caps synchronous requests at ~30s. A blocking-`execute` failure at/after
 # this elapsed threshold is the gateway cut-off, not a transient outage — the threshold guards
@@ -221,6 +226,10 @@ class PipelexAPIClient(MthdsAPIClient):
       on the structured `ApiResponseError.code`, not the HTTP status. The two list routes
       are paged: `list_methods` / `list_runs` answer one `{items, next_cursor}` page, and
       `iterate_methods` / `iterate_runs` follow the cursors for the whole catalog.
+
+    Every `/v1` route — protocol, lifecycle and product — raises this SDK's `ApiResponseError`
+    on a non-2xx answer, its message and members carrying the problem document's reason, the
+    next step the server advises and, for a refused run, the diagnostics naming the failing pipe.
 
     Construction is Pipelex-only — it never reads the `mthds` resolver (`MTHDS_API_KEY` /
     `MTHDS_BASE_URL`, `~/.mthds/config`), whose values are a credential pair for whatever
@@ -371,44 +380,63 @@ class PipelexAPIClient(MthdsAPIClient):
             raise PipelineRequestError(msg)
         return response.json()
 
+    @override
     def _raise_api_response_error(self, *, method: str, endpoint: str, response: httpx.Response) -> NoReturn:
-        """Parse an error response and raise the typed `ApiResponseError`."""
-        body_text = response.text
-        parsed = _parse_error_body(body_text)
-        detail = parsed.server_message or body_text or response.reason_phrase
-        msg = f"API {method} /{_API_PREFIX}/{endpoint} failed ({response.status_code}): {detail}"
-        # The platform stamps the same correlation id on the `X-Request-ID` header as in the body;
-        # a problem rendered without the member (or a body that is no problem at all) still has it.
-        request_id = parsed.request_id or response.headers.get(_REQUEST_ID_HEADER) or None
+        """Raise this SDK's `ApiResponseError` for a non-2xx answer — the one place an answer becomes an error.
+
+        Overrides the protected seam of the `mthds` base, so every inherited protocol route
+        (`execute`, `start`, `validate`, `models`, `version`) raises this SDK's subclass, as do the
+        run status and results reads and the product routes, which call it directly. The members
+        both clients share are read through the base's own parse (`ProblemDocument`), so they read
+        the same from either client; this adds the Pipelex members the standard's client leaves
+        out — the platform's `code`, the runner's `error_category` and the platform's field-level
+        `errors[]` — and narrows `validation_errors` to `ValidationErrorItem`.
+
+        Args:
+            method: The HTTP method of the request, for the message (`POST`).
+            endpoint: The endpoint below `/v1`, query included, exactly as the route sent it: it
+                names the request in the message and gives `request_url`.
+            response: The API's non-2xx answer.
+
+        Raises:
+            ApiResponseError: Always.
+        """
+        document = ProblemDocument.make_from_response(response)
+        members = document.members or {}
+        msg = f"API {method} /{_API_PREFIX}/{endpoint} failed ({response.status_code}): {_failure_reason(document, response)}"
         raise ApiResponseError(
             msg,
             api_url=self.base_url,
             status=response.status_code,
             status_text=response.reason_phrase,
-            response_body=body_text,
-            error_type=parsed.error_type,
-            server_message=parsed.server_message,
-            validation_errors=parsed.validation_errors,
-            code=parsed.code,
-            request_id=request_id,
-            type_uri=parsed.type_uri,
-            title=parsed.title,
-            error_domain=parsed.error_domain,
-            error_category=parsed.error_category,
-            retryable=parsed.retryable,
-            user_action=parsed.user_action,
-            errors=parsed.errors,
-            problem=parsed.problem,
+            response_body=response.text,
+            headers=dict(response.headers),
+            request_url=self._url(endpoint),
+            error_type=document.error_type,
+            server_message=document.server_message,
+            validation_errors=_narrowed_validation_errors(document.validation_errors),
+            type_uri=document.type_uri,
+            title=document.title,
+            instance=document.instance,
+            request_id=document.request_id,
+            error_domain=document.error_domain,
+            retryable=document.retryable,
+            user_action=document.user_action,
+            problem=document.members,
+            code=_non_empty_string_member(members, "code"),
+            error_category=_non_empty_string_member(members, "error_category"),
+            errors=_field_errors_of(members.get("errors")),
         )
 
-    def _raise_if_lifecycle_unavailable(self, response: httpx.Response, url: str) -> None:
+    def _raise_if_lifecycle_unavailable(self, *, status: int, body: str, url: str) -> None:
         """Translate a "route absent" 404 (a bare pipelex-api with no platform block) into a clear
-        `RunLifecycleUnavailableError`. The platform's own 404s (run not found / cross-org) carry a
-        structured problem+json envelope (a `code` field) and are left for normal handling.
+        `RunLifecycleUnavailableError`. A 404 the platform or the runner answered on purpose — a run not
+        found, a `method_ref` with no package — carries a problem document (`code` or `error_type`) and is
+        left for normal handling as `ApiResponseError`.
         """
-        if response.status_code != 404:
+        if status != 404:
             return
-        if _is_missing_route_404(response):
+        if _is_missing_route_404(body):
             msg = (
                 f"The durable run lifecycle is not available: {url} returned 404. Run polling is a "
                 f"hosted-API extension (/{_API_PREFIX}/{_RUNS}/*), not part of the MTHDS Protocol; "
@@ -447,9 +475,9 @@ class PipelexAPIClient(MthdsAPIClient):
         or a client-side request timeout, after at least ~28s have elapsed — is translated into
         a clear `PipelineExecuteTimeoutError` pointing at the durable start+poll path, matching
         the JS SDK. The protocol's optional 202 async-degrade still raises
-        `RunStillRunningError` (from the inherited `execute`), and every other non-2xx keeps
-        the inherited `httpx.HTTPStatusError` regime (consistent with the other inherited
-        protocol routes).
+        `RunStillRunningError` (from the inherited `execute`), and every other non-2xx raises
+        `ApiResponseError`, whose message and members carry the server's reason, the next step
+        it advises and, for a method it refuses to run, the diagnostics naming the failing pipe.
 
         Args:
             pipe_code: The code identifying the pipe to execute. Beside a `method_ref` it
@@ -489,7 +517,8 @@ class PipelexAPIClient(MthdsAPIClient):
                 inline `mthds_contents` or with `method_id`.
             RunStillRunningError: The server answered 202 (the protocol's optional async
                 degrade) — the run continues server-side; resume by `pipeline_run_id`.
-            httpx.HTTPStatusError: Any other non-2xx response (the inherited regime).
+            ApiResponseError: Any other non-2xx answer — a refusal to run an invalid method (a
+                `422`, its diagnostics on `validation_errors`), a failed run, auth, a server fault.
         """
         merged_extra = _merge_run_extensions(extra, method_ref=method_ref, method_id=method_id)
         _assert_method_ref_pairs_with_nothing(mthds_contents=mthds_contents, merged_extra=merged_extra)
@@ -504,7 +533,7 @@ class PipelexAPIClient(MthdsAPIClient):
                 dynamic_output_concept_ref=dynamic_output_concept_ref,
                 extra=merged_extra,
             )
-        except (httpx.HTTPStatusError, httpx.TimeoutException) as exc:
+        except (ApiResponseError, httpx.TimeoutException) as exc:
             elapsed_seconds = monotonic() - started_at
             if _is_gateway_timeout(exc, elapsed_seconds):
                 raise PipelineExecuteTimeoutError(_execute_timeout_message(elapsed_seconds), elapsed_seconds=elapsed_seconds) from exc
@@ -536,10 +565,9 @@ class PipelexAPIClient(MthdsAPIClient):
         `method_id` (the hosted platform's own run arg), both documented on `execute` and
         carrying the same semantics and exclusivity here — and that a bare-runner
         missing-route 404 (no run store) is translated into a clear
-        `RunLifecycleUnavailableError` instead of a raw `httpx.HTTPStatusError`, matching the
-        JS SDK and letting `start_and_wait` self-heal to the blocking-execute fallback. The
-        platform's structured 404s (run not found) keep their normal `httpx.HTTPStatusError`
-        behavior.
+        `RunLifecycleUnavailableError`, matching the JS SDK and letting `start_and_wait`
+        self-heal to the blocking-execute fallback. Every other non-2xx — the platform's
+        structured 404s included — raises `ApiResponseError`.
 
         Returns:
             The 202 ack as `PipelexRunResultStart` — the authoritative `pipeline_run_id`,
@@ -552,6 +580,8 @@ class PipelexAPIClient(MthdsAPIClient):
                 selector is present and is not a string, or `method_ref` is combined with
                 inline `mthds_contents` or with `method_id`.
             RunLifecycleUnavailableError: The configured server has no run store.
+            ApiResponseError: Any other non-2xx answer — a refusal to run an invalid method (a
+                `422`, its diagnostics on `validation_errors`), auth, a server fault.
         """
         merged_extra = _merge_run_extensions(extra, method_ref=method_ref, method_id=method_id)
         _assert_method_ref_pairs_with_nothing(mthds_contents=mthds_contents, merged_extra=merged_extra)
@@ -565,8 +595,10 @@ class PipelexAPIClient(MthdsAPIClient):
                 dynamic_output_concept_ref=dynamic_output_concept_ref,
                 extra=merged_extra,
             )
-        except httpx.HTTPStatusError as exc:
-            self._raise_if_lifecycle_unavailable(exc.response, str(exc.request.url))
+        except ApiResponseError as exc:
+            # The inherited route raised through `_raise_api_response_error`; the error keeps the
+            # status, the body and the URL, which is all the missing-route test reads.
+            self._raise_if_lifecycle_unavailable(status=exc.status, body=exc.response_body, url=exc.request_url or self._url("start"))
             raise
         # Re-validate the base ack into the Pipelex-branded subtype (types `method_provenance`;
         # any other implementation extra keeps riding `model_extra`).
@@ -590,7 +622,7 @@ class PipelexAPIClient(MthdsAPIClient):
         body discriminated on `is_valid`, returned verbatim as the `PipelexValidationResult`
         union (an invalid bundle is NOT raised; the caller match/cases `is_valid`). A non-2xx
         means no verdict could be produced (request shape, auth, server fault) and surfaces as
-        `httpx.HTTPStatusError` (the inherited protocol error regime). A selector-resolution
+        `ApiResponseError`, like every other route. A selector-resolution
         failure — a fetch failure, no package at the address, an unknown or foreign-org id —
         is a non-2xx too, never an `is_valid: false` verdict, which is reserved for actual
         MTHDS content.
@@ -650,6 +682,8 @@ class PipelexAPIClient(MthdsAPIClient):
         Raises:
             PipelineRequestError: Zero or several selectors were supplied, a selector is not a
                 string, or `mthds_sources` was supplied beside a selector.
+            ApiResponseError: No verdict could be produced — a request-shape `422`, a selector
+                that did not resolve, auth, a server fault.
         """
         selected_method_ref = _normalized_selector(name="method_ref", value=method_ref)
         selected_method_id = _normalized_selector(name="method_id", value=method_id)
@@ -687,7 +721,8 @@ class PipelexAPIClient(MthdsAPIClient):
         if selected_method_id is not None:
             body["method_id"] = selected_method_id
         response = await self._send("POST", self._url("validate"), content=to_json(body), request_timeout=self.request_timeout_seconds)
-        response.raise_for_status()
+        if not response.is_success:
+            self._raise_api_response_error(method="POST", endpoint="validate", response=response)
         return PipelexValidationResultAdapter.validate_python(response.json())
 
     async def validate_files(
@@ -746,12 +781,14 @@ class PipelexAPIClient(MthdsAPIClient):
         Raises:
             RunLifecycleUnavailableError: If the lifecycle routes are absent (a bare runner).
             ApiUnreachableError: If the host cannot be reached (DNS / connect / TLS / timeout).
-            httpx.HTTPStatusError: For a genuine run-not-found 404 or any other non-2xx response.
+            ApiResponseError: For a genuine run-not-found 404 or any other non-2xx response.
         """
-        url = self._url(f"{_RUNS}/{quote(run_id, safe='')}/status")
+        endpoint = f"{_RUNS}/{quote(run_id, safe='')}/status"
+        url = self._url(endpoint)
         response = await self._send_or_unreachable("GET", url, content=None, request_timeout=_POLL_REQUEST_TIMEOUT_SECONDS)
-        self._raise_if_lifecycle_unavailable(response, url)
-        response.raise_for_status()
+        self._raise_if_lifecycle_unavailable(status=response.status_code, body=response.text, url=url)
+        if not response.is_success:
+            self._raise_api_response_error(method="GET", endpoint=endpoint, response=response)
         run = RunRead.model_validate(response.json())
         retry_after = _parse_retry_after(response.headers)
         if retry_after is not None:
@@ -771,9 +808,10 @@ class PipelexAPIClient(MthdsAPIClient):
         Raises:
             RunLifecycleUnavailableError: If the lifecycle routes are absent (a bare runner).
             ApiUnreachableError: If the host cannot be reached (DNS / connect / TLS / timeout).
-            httpx.HTTPStatusError: For a genuine run-not-found 404 or any other non-2xx response.
+            ApiResponseError: For a genuine run-not-found 404 or any other non-2xx response.
         """
-        url = self._url(f"{_RUNS}/{quote(run_id, safe='')}/results")
+        endpoint = f"{_RUNS}/{quote(run_id, safe='')}/results"
+        url = self._url(endpoint)
         response = await self._send_or_unreachable("GET", url, content=None, request_timeout=_POLL_REQUEST_TIMEOUT_SECONDS)
         status_code = response.status_code
 
@@ -786,8 +824,9 @@ class PipelexAPIClient(MthdsAPIClient):
         if status_code == 409:
             return _run_result_failed(run_id, response)
 
-        self._raise_if_lifecycle_unavailable(response, url)
-        response.raise_for_status()
+        self._raise_if_lifecycle_unavailable(status=response.status_code, body=response.text, url=url)
+        if not response.is_success:
+            self._raise_api_response_error(method="GET", endpoint=endpoint, response=response)
         # Inspect the decoded payload before validating: `main_stuff` is a required field on `RunResults`,
         # so a `200` that omits the key would raise a raw Pydantic error instead of the typed
         # `MissingMainStuffError`. `.get(...) is None` covers both the missing-key and explicit-null cases
@@ -850,7 +889,9 @@ class PipelexAPIClient(MthdsAPIClient):
         if self._lifecycle_available is None:
             try:
                 info = await self.version()
-            except (httpx.HTTPError, ValidationError):
+            # A non-2xx answer (`ApiResponseError`), a transport failure (the inherited route sends on
+            # the raw transport, so an `httpx.HTTPError`) or a body that is no version: assume hosted.
+            except (ApiResponseError, httpx.HTTPError, ValidationError):
                 self._lifecycle_available = True
             else:
                 implementation = (info.model_extra or {}).get("implementation")
@@ -1530,7 +1571,7 @@ def _product_query(params: dict[str, str | int | None]) -> str:
     return "?" + urlencode(kept)
 
 
-def _is_gateway_timeout(exc: httpx.HTTPStatusError | httpx.TimeoutException, elapsed_seconds: float) -> bool:
+def _is_gateway_timeout(exc: ApiResponseError | httpx.TimeoutException, elapsed_seconds: float) -> bool:
     """Whether a failed blocking `execute` is the hosted gateway's ~30s synchronous cut-off.
 
     The elapsed threshold guards against mislabeling a fast `503` (the runner genuinely down)
@@ -1541,7 +1582,7 @@ def _is_gateway_timeout(exc: httpx.HTTPStatusError | httpx.TimeoutException, ela
         return False
     if isinstance(exc, httpx.TimeoutException):
         return True
-    return exc.response.status_code in {503, 504}
+    return exc.status in {503, 504}
 
 
 def _execute_timeout_message(elapsed_seconds: float) -> str:
@@ -1554,18 +1595,25 @@ def _execute_timeout_message(elapsed_seconds: float) -> str:
     )
 
 
-def _is_missing_route_404(response: httpx.Response) -> bool:
-    """Whether a 404 is an unmatched-route 404 (no platform deployed) rather than the platform's
-    structured run-not-found 404. The platform wraps its 404s in RFC 7807 problem+json with a stable
-    `code`; a bare runner returns Starlette's default `{"detail": "Not Found"}` (no `code`).
+# The members that make a 404 an answer rather than an absent route: every problem the platform renders
+# carries its `code`, and every problem the runner renders carries its `error_type` — the runner's own
+# refusals, relayed by the platform unchanged (a `method_ref` with no package behind it is a 404 of the
+# runner's). The same test the platform's relay applies to a runner body.
+_ANSWERED_404_MEMBERS: frozenset[str] = frozenset({"code", "error_type"})
+
+
+def _is_missing_route_404(body: str) -> bool:
+    """Whether a 404's body is an unmatched-route 404 (no run store deployed) rather than a 404 the
+    platform or the runner answered on purpose.
+
+    The platform renders its 404s (a run not found) as problem documents carrying a stable `code`, and
+    the runner renders its own (a `method_ref` whose package does not exist) carrying its `error_type`;
+    a bare runner's unmatched route answers Starlette's default `{"detail": "Not Found"}`, which carries
+    neither. An empty, non-JSON or non-object body is no answer either. `type` is deliberately not read:
+    a generic RFC 9457 renderer puts `type: "about:blank"` on an unmatched route too.
     """
-    try:
-        body = response.json()
-    except ValueError:
-        return True
-    if not isinstance(body, dict):
-        return True
-    return "code" not in body
+    members = ProblemDocument.make_from_body(body).members
+    return members is None or _ANSWERED_404_MEMBERS.isdisjoint(members)
 
 
 def _parse_retry_after(headers: httpx.Headers) -> int | None:
@@ -1580,34 +1628,6 @@ def _parse_retry_after(headers: httpx.Headers) -> int | None:
     return seconds if seconds >= 0 else None
 
 
-def _decode_object(text: str) -> dict[str, Any] | None:
-    """Decode an error body into its JSON object, or `None` for an empty, non-JSON or non-object body."""
-    if not text:
-        return None
-    try:
-        parsed = json.loads(text)
-    except ValueError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    return cast("dict[str, Any]", parsed)
-
-
-def _error_message_of(body: dict[str, Any]) -> str | None:
-    """Extract a human message from an error body — the platform's problem+json (`detail` string)
-    and the runner's `{"detail": {"message": ...}}` / `{"message": ...}` shapes.
-    """
-    detail = body.get("detail")
-    if isinstance(detail, str):
-        return detail
-    if isinstance(detail, dict):
-        message = cast("dict[str, Any]", detail).get("message")
-        if isinstance(message, str):
-            return message
-    top_message = body.get("message")
-    return top_message if isinstance(top_message, str) else None
-
-
 def _run_result_failed(run_id: str, response: httpx.Response) -> RunResultFailed:
     """Build the failed arm from the results read's `409` problem document.
 
@@ -1619,8 +1639,9 @@ def _run_result_failed(run_id: str, response: httpx.Response) -> RunResultFailed
     stored result it refuses to read, or one from a platform that predates the member) or with a
     status this SDK does not know reads as `FAILED`, and its `detail` still says what happened.
     """
-    body = _decode_object(response.text) or {}
-    message = _error_message_of(body) or "Run finished without a result."
+    document = ProblemDocument.make_from_body(response.text)
+    body = document.members or {}
+    message = document.server_message or "Run finished without a result."
     raw_status = body.get("run_status")
     status = RunStatus(raw_status) if isinstance(raw_status, str) and raw_status in _KNOWN_RUN_STATUS_NAMES else RunStatus.FAILED
     # `error` is validated by the field's own lenient type (`LenientRunErrorReport`): a report whose
@@ -1658,111 +1679,57 @@ def _origin_of(base_url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
-class _ParsedErrorBody(NamedTuple):
-    """The members pulled out of a `problem+json` / `HTTPException` error body."""
+def _failure_reason(document: ProblemDocument, response: httpx.Response) -> str:
+    """The reason a non-2xx answer gives, in the order a person is best served by.
 
-    error_type: str | None
-    server_message: str | None
-    validation_errors: list[ValidationErrorItem] | None
-    code: str | None
-    request_id: str | None
-    type_uri: str | None
-    title: str | None
-    error_domain: str | None
-    error_category: str | None
-    retryable: bool | None
-    user_action: UserAction | None
-    errors: list[FieldError] | None
-    problem: dict[str, Any] | None
+    The problem's `detail`, else its `title`, else the raw body (cut short, since a gateway's HTML
+    page can be long), else the status text — the order the `mthds` base client's own message uses,
+    kept identical so a refusal reads the same whichever client raised it.
+    """
+    for candidate in (document.server_message, document.title):
+        if candidate and candidate.strip():
+            return candidate
+    body = response.text.strip()
+    if body:
+        return body if len(body) <= _REASON_BODY_LIMIT else f"{body[:_REASON_BODY_LIMIT]}…"
+    return response.reason_phrase or "no reason given"
 
 
-_EMPTY_ERROR_BODY = _ParsedErrorBody(
-    error_type=None,
-    server_message=None,
-    validation_errors=None,
-    code=None,
-    request_id=None,
-    type_uri=None,
-    title=None,
-    error_domain=None,
-    error_category=None,
-    retryable=None,
-    user_action=None,
-    errors=None,
-    problem=None,
-)
-
-# The structured members below are read leniently (best-effort error-path enrichment): an odd shape
-# reads as `None` and never masks the underlying failure, which `server_message` and the raw
-# `problem` still carry. `validation_errors` items are a closed shape, so the list is validated whole;
-# a `FieldError` reads each field leniently, so only a non-object item sets `errors` to `None`.
+# The Pipelex members below are read leniently, like the shared ones `ProblemDocument` reads: an odd
+# shape reads as `None` and never masks the underlying failure, which `server_message` and the raw
+# `problem` still carry. `validation_errors` items are a closed shape, so the list is narrowed whole; a
+# `FieldError` reads each field leniently, so only a non-object item sets `errors` to `None`.
 _VALIDATION_ERRORS_ADAPTER: TypeAdapter[list[ValidationErrorItem]] = TypeAdapter(list[ValidationErrorItem])
 _FIELD_ERRORS_ADAPTER: TypeAdapter[list[FieldError]] = TypeAdapter(list[FieldError])
 
 
-def _parse_error_body(body: str) -> _ParsedErrorBody:
-    """Extract the members of an error body into `_ParsedErrorBody`.
+def _narrowed_validation_errors(diagnostics: list[ValidationDiagnostic] | None) -> list[ValidationErrorItem] | None:
+    """Narrow the protocol's neutral diagnostics to this SDK's `ValidationErrorItem`, or `None`.
 
-    The API serializes errors as RFC 9457 problem documents — the platform's (`type`, `title`,
-    `status`, `code`, `detail`, `instance`, `request_id`, `errors[]`) and the runner's (the same
-    standard slots plus `error_type`, `error_domain`, `error_category`, `retryable`, `user_action`,
-    `validation_errors`, …) — and, on older routes, as `{"detail": {"error_type": ..., "message":
-    ...}}` (HTTPException with dict detail). Both shapes are handled, with top-level `error_type` /
-    `message` fallbacks. A string member of the wrong type reads as `None`; the whole decoded object
-    rides `problem`, so no member is lost for being unnamed here. Falls through to empty on a
-    non-JSON or non-object body.
+    `ProblemDocument` keeps the list only when every item is a diagnostic, and carries the runner's
+    locators (`pipe_code`, `field_path`, …) on each item's extras; the narrowing types them. A list
+    whose items do not all fit — a category this SDK does not know — reads as `None`, the raw list
+    staying on the error's `problem`.
     """
-    root = _decode_object(body)
-    if root is None:
-        return _EMPTY_ERROR_BODY
-
-    error_type: str | None = None
-    detail = root.get("detail")
-    if isinstance(detail, dict):
-        error_type = _str_member(cast("dict[str, Any]", detail), "error_type")
-    if error_type is None:
-        error_type = _str_member(root, "error_type")
-
-    validation_errors: list[ValidationErrorItem] | None = None
-    raw_validation_errors = root.get("validation_errors")
-    if isinstance(raw_validation_errors, list):
-        try:
-            validation_errors = _VALIDATION_ERRORS_ADAPTER.validate_python(raw_validation_errors)
-        except ValidationError:
-            validation_errors = None
-
-    errors: list[FieldError] | None = None
-    raw_errors = root.get("errors")
-    if isinstance(raw_errors, list):
-        try:
-            errors = _FIELD_ERRORS_ADAPTER.validate_python(raw_errors)
-        except ValidationError:
-            errors = None
-
-    # `UserAction` reads each field leniently, so any object validates; a non-object reads as `None`.
-    raw_user_action = root.get("user_action")
-    user_action = UserAction.model_validate(raw_user_action) if isinstance(raw_user_action, dict) else None
-
-    raw_retryable = root.get("retryable")
-
-    return _ParsedErrorBody(
-        error_type=error_type,
-        server_message=_error_message_of(root),
-        validation_errors=validation_errors,
-        code=_str_member(root, "code"),
-        request_id=_str_member(root, "request_id"),
-        type_uri=_str_member(root, "type"),
-        title=_str_member(root, "title"),
-        error_domain=_str_member(root, "error_domain"),
-        error_category=_str_member(root, "error_category"),
-        retryable=raw_retryable if isinstance(raw_retryable, bool) else None,
-        user_action=user_action,
-        errors=errors,
-        problem=root,
-    )
+    if diagnostics is None:
+        return None
+    try:
+        return _VALIDATION_ERRORS_ADAPTER.validate_python([diagnostic.model_dump() for diagnostic in diagnostics])
+    except ValidationError:
+        return None
 
 
-def _str_member(body: dict[str, Any], key: str) -> str | None:
-    """A string member of a decoded body, or `None` when it is absent or not a string."""
-    value = body.get(key)
-    return value if isinstance(value, str) else None
+def _field_errors_of(value: Any) -> list[FieldError] | None:
+    """The platform's field-level `errors[]`, or `None` when it is absent or not a list of objects."""
+    if not isinstance(value, list):
+        return None
+    try:
+        return _FIELD_ERRORS_ADAPTER.validate_python(value)
+    except ValidationError:
+        return None
+
+
+def _non_empty_string_member(members: dict[str, Any], key: str) -> str | None:
+    """A non-empty string member of a decoded body, or `None` when it is absent, empty or not a string."""
+    value = members.get(key)
+    return value if isinstance(value, str) and value else None
