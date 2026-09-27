@@ -430,8 +430,9 @@ class PipelexAPIClient(MthdsAPIClient):
 
     def _raise_if_lifecycle_unavailable(self, *, status: int, body: str, url: str) -> None:
         """Translate a "route absent" 404 (a bare pipelex-api with no platform block) into a clear
-        `RunLifecycleUnavailableError`. The platform's own 404s (run not found / cross-org) carry a
-        structured problem+json envelope (a `code` field) and are left for normal handling.
+        `RunLifecycleUnavailableError`. A 404 the platform or the runner answered on purpose — a run not
+        found, a `method_ref` with no package — carries a problem document (`code` or `error_type`) and is
+        left for normal handling as `ApiResponseError`.
         """
         if status != 404:
             return
@@ -1594,14 +1595,25 @@ def _execute_timeout_message(elapsed_seconds: float) -> str:
     )
 
 
+# The members that make a 404 an answer rather than an absent route: every problem the platform renders
+# carries its `code`, and every problem the runner renders carries its `error_type` — the runner's own
+# refusals, relayed by the platform unchanged (a `method_ref` with no package behind it is a 404 of the
+# runner's). The same test the platform's relay applies to a runner body.
+_ANSWERED_404_MEMBERS: frozenset[str] = frozenset({"code", "error_type"})
+
+
 def _is_missing_route_404(body: str) -> bool:
-    """Whether a 404's body is an unmatched-route 404 (no platform deployed) rather than the platform's
-    structured run-not-found 404. The platform wraps its 404s in RFC 7807 problem+json with a stable
-    `code`; a bare runner returns Starlette's default `{"detail": "Not Found"}` (no `code`). An empty,
-    non-JSON or non-object body is no platform answer either. Mirrors the JS `isMissingRoute404`.
+    """Whether a 404's body is an unmatched-route 404 (no run store deployed) rather than a 404 the
+    platform or the runner answered on purpose.
+
+    The platform renders its 404s (a run not found) as problem documents carrying a stable `code`, and
+    the runner renders its own (a `method_ref` whose package does not exist) carrying its `error_type`;
+    a bare runner's unmatched route answers Starlette's default `{"detail": "Not Found"}`, which carries
+    neither. An empty, non-JSON or non-object body is no answer either. `type` is deliberately not read:
+    a generic RFC 9457 renderer puts `type: "about:blank"` on an unmatched route too.
     """
     members = ProblemDocument.make_from_body(body).members
-    return members is None or "code" not in members
+    return members is None or _ANSWERED_404_MEMBERS.isdisjoint(members)
 
 
 def _parse_retry_after(headers: httpx.Headers) -> int | None:

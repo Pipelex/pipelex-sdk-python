@@ -6,7 +6,12 @@
 (`PipelineRun.error`), and inside the problem document of the results read's `409`, where the
 client lifts it onto `RunResultFailed.error` and `RunFailedError.error`. The same classification
 fields (`error_domain`, `user_action`, …) ride a runner-rendered problem document as extension
-members, which is why `ApiResponseError` types its `user_action` with the model declared here.
+members, but a refused request's `ApiResponseError` reads them through `mthds`'s own problem parse,
+so its `user_action` is `mthds.runners.api.problem.UserAction` — kept only whole, `kind` and `detail`
+both required — while a stored report's is the lenient `UserAction` declared here, both fields
+optional, because a report written by another runner version must never fail the read carrying it.
+The two share their field names, so code that shows the next step reads `user_action.detail` on
+either, checking it for `None` on a report.
 
 Every field is optional and every model is extension-open (`extra="allow"`), for the reason
 `TokensUsageRecord` gives: the runner adds fields without asking this SDK, and a field this version

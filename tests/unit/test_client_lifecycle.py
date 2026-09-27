@@ -153,6 +153,28 @@ class TestClientLifecycle:
         assert isinstance(exc_info.value.__context__, ApiResponseError)
         assert exc_info.value.__context__.status == 404
 
+    def test_start_runner_refusal_404_stays_api_response_error(self, mocker: MockerFixture) -> None:
+        """A runner's 404 relayed by the platform (`error_type`, no `code`) is a refusal, not a missing run store."""
+        client = self._client()
+        # The runner's answer to a `method_ref` with no package behind it, as the platform relays it.
+        body = {
+            "type": "https://docs.pipelex.com/latest/errors/method-package-not-found-error/",
+            "title": "Method package not found",
+            "status": 404,
+            "detail": "No method package at github.com/x/y/z.",
+            "instance": "/v1/start",
+            "request_id": "req-404",
+            "error_type": "MethodPackageNotFoundError",
+            "error_domain": "input",
+        }
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(404, json=body)))
+
+        with pytest.raises(ApiResponseError) as exc_info:
+            asyncio.run(client.start(pipe_code="p", method_ref="github.com/x/y/z"))
+        assert not isinstance(exc_info.value, RunLifecycleUnavailableError)
+        assert exc_info.value.error_type == "MethodPackageNotFoundError"
+        assert str(exc_info.value) == "API POST /v1/start failed (404): No method package at github.com/x/y/z."
+
     def test_start_structured_404_stays_api_response_error(self, mocker: MockerFixture) -> None:
         """A structured platform 404 (carries `code`) is a normal API error, not lifecycle-unavailable."""
         client = self._client()

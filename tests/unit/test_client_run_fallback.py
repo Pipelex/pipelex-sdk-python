@@ -454,6 +454,25 @@ class TestClientRunFallback:
             f"{_BASE_URL}/v1/execute",
         ]
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"type": "about:blank", "title": "Not Found", "status": 404, "error_type": "MethodPackageNotFoundError", "detail": "No package."},
+            {"type": "https://pipelex.com/errors/not_found", "title": "Not found", "status": 404, "code": "not_found", "detail": "No method."},
+        ],
+    )
+    def test_a_404_answered_on_purpose_neither_falls_back_nor_demotes_the_client(self, mocker: MockerFixture, body: dict[str, Any]) -> None:
+        """A runner's or the platform's own 404 on start is a refusal: raised as is, with the lifecycle still believed served."""
+        client = self._client()
+        send = mocker.patch.object(client, "_send", mocker.AsyncMock(side_effect=[_response(200, json=_HOSTED_VERSION), _response(404, json=body)]))
+
+        with pytest.raises(ApiResponseError) as exc_info:
+            asyncio.run(client.start_and_wait(pipe_code="p"))
+        assert not isinstance(exc_info.value, RunLifecycleUnavailableError)
+        assert exc_info.value.status == 404
+        assert _urls(send) == [f"{_BASE_URL}/v1/version", f"{_BASE_URL}/v1/start"]
+        assert client._lifecycle_available is True
+
     def test_handshake_failure_assumes_hosted(self, mocker: MockerFixture) -> None:
         """When the /v1/version handshake itself fails, assume hosted and let start surface the real error."""
         client = self._client()
