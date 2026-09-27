@@ -8,8 +8,8 @@ transport it inherits, then the Python runtime and its `(<os>; <arch>)` comment:
 
 The header is self-declared and unauthenticated: the platform reads it for analytics only.
 
-The builder lives here rather than in `mthds` because the pinned `mthds` does not ship one yet;
-the public shape (`AppInfo`, `ValueError` on an invalid token) matches the one `mthds` will expose.
+The builder predates the one `mthds` ships in `mthds.runners.api.user_agent` since 0.16.0, and this
+SDK has not adopted that one yet; the public shape (`AppInfo`, `ValueError` on an invalid token) matches it.
 """
 
 from __future__ import annotations
