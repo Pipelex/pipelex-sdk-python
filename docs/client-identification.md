@@ -45,4 +45,4 @@ Do not put a secret, a user identifier, an email address or a hostname in `app_i
 
 ## Relation to `mthds`
 
-The spec places the header builder of the `mthds` library in `mthds.runners.api.user_agent`. The `mthds` version this SDK pins does not ship it yet, so `pipelex_sdk.user_agent` builds the whole header itself and mirrors the public shape the `mthds` builder has: an `AppInfo` model with `name`, `version`, `url` and `details`, and a `ValueError` on an invalid token.
+The spec places the header builder of the `mthds` library in `mthds.runners.api.user_agent`, which `mthds` ships since 0.16.0, the version this SDK pins: `MthdsAPIClient` builds its own `User-Agent` there and lets a subclass prepend its token through `user_agent_sdk_tokens()` and `init_user_agent(app_info)`. This SDK does not adopt that seam yet. `pipelex_sdk.user_agent` still builds the whole header itself, with its own `AppInfo` model of the same shape (`name`, `version`, `url` and `details`, and a `ValueError` on an invalid token), and `PipelexAPIClient` sets `client.user_agent` from it, which the inherited transport sends on every request.

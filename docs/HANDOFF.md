@@ -35,7 +35,7 @@ Source of truth for the Python lifecycle code being moved: `mthds-python/mthds/r
 - methods catalog CRUD `/v1/methods`, `getMe` `/v1/me`
 - organizations `/v1/organizations/*`
 - billing `/v1/billing/*`
-- API keys `/v1/pipelex-api-keys/*`, `/v1/gateway-api-key`
+- API keys `/v1/pipelex-api-keys/*`
 - onboarding `/v1/onboarding/submit`
 - storage `/v1/resolve-storage-url`, `/v1/upload`
 - run records `/v1/runs` (list, by method_id), `PUT /v1/runs/{id}`

@@ -117,9 +117,30 @@ ack = await client.start(pipe_code="long_pipe", inputs={...})
 result = await client.wait_for_result(ack.pipeline_run_id)
 ```
 
-### Product routes: branch on `err.code`, not the HTTP status
+### When a run fails: `RunFailedError` carries the run's report
 
-The hosted product routes raise a typed `ApiResponseError` carrying the RFC 9457 `code` discriminant. Branch on `err.code`, which is decoupled from the transport status:
+A run that ends without a result — `FAILED`, `CANCELLED`, `TERMINATED` or `TIMED_OUT` — makes `wait_for_result`, `start_and_wait` and `download_artifacts` raise `RunFailedError`. Its message already names the status and the reason (`Run finished with status FAILED: <message>`), `status` is the typed `RunStatus`, and `error` is the run's stored error report, typed whole as `RunErrorReport` (`pipelex_sdk.error_models`): the runner's `error_type`, `message`, `title`, `type_uri`, `error_domain`, `error_category`, `retryable`, `user_action`, `model`, `provider`, `provider_metadata`, `validation_errors`, and anything newer on `model_extra`. `error` is `None` for a run that ended with no report, such as a cancelled one.
+
+```python
+from pipelex_sdk.errors import RunFailedError
+
+try:
+    result = await client.wait_for_result(run_id)
+except RunFailedError as exc:
+    report = exc.error
+    if report is None:
+        print(f"Run {exc.run_id} ended {exc.status} without a report.")
+    else:
+        print(f"{report.title}: {report.user_action.detail if report.user_action else report.message}")
+        if report.retryable:
+            ...  # the same run may succeed if started again
+```
+
+Branch on `error_domain` (`input`, `config`, `runtime`), `type_uri` and `retryable`, never on the wording of `message`. The report is the runner's verbose one, so `message` and `provider_metadata` can hold a model provider's raw text: what a person should see of it is your application's decision. The same report is on `RunRead.error` when you read the run's status, on `RunResultFailed.error` from `get_run_result`, and on `PipelineRun.error` in the run lists.
+
+### API errors: branch on `type_uri` and `error_domain`, not the HTTP status
+
+A non-2xx answer from a product route — the account, methods, organization, billing, API-key, onboarding, storage and upload methods, `codegen` and `resolve`, and the run records (`list_runs`, `iterate_runs`, `get_run_detail`, `update_run`) — raises a typed `ApiResponseError` carrying the members of the RFC 9457 problem document. The protocol routes (`execute`, `start`, `validate`, `models`, `version`) and the run status and results reads keep raising `httpx.HTTPStatusError` for a failure they do not translate, and `health` raises `PipelineRequestError`; `docs/architecture.md` lists the error regimes. The branch fields are `type_uri`, the problem's `type`, a stable URI naming the error class that every problem carries, and `error_domain`, the coarse class (`input` means the caller can fix it, `config` that a configuration change is needed, `runtime` that execution failed). `error_domain` is carried only by the problems the runner renders — those of `codegen` and `resolve`, which the hosted API relays from the runner — and is `None` on the platform's own problems, such as those of the account, billing and API-key routes, which name their class by `type_uri` alone:
 
 ```python
 from pipelex_sdk.errors import ApiResponseError
@@ -128,11 +149,16 @@ try:
     created = await client.create_pipelex_api_key(label="ci")
     print(created.api_key)  # plaintext — returned only once
 except ApiResponseError as exc:
-    if exc.code == "pipelex_api_key_limit_reached":
+    if exc.type_uri == "https://pipelex.com/errors/pipelex_api_key_limit_reached":
         print("Per-account key limit reached — revoke an old key first.")
+    elif exc.type_uri == "https://pipelex.com/errors/validation_failed":
+        print(f"Fix the request: {exc.server_message}")
     else:
+        print(f"Unexpected failure, request id {exc.request_id}")
         raise
 ```
+
+On a problem the runner rendered, branch on `error_domain` for the class — `if exc.error_domain == "input":` shows the caller what to fix, whatever the exact error. The rest of the document rides beside them: `server_message` (the `detail`), `title`, `retryable`, `user_action`, `error_category`, the platform's field-level `errors`, `validation_errors` for a bundle fault, and `request_id` for a support request, read from the body or from the `X-Request-ID` header. `code` (the platform's closed code, such as `conflict`) and `error_type` (the runner's exception class name) are each surface's own finer code — useful for display and support, not the field to branch on. `problem` is the decoded document whole, for any member the SDK does not name.
 
 ## Public import paths (no barrel)
 
@@ -140,6 +166,7 @@ There is no barrel import — package `__init__.py` files stay empty. Import eac
 
 - **Client & construction** — `from pipelex_sdk.client import PipelexAPIClient, DEFAULT_API_BASE_URL, MthdsFile`
 - **Run lifecycle types** — `from pipelex_sdk.runs import RunStatus, RunPublic, RunRead, RunResults, RunResultState, WaitForResultOptions, PollInfo`
+- **Error reports** — `from pipelex_sdk.error_models import RunErrorReport, UserAction, ProviderErrorMetadata, MigrationErrorBlock, FieldError`
 - **Product wire models** — `from pipelex_sdk.product_models import UserProfile, MethodData, MethodWriteInput, Membership, MembershipsResponse, SubscriptionResponse, PlanView, InvoiceView, OnboardingSubmission, UploadInput, UploadedFile, PipelineRun, ...`, with the catalog-source readers beside them: `method_source_to_contents` turns a fetched `MethodData.mthds` into the `mthds_contents` a run or a validate takes, and `MethodFile` / `parse_method_files` / `serialize_method_files` are the codec for a method's custom PipeFunc `python`.
 - **Validation verdict types** — `from pipelex_sdk.validation_models import PipelexValidationResult, PipelexValidationReport, PipelexInvalidReport, ValidationErrorItem, SuggestedFix, VALIDATION_VIEW_INPUT_FORM, ...`
 - **Codegen tree** — `from pipelex_sdk.codegen_writer import write_codegen_tree, CodegenTreeWriteReport` to write one, `from pipelex_sdk.codegen_check import run_codegen_check, CodegenCheckReport, CodegenDrift, DriftCategory` to verify one, with the format primitives in `pipelex_sdk.codegen_lock` (`CodegenLock`, `parse_lock`, `load_lock`, `validate_artifact_path`, ...) and `pipelex_sdk.codegen_stamp` (`STAMPABLE_SUFFIXES`, `is_stampable_artifact_path`, `compute_content_hash`, `parse_stamped`, ...)
