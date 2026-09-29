@@ -14,8 +14,8 @@ left un-uploaded and its local path travelled to the runner as a literal string;
 field merely named `url` was read from disk and uploaded. The descriptor states the resolved
 kind at every depth and includes optional fields, so both are gone.
 
-See `docs/input-preparation.md`, and the design of record in
-`pipelex-sdk-js/wip/prepare-inputs-selectors/design.md`.
+See `docs/input-preparation.md`. The design of record is shared with `@pipelex/sdk` and
+tracked as L-260829-300c50 in the workspace ledger.
 """
 
 from __future__ import annotations

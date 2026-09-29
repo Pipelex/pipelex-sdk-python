@@ -1,6 +1,6 @@
 """`prepare_inputs` — signature-driven input preparation over the input-form descriptor.
 
-Cases derive from the shared behavior matrix (`wip/upload/behavior-matrix.md`) and port
+Cases derive from the behavior this SDK shares with `@pipelex/sdk` (`docs/input-preparation.md`) and port
 `pipelex-sdk-js/tests/prepare-inputs.test.ts`: file-bearing positions come from the DESCRIPTOR's
 declared kind (`document` / `image`), assets are uploaded and rewritten to `pipelex-storage://`
 in `url`, http(s)/storage references pass through, dedup keys on source identity, and the call

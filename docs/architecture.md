@@ -270,7 +270,7 @@ The download twin of input preparation, and the Python twin of `@pipelex/sdk`'s 
 
 ## Out of scope
 
-- The `/v1/build/*` helpers — `build_output`, `build_runner`, `concept`, `pipe_spec`. `build_inputs` shipped in 0.5.0 and was removed again once `prepare_inputs`, its only caller, moved onto `validate` + the input-form descriptor: this SDK no longer touches `/v1/build/*`, which the workspace is retiring (`wip/build-retirement/`).
+- The `/v1/build/*` helpers — `build_output`, `build_runner`, `concept`, `pipe_spec`. `build_inputs` shipped in 0.5.0 and was removed again once `prepare_inputs`, its only caller, moved onto `validate` + the input-form descriptor: this SDK no longer touches `/v1/build/*`, which the workspace is retiring (L-260829-848001 in the workspace ledger).
 - Organization *switch* (a WorkOS session operation, not a `/v1` route).
 - A `~/.pipelex/config` file reader (env-only for now, matching the JS SDK).
 - A synchronous client facade.
