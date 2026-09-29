@@ -1,6 +1,6 @@
 # Input preparation (`upload_file` / `prepare_inputs`)
 
-> **Status: implemented** (`pipelex_sdk/upload.py`, `pipelex_sdk/prepare_inputs.py`). `upload_file` and `prepare_inputs` are the Python counterpart of `@pipelex/sdk`'s `uploadFile` / `prepareInputs`, built on the raw `upload()` wire call. The design of record for the current shape is `pipelex-sdk-js/wip/prepare-inputs-selectors/design.md` in the sibling repo; the two SDKs are kept semantically identical.
+> **Status: implemented** (`pipelex_sdk/upload.py`, `pipelex_sdk/prepare_inputs.py`). `upload_file` and `prepare_inputs` are the Python counterpart of `@pipelex/sdk`'s `uploadFile` / `prepareInputs`, built on the raw `upload()` wire call. The design of record for the current shape is shared with `@pipelex/sdk` and tracked as L-260829-300c50 in the workspace ledger; the two SDKs are kept semantically identical.
 >
 > **Current scope.** `prepare_inputs` names the method three ways — inline `files`, a `method_ref` address, or a stored `method_id` — and reads the target pipe's signature from the standard's input-form descriptor. One piece is deliberately deferred and additive (it does not change this contract): the opt-in ingest of `http(s)` URLs into storage — for now an `http(s)` URL at a file position always passes through unchanged.
 
