@@ -2,7 +2,7 @@
 
 > **Status: implemented** (`pipelex_sdk/upload.py`, `pipelex_sdk/prepare_inputs.py`). `upload_file` and `prepare_inputs` are the Python counterpart of `@pipelex/sdk`'s `uploadFile` / `prepareInputs`, built on the raw `upload()` wire call. The design of record for the current shape is shared with `@pipelex/sdk` and tracked as L-260829-300c50 in the workspace ledger; the two SDKs are kept semantically identical.
 >
-> **Current scope.** `prepare_inputs` names the method three ways — inline `files`, a `method_ref` address, or a stored `method_id` — and reads the target pipe's signature from the standard's input-form descriptor. One piece is deliberately deferred and additive (it does not change this contract): the opt-in ingest of `http(s)` URLs into storage — for now an `http(s)` URL at a file position always passes through unchanged.
+> **Current scope.** `prepare_inputs` names the method three ways — inline `files`, a `method_ref` address, or a stored `method_id` — and reads the target pipe's signature from the standard's input-form descriptor, which `POST /v1/pipe-io` returns for the pipe the server selects. One piece is deliberately deferred and additive (it does not change this contract): the opt-in ingest of `http(s)` URLs into storage — for now an `http(s)` URL at a file position always passes through unchanged.
 
 ## Why this exists
 
@@ -66,29 +66,29 @@ Nothing is expanded client-side: `method_id` here is a **pass-through**, the sam
 
 #### Where the signature comes from
 
-One `POST /v1/validate` per call, whatever the selector, asking for the **input-form descriptor**:
+One `POST /v1/pipe-io` per call, whatever the selector, through the client's `pipe_io`:
 
 ```python
-await client.validate(<contents or selector>, True, …, views=[VALIDATION_VIEW_INPUT_FORM])
+await client.pipe_io(PipeIORequest(<files | method_ref | method_id>, pipe_ref=<the caller's, or None>))
 ```
 
-`allow_signatures=True` is deliberate. Preparation needs a pipe's *declared* inputs, and a bundle mid-authoring with an unresolved signature somewhere else must not be refused inputs for a pipe whose inputs are declared — whether the bundle runs is the run's verdict, not preparation's. An `is_valid: false` verdict still means the closure does not load, which is a preparation failure.
+The route resolves the closure, selects the pipe (see below) and answers with that pipe's input-form descriptor, keyed by the qualified `pipe_ref` it resolved. It runs **no dry run**, so a call costs one load where `/v1/validate` dry-runs every pipe of the method. Preparation needs a pipe's *declared* inputs, which static validation settles: a pending signature elsewhere in the method does not refuse inputs to a pipe whose inputs are declared, and a method whose dry run would fail still prepares — whether the method runs is the run's verdict, not preparation's. An `is_valid: false` verdict still means the closure does not load, which is a preparation failure.
 
-A `method_ref` makes the server clone a repository first; `validate` needs no special budget for it, because the route already defaults to the 20-minute execute ceiling.
+A `method_ref` makes the server clone a repository first, so the call gets the crate routes' 3-minute fetch budget; any other selector gets the 30-second management budget. On the hosted API the gateway caps a request at 30 seconds whatever the client allows, so a cold clone can answer a `502` that a retry clears once the runner has cached it.
 
-**A valid report that carries no descriptor is an error, never a silent "no uploads".** The descriptor rides `views: ["input_form"]` on pipelex-api >= 0.18.0; pointed at an older runner, `prepare_inputs` says so rather than returning inputs whose local paths would travel to the runner verbatim.
+**`prepare_inputs` needs an API that serves `POST /v1/pipe-io`.** Against one that does not, the call raises `ApiResponseError` rather than falling back to another signature source. A valid answer that carries no descriptor for the pipe it names is an `InputPreparationError`, never a silent "no uploads" that would let local paths travel to the runner verbatim.
+
+**Known limit.** The route resolves the closure through the crate routes' static core, which refuses an address-based cross-package dependency that `/v1/validate` would load. Preparing a closure that carries one raises `InputPreparationError` on the route's invalid verdict.
 
 #### Pipe selection
 
-`validate` has no pipe selector — its report describes every pipe, keyed by qualified `pipe_ref` — so the helper picks one, in this order:
+The route selects the pipe, and the helper keeps no selection chain of its own:
 
-1. **`pipe_ref` when given.** Qualified-only: `domain.pipe_code`. A bare code, a non-string, or a ref the method does not declare, is an `InputPreparationError` listing the qualified refs — one step to fix. The helper never grows a searched `pipe_code`: search is a run-route affordance, and the descriptor is keyed by qualified refs.
-2. **The report's typed resolved default** (`default_pipe_ref`), once the runner serves it: the ref a caller gets by omitting the selector, manifest-aware for a fetched package. Read when present; a server that predates it sends nothing.
-3. **The bundle's declared `main_pipe`**, read defensively from the opaque `bundle_blueprint` and qualified by its `domain`.
-4. **The single pipe**, when the method declares exactly one.
-5. Otherwise an `InputPreparationError` naming the candidates and asking for `pipe_ref`.
+1. **`pipe_ref` when given.** Qualified-only: `domain.pipe_code`. A bare code or a non-string is refused with an `InputPreparationError` before any request — the runner would still resolve a bare code across domains today, and search is a run-route affordance this helper does not grow. A qualified ref the method does not declare is refused by the route.
+2. **A fetched package manifest's `main_pipe`**, for a `method_ref`: a package that names its entry pipe in `METHODS.toml` alone needs no `pipe_ref`.
+3. **The closure's own `main_pipe` declaration**, when exactly one domain declares one.
 
-> **The manifest-only `main_pipe` gap.** A published package may name its entry pipe in `METHODS.toml` alone — `github.com/Pipelex/methods/documents` and `.../image_generation` do — and the validate report never carries a manifest. Until step 2's field ships, such a package needs an explicit `pipe_ref`; the error lists the candidates, so the fix is one line.
+The chain stops at the first link that is present. A method that declares no entry pipe, or several, needs an explicit `pipe_ref` — there is no fall-back to "the single pipe", and nothing reads the bundle blueprint. **A refused selection is an `InputPreparationError`** carrying the server's reason (and the candidate refs, when the answer lists them apart from its reason), with the route's `ApiResponseError` as its `__cause__`. The route marks a refused selection by its `error_type`, the runner's entry-lookup error (`EntryPipeNotFoundError` for an unknown ref or no entry pipe, `EntryPipeAmbiguousError` for several); any other non-2xx — a `method_ref` that does not parse or fetch, an unknown `method_id`, a registry-form address, auth, a server fault — is left as the `ApiResponseError` it is.
 
 ## Compact or explicit-envelope inputs
 
@@ -123,9 +123,9 @@ Earlier releases read the signature from the explicit inputs template (`POST /v1
 - an **optional nested file field** was never rendered by the required-only template, so its position was invisible and the caller's local path travelled to the runner as a literal string;
 - a **text field merely named `url`** was read from disk and uploaded.
 
-The descriptor states the resolved kind at every depth and includes optional fields, so both are gone. It is also the standard's own artifact, derived from authored facts rather than from a rendered shape, and `/v1/validate` resolves all three method selectors server-side — which is what made the uniform selector surface possible at no server cost.
+The descriptor states the resolved kind at every depth and includes optional fields, so both are gone. It is also the standard's own artifact, derived from authored facts rather than from a rendered shape, and the route that serves it resolves all three method selectors server-side — which is what made the uniform selector surface possible at no server cost.
 
-**If you actually wanted the template.** `prepare_inputs` no longer needs one, and this SDK's `build_inputs` wrapper went with it, but the template itself did not disappear — `mthds.protocol.inputs_template` projects one from the same descriptor, client-side: `render_inputs_template(descriptor=…, explicit=…, output_format=…)` for the JSON or TOML text, `project_inputs_template(descriptor=…, explicit=…)` for the dict. Ask `validate` for the `input_form` view, hand the pipe's descriptor to either, and the round-trip the removed route used to cost is gone too — which is what makes a template available for a method named only by `method_ref` or `method_id`.
+**If you actually wanted the template.** `prepare_inputs` no longer needs one, and this SDK's `build_inputs` wrapper went with it, but the template itself did not disappear — `mthds.protocol.inputs_template` projects one from the same descriptor, client-side: `render_inputs_template(descriptor=…, explicit=…, output_format=…)` for the JSON or TOML text, `project_inputs_template(descriptor=…, explicit=…)` for the dict. Ask `pipe_io` for the pipe, hand its descriptor to either, and the round-trip the removed route used to cost is gone too — which is what makes a template available for a method named only by `method_ref` or `method_id`.
 
 **Known limit.** A class-backed concept (`structure = "SomeClass"`) whose reflection cannot map a field annotation collapses to `kind: "unknown"` in the descriptor, so a file field beneath one is invisible to this walk. That is a fidelity bug in the runtime's `build_input_form`, tracked separately; pass such a value as an already-uploaded storage URI until it is fixed.
 
@@ -154,6 +154,8 @@ The contract distinguishes at least these semantic outcomes (exact typed excepti
 - **unsupported server capability** — the configured deployment has no upload route;
 - **authentication / authorization failure** — `401` / `403`;
 - **transport failure** — network / server fault.
+
+Reading the signature adds two more: the closure does not resolve, and the route refuses the pipe selection (see "Pipe selection" above). Both are `InputPreparationError`.
 
 All preparation failures are raised **before any run is created**.
 

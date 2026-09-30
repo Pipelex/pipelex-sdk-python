@@ -1,6 +1,6 @@
 """Test data constants for the unit suite, grouped by what they stand for."""
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 
 class RefusedRunBodies:
@@ -64,3 +64,115 @@ class RefusedRunBodies:
         "Pipe 'condense_article' failed (digest_article → condense_article): Model handle 'gpt-5.1' was not found in the model deck."
     )
     UNSERVED_MODEL_NEXT_STEP: ClassVar[str] = "Change the model 'gpt-5.1' to an LLM the model deck serves."
+
+
+class PipeIOBodies:
+    """`POST /v1/pipe-io` bodies, trimmed from what a local `pipelex-api` at `b4bafb8` (pipelex 0.70.0)
+    answered on 2026-09-30 for a one-pipe bundle: a Document, a Text, and a structured `Dossier` whose
+    optional `cover` is an Image. Only the JSON Schemas were shortened; every artifact member the
+    standard declares is kept, so the bodies parse under the closed `mthds.protocol` models.
+    """
+
+    PIPE_REF: ClassVar[str] = "smoke.echo"
+    TEXT_SCHEMA: ClassVar[dict[str, Any]] = {
+        "properties": {"text": {"title": "Text", "type": "string"}},
+        "required": ["text"],
+        "title": "native.Text",
+        "type": "object",
+    }
+    VALID: ClassVar[dict[str, Any]] = {
+        "is_valid": True,
+        "pipe_ref": "smoke.echo",
+        "pipe_io_contracts": {
+            "smoke.echo": {
+                "inputs": {
+                    "doc": {
+                        "concept_ref": "native.Document",
+                        "presence": "plain",
+                        "multiplicity": "single",
+                        "item_count": None,
+                        "json_schema": {"properties": {"url": {"type": "string"}}, "required": ["url"], "title": "native.Document", "type": "object"},
+                    },
+                    "note": {
+                        "concept_ref": "native.Text",
+                        "presence": "plain",
+                        "multiplicity": "single",
+                        "item_count": None,
+                        "json_schema": TEXT_SCHEMA,
+                    },
+                },
+                "output": {"concept_ref": "native.Text", "multiplicity": "single", "item_count": None, "optional": False, "json_schema": TEXT_SCHEMA},
+            }
+        },
+        "input_form": {
+            "smoke.echo": {
+                "fields": [
+                    {"kind": "document", "name": "doc", "concept_ref": "native.Document", "required": True, "presence": "plain", "gating": True},
+                    {"kind": "prose", "name": "note", "concept_ref": "native.Text", "required": True, "presence": "plain", "gating": True},
+                    {
+                        "kind": "object",
+                        "name": "dossier",
+                        "concept_ref": "smoke.Dossier",
+                        "required": True,
+                        "presence": "plain",
+                        "gating": True,
+                        "fields": [
+                            {"kind": "text", "name": "title", "required": True},
+                            {"kind": "image", "name": "cover", "concept_ref": "native.Image", "required": False},
+                        ],
+                    },
+                ]
+            }
+        },
+        "output_form": {"smoke.echo": {"field": {"kind": "prose", "name": "output", "concept_ref": "native.Text", "required": True}}},
+        "default_pipe_ref": "smoke.echo",
+        "pending_signatures": [],
+        "is_runnable": True,
+    }
+    INVALID: ClassVar[dict[str, Any]] = {
+        "is_valid": False,
+        "validation_errors": [
+            {
+                "category": "blueprint_validation",
+                "message": "Input 'doc' is declared but never read by the template.",
+                "error_type": "extraneous_input_variable",
+                "pipe_code": "echo",
+                "domain_code": "smoke",
+                "source": "smoke.mthds",
+            }
+        ],
+        "message": "1 validation error",
+    }
+    #: The selection refusal the pipe-selector design asks for: the runner's entry-lookup error class
+    #: as `error_type`. The runner at `b4bafb8` still answers `error_type: ValidationError` here.
+    UNKNOWN_PIPE_REFUSAL: ClassVar[dict[str, Any]] = {
+        "type": "https://docs.pipelex.com/latest/errors/entry-pipe-not-found-error/",
+        "title": "Entry pipe not found",
+        "status": 422,
+        "detail": "Pipe 'smoke.absent' not found in the submitted closure.",
+        "error_type": "EntryPipeNotFoundError",
+        "error_domain": "input",
+        "retryable": False,
+        "instance": "/v1/pipe-io",
+    }
+    AMBIGUOUS_PIPE_REFUSAL: ClassVar[dict[str, Any]] = {
+        "type": "https://docs.pipelex.com/latest/errors/entry-pipe-ambiguous-error/",
+        "title": "Entry pipe ambiguous",
+        "status": 422,
+        "detail": "No `pipe_ref` was given and the closure declares several `main_pipe`s (alpha.run, beta.run) — name the pipe explicitly.",
+        "error_type": "EntryPipeAmbiguousError",
+        "error_domain": "input",
+        "retryable": False,
+        "instance": "/v1/pipe-io",
+    }
+    #: A `422` that is not a selection: the request-shape refusal the runner renders for a malformed body.
+    REQUEST_SHAPE_REFUSAL: ClassVar[dict[str, Any]] = {
+        "type": "https://docs.pipelex.com/latest/errors/validation-error/",
+        "title": "Validation error",
+        "status": 422,
+        "detail": "body: Value error, provide exactly one of `files` or `method_ref`",
+        "error_type": "ValidationError",
+        "error_domain": "input",
+        "retryable": False,
+        "instance": "/v1/pipe-io",
+    }

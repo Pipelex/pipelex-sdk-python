@@ -1,5 +1,5 @@
-"""Wire models for the crate routes — `POST /v1/resolve` and `POST /v1/codegen` — and the
-shared crate envelope they are built on.
+"""Wire models for the crate routes — `POST /v1/resolve`, `POST /v1/codegen` and
+`POST /v1/pipe-io` — and the shared crate envelope they are built on.
 
 The envelope lives here because these are the routes that still use it. `MthdsFileItem`,
 `CrateRequestBase` and `CrateInvalidReport` used to sit in a `build_models` module beside the
@@ -8,11 +8,13 @@ the input-form descriptor and this SDK stopped calling `/v1/build/*` (workspace 
 L-260829-848001). Nothing about the envelope changed in the move.
 
 `/v1/resolve` emits the normalized library crate, `/v1/codegen` projects that crate into stamped
-typed artifacts plus their lock. Both are Pipelex API extensions (NOT MTHDS Protocol routes) over
-the standard-owned artifact, so their wire fields stay brand-neutral. A produced verdict is a
-`200` discriminated on `is_valid`, with `CrateInvalidReport` as the shared invalid arm; a
-no-verdict condition (a malformed selector, a selector-resolution failure, auth, a server fault)
-raises `ApiResponseError`.
+typed artifacts plus their lock, and `/v1/pipe-io` returns a method's three I/O artifacts — pipe
+I/O contracts, input form, output form — with no dry run. All three are Pipelex API extensions
+(NOT MTHDS Protocol routes) over standard-owned artifacts, so their wire fields stay
+brand-neutral. A produced verdict is a `200` discriminated on `is_valid`, with
+`CrateInvalidReport` as the shared invalid arm; a no-verdict condition (a malformed selector, a
+selector-resolution failure, a refused pipe selection, auth, a server fault) raises
+`ApiResponseError`.
 
 The closure arrives in exactly one of three forms — the tooling routes' strict three-way
 XOR: inline `files`, an address-form `method_ref` (server-resolved, pipelex-api >= 0.21.0;
@@ -26,6 +28,9 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Self, TypeAlias
 
+from mthds.protocol.input_form import InputForm
+from mthds.protocol.output_form import OutputForm
+from mthds.protocol.pipe_io_contracts import PipeIOContracts
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from pipelex_sdk.validation_models import ValidationErrorItem
@@ -95,7 +100,7 @@ class CrateInvalidReport(BaseModel):
 
 class CrateToolingRequest(CrateRequestBase):
     """The crate envelope plus the hosted tooling selector — the request base
-    `/v1/resolve` and `/v1/codegen` share.
+    `/v1/resolve`, `/v1/codegen` and `/v1/pipe-io` share.
 
     `method_id` is a stored method's catalog id (`mt_…`), a **pass-through to the hosted
     API**: the platform resolves it against the org's catalog and injects the stored
@@ -235,3 +240,68 @@ CodegenResponse: TypeAlias = Annotated[
 
 # The single parse path for a 200 `/codegen` body — same regime as `ResolveResponseAdapter`.
 CodegenResponseAdapter: TypeAdapter[CodegenResponse] = TypeAdapter(CodegenResponse)  # pylint: disable=invalid-name
+
+
+class PipeIORequest(CrateToolingRequest):
+    """Request for `POST /v1/pipe-io` — the crate envelope plus a pipe selector and two opt-ins,
+    with the hosted `method_id` selector (exactly one of `files` / `method_ref` / `method_id`).
+
+    `pipe_ref` names the pipe to describe by its qualified ref (`domain.pipe_code`) and is sent
+    as given. Omitted, the server's selection chain decides: a fetched package manifest's
+    `main_pipe`, else the closure's single `main_pipe` declaration — and a chain that finds none,
+    or several, is a request-shape `422` unless `all_pipes` is set. The server resolves a bare
+    ref across domains today; `prepare_inputs` refuses one before sending it.
+
+    `all_pipes` describes every pipe the closure loads instead of the selected one, and never
+    refuses for want of an entry pipe. `include_files` echoes the resolved closure's `.mthds`
+    files on the valid arm.
+    """
+
+    pipe_ref: str | None = None
+    all_pipes: bool = False
+    include_files: bool = False
+
+
+class PipeIOValidReport(BaseModel):
+    """The `/v1/pipe-io` valid arm — a method's three I/O artifacts, with the selection and the
+    runnability facts beside them.
+
+    The three artifact maps are the standard's, typed by import from `mthds.protocol` exactly as
+    `PipelexValidationReport` types its same-named members, and they share one key set: the
+    resolved `pipe_ref` alone by default, every pipe the closure loads under `all_pipes`. For a
+    closure `/v1/validate` also accepts, each map equals validate's same-named field restricted
+    to the same keys. `is_valid: true` means the closure parsed, loaded and passed static
+    validation; no dry run ran, so it never says the method runs.
+
+    `default_pipe_ref` is the method's own entry pipe — the selection chain without the
+    request's `pipe_ref` — and a stated `null` when that chain finds none or several. It is NOT
+    `/v1/validate`'s field of the same name, which is the run default.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    is_valid: Literal[True]
+    #: The qualified ref the selection resolved, read off the resolved pipe and never echoed from
+    #: the request. `None` only under `all_pipes` when nothing resolves.
+    pipe_ref: str | None
+    pipe_io_contracts: PipeIOContracts
+    input_form: InputForm
+    output_form: OutputForm
+    default_pipe_ref: str | None
+    #: The qualified refs of every pipe of the closure still declared as a signature.
+    pending_signatures: list[str]
+    #: `not pending_signatures`, exactly as on `/v1/validate`. No dry run backs it.
+    is_runnable: bool
+    #: The resolved closure's `.mthds` files in the request's `files` shape; `None` unless the
+    #: request set `include_files`.
+    files: list[MthdsFileItem] | None = None
+
+
+# Named after the route and the JS twin's `PipeIOResponse`; pylint's alias pattern rejects the `IO` run.
+PipeIOResponse: TypeAlias = Annotated[  # pylint: disable=invalid-name
+    PipeIOValidReport | CrateInvalidReport,
+    Field(discriminator="is_valid"),
+]
+
+# The single parse path for a 200 `/pipe-io` body — same regime as `ResolveResponseAdapter`.
+PipeIOResponseAdapter: TypeAdapter[PipeIOResponse] = TypeAdapter(PipeIOResponse)  # pylint: disable=invalid-name

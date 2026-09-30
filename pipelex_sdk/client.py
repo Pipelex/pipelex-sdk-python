@@ -48,6 +48,9 @@ from pipelex_sdk.crate_models import (
     CodegenResponse,
     CodegenResponseAdapter,
     MthdsFileItem,
+    PipeIORequest,
+    PipeIOResponse,
+    PipeIOResponseAdapter,
     ResolveRequest,
     ResolveResponse,
     ResolveResponseAdapter,
@@ -1235,13 +1238,14 @@ class PipelexAPIClient(MthdsAPIClient):
         body = upload_input.model_dump(mode="json", exclude_none=True)
         return UploadedFile.model_validate(await self._request_product("POST", "upload", body=body))
 
-    # ── Crate extensions (Pipelex API — `/v1/resolve`, `/v1/codegen`) ─────
+    # ── Crate extensions (Pipelex API — `/v1/resolve`, `/v1/codegen`, `/v1/pipe-io`) ─────
     #
     # The second crate-family surface, mirroring the JS SDK: `/v1/resolve` emits the
     # normalized library crate, `/v1/codegen` projects that crate into stamped typed
-    # artifacts plus their lock. Same envelope family and same 200-verdict discipline as
-    # the build routes, PLUS the hosted `method_id` selector under the tooling routes'
-    # strict three-way XOR (see `crate_models`).
+    # artifacts plus their lock, and `/v1/pipe-io` returns a method's three I/O artifacts
+    # with no dry run. Same envelope family and same 200-verdict discipline as the build
+    # routes, PLUS the hosted `method_id` selector under the tooling routes' strict
+    # three-way XOR (see `crate_models`).
 
     async def resolve(self, request: ResolveRequest) -> ResolveResponse:
         """Resolve a closure into its normalized library crate — `POST /v1/resolve`.
@@ -1284,6 +1288,33 @@ class PipelexAPIClient(MthdsAPIClient):
         raw = await self._request_product("POST", "codegen", body=body, request_timeout=_crate_request_timeout_seconds(request.method_ref))
         return CodegenResponseAdapter.validate_python(raw)
 
+    async def pipe_io(self, request: PipeIORequest) -> PipeIOResponse:
+        """Read a method's I/O artifacts without validating it — `POST /v1/pipe-io`.
+
+        The closure resolves through the same static core as `resolve`, one pipe is selected,
+        and the valid arm carries that pipe's `pipe_io_contracts`, `input_form` and
+        `output_form` (the standard's artifacts, typed from `mthds.protocol`), beside the
+        resolved qualified `pipe_ref`, the method's own `default_pipe_ref`, its
+        `pending_signatures` and `is_runnable`. `all_pipes=True` keys the three maps by every
+        pipe the closure loads instead; `include_files=True` echoes the closure's `.mthds`
+        files. It runs NO dry-run sweep, so it costs one load where `validate` dry-runs every
+        pipe, and a valid verdict never says the method runs.
+
+        Same three-form closure selector as `resolve`, enforced at request construction and by
+        the server alike. The pipe is selected by the request's `pipe_ref`, else a fetched
+        package manifest's `main_pipe`, else the closure's single `main_pipe` declaration.
+
+        Returns a 200 verdict: branch on `is_valid` before reading the arm. A no-verdict
+        condition raises `ApiResponseError`: a refused selection (an unknown ref, or no
+        `pipe_ref` and a chain that finds no entry pipe or several, without `all_pipes`) and a
+        malformed request are `422`s; the `method_ref` fetch failures and the `method_id`
+        resolution failures are those of `resolve`; an artifact the server cannot derive is a
+        `500`.
+        """
+        body = request.model_dump(mode="json", exclude_none=True)
+        raw = await self._request_product("POST", "pipe-io", body=body, request_timeout=_crate_request_timeout_seconds(request.method_ref))
+        return PipeIOResponseAdapter.validate_python(raw)
+
     async def upload_file(
         self,
         source: UploadSource,
@@ -1317,11 +1348,13 @@ class PipelexAPIClient(MthdsAPIClient):
         The method is named exactly one of three ways — inline `files`, a `method_ref` address
         (runner-resolved) or a stored `method_id` (platform-resolved) — all server-resolved,
         with nothing expanded client-side. An empty selector is treated as absent. The
-        signature comes from one `POST /v1/validate` asking for the `input_form` view, so the
-        walk is guided by each input's DECLARED kind rather than by the shape of its value.
+        signature comes from one `POST /v1/pipe-io` (see `pipe_io`), which selects the pipe
+        and returns its input-form descriptor, so the walk is guided by each input's DECLARED
+        kind rather than by the shape of its value.
 
-        `pipe_ref` is qualified-only (`domain.pipe_code`); omit it to default. See
-        `docs/input-preparation.md`.
+        `pipe_ref` is qualified-only (`domain.pipe_code`); omit it and the server selects the
+        method's entry pipe. A refused selection raises `InputPreparationError` with the
+        server's reason. See `docs/input-preparation.md`.
         """
         return await _prepare_inputs_impl(
             self,
@@ -1536,7 +1569,7 @@ def _assert_method_ref_pairs_with_nothing(*, mthds_contents: list[str] | None, m
 
 
 def _crate_request_timeout_seconds(method_ref: str | None) -> float:
-    """The request budget for a call carrying a crate closure (`/v1/resolve`, `/v1/codegen`):
+    """The request budget for a call carrying a crate closure (`/v1/resolve`, `/v1/codegen`, `/v1/pipe-io`):
     the management default, unless the closure is a `method_ref` the server may have to fetch
     first — see `_METHOD_REF_FETCH_TIMEOUT_SECONDS`.
     """
