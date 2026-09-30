@@ -1306,8 +1306,10 @@ class PipelexAPIClient(MthdsAPIClient):
 
         Returns a 200 verdict: branch on `is_valid` before reading the arm. A no-verdict
         condition raises `ApiResponseError`: a refused selection (an unknown ref, or no
-        `pipe_ref` and a chain that finds no entry pipe or several, without `all_pipes`) and a
-        malformed request are `422`s; the `method_ref` fetch failures and the `method_id`
+        `pipe_ref` and a chain that finds no entry pipe or several, without `all_pipes`) is a
+        `422` whose `error_type` is `EntryPipeNotFoundError` or `EntryPipeAmbiguousError`
+        (pipelex-api >= 0.33.1); a malformed request is a request-shape `422`; the
+        `method_ref` fetch failures and the `method_id`
         resolution failures are those of `resolve`; an artifact the server cannot derive is a
         `500`.
         """

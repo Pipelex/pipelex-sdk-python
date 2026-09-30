@@ -4,14 +4,14 @@ Run it with `make e2e-test` against any API that serves the route — a local `p
 hosted platform:
 
     PIPELEX_E2E_BASE_URL=http://127.0.0.1:8082 make e2e-test
-    PIPELEX_E2E_BASE_URL=https://api-dev.pipelex.com PIPELEX_API_KEY=plx_sk_… make e2e-test
+    PIPELEX_E2E_BASE_URL=https://api-dev.pipelex.com PIPELEX_API_KEY=plx_sk_… PIPELEX_E2E_METHOD_ID=mt_… make e2e-test
 
 The whole module skips when `PIPELEX_E2E_BASE_URL` is unset, so `make agent-test`, which does not
 collect this directory at all, never reaches it. The inline `files` and `method_ref` cases need only
-the runner. The hosted `method_id` case needs the platform's catalog, and skips unless
-`PIPELEX_API_KEY` is set: a bare runner answers without a key, and has no catalog to resolve an id
-against. No case uploads a file, since a bare runner serves no `/v1/upload`; the upload leg rides
-`test_artifacts_e2e.py` on the platform.
+the runner. The hosted `method_id` case needs the platform: it skips unless `PIPELEX_API_KEY` and
+`PIPELEX_E2E_METHOD_ID` are both set, the second naming a method already stored in that key's
+organization whose entry pipe takes a Document or an Image. It creates nothing in the catalog, and it
+is the one case here that uploads, since a bare runner serves no `/v1/upload`.
 
 What the unit suite cannot prove: that the answer the models parse, the selection the route makes,
 and the refusal `prepare_inputs` maps are the ones a real server produces.
@@ -22,15 +22,14 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from mthds.protocol.input_form import DocumentField, ObjectField
+from mthds.protocol.input_form import DocumentField, ImageField, ObjectField
 
 from pipelex_sdk.client import PipelexAPIClient
 from pipelex_sdk.crate_models import CrateInvalidReport, MthdsFileItem, PipeIORequest, PipeIOValidReport
-from pipelex_sdk.errors import InputPreparationError
-from pipelex_sdk.product_models import MethodWriteInput
+from pipelex_sdk.errors import ApiResponseError, InputPreparationError
 
 if TYPE_CHECKING:
     from pipelex_sdk.crate_models import PipeIOResponse
@@ -38,12 +37,21 @@ if TYPE_CHECKING:
 
 _BASE_URL = os.environ.get("PIPELEX_E2E_BASE_URL", "")
 _API_KEY = os.environ.get("PIPELEX_API_KEY", "")
+_METHOD_ID = os.environ.get("PIPELEX_E2E_METHOD_ID", "")
 
 pytestmark = pytest.mark.skipif(not _BASE_URL, reason="live leg: set PIPELEX_E2E_BASE_URL to run it")
 
 #: A published package whose entry pipe is named in its `METHODS.toml` alone.
 _METHOD_REF = "github.com/Pipelex/methods/documents@v0.1.0"
 _DOCUMENT_URL = "https://example.com/brief.pdf"
+
+#: A minimal PDF with a nonce of its own, uploaded by the hosted `method_id` case. Nothing reads it.
+_PDF_BYTES = (
+    b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+    b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+    b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n"
+    b"%% nonce " + str(time.time()).encode("ascii") + b"\ntrailer<</Root 1 0 R>>\n%%EOF\n"
+)
 
 #: One domain declaring its entry pipe: a Document, a Text, and a structured input with an optional
 #: nested Image — no inference, and every declared input read by the template.
@@ -161,13 +169,16 @@ class TestPipeIOLive:
         assert isinstance(report, CrateInvalidReport)
         assert report.validation_errors
 
-    def test_a_method_ref_selects_the_manifest_entry_pipe(self) -> None:
-        report = _pipe_io(PipeIORequest(method_ref=_METHOD_REF, include_files=True))
+    def test_a_method_ref_describes_every_pipe_and_selects_the_manifest_entry_pipe(self) -> None:
+        report = _pipe_io(PipeIORequest(method_ref=_METHOD_REF, all_pipes=True, include_files=True))
 
         assert isinstance(report, PipeIOValidReport)
+        # Under `all_pipes` with no `pipe_ref`, the chain's answer: the manifest's `main_pipe`.
         assert report.pipe_ref is not None
         assert report.pipe_ref == report.default_pipe_ref
-        assert report.files is not None
+        assert set(report.pipe_io_contracts) == set(report.input_form) == set(report.output_form)
+        assert report.pipe_ref in report.input_form
+        assert report.files
         assert all(item.source is not None and item.source.endswith(".mthds") for item in report.files)
 
     # ── prepare_inputs on the route ──────────────────────────────────
@@ -203,16 +214,17 @@ class TestPipeIOLive:
         assert prepared.uploads == []
 
     @pytest.mark.parametrize(
-        ("files", "pipe_ref", "named"),
+        ("files", "pipe_ref", "error_type", "named"),
         [
-            (_ENTRY_FILES, "smoke_pipe_io.absent", "smoke_pipe_io.absent"),
-            (_NO_ENTRY_FILES, None, "main_pipe"),
-            (_SEVERAL_ENTRY_FILES, None, "smoke_pipe_io_alpha.run, smoke_pipe_io_beta.run"),
+            (_ENTRY_FILES, "smoke_pipe_io.absent", "EntryPipeNotFoundError", "smoke_pipe_io.absent"),
+            (_NO_ENTRY_FILES, None, "EntryPipeNotFoundError", "main_pipe"),
+            (_SEVERAL_ENTRY_FILES, None, "EntryPipeAmbiguousError", "smoke_pipe_io_alpha.run, smoke_pipe_io_beta.run"),
         ],
     )
-    def test_prepare_inputs_maps_a_refused_selection(self, files: list[MthdsFileItem], pipe_ref: str | None, named: str) -> None:
-        # Needs the runner to type the refusal with its entry-lookup `error_type` (pipelex-api >= 0.33.1);
-        # the server's `detail` names what was refused, the candidates included.
+    def test_prepare_inputs_maps_a_refused_selection(self, files: list[MthdsFileItem], pipe_ref: str | None, error_type: str, named: str) -> None:
+        # Needs the runner to type the refusal with its entry-lookup `error_type` (pipelex-api >= 0.33.1),
+        # and the hosted proxy to relay it unchanged. The server's `detail` names what was refused: the
+        # unknown ref, the missing `main_pipe`, or the candidates when several are declared.
         async def _prepare() -> PreparedInputs:
             async with _client() as client:
                 return await client.prepare_inputs(files=files, pipe_ref=pipe_ref, inputs={})
@@ -220,25 +232,42 @@ class TestPipeIOLive:
         with pytest.raises(InputPreparationError, match="the pipe could not be selected") as exc_info:
             asyncio.run(_prepare())
         assert named in str(exc_info.value)
+        refusal = exc_info.value.__cause__
+        assert isinstance(refusal, ApiResponseError)
+        assert refusal.status == 422
+        assert refusal.error_type == error_type
+        assert refusal.error_domain == "input"
+        assert refusal.server_message is not None
+        assert named in refusal.server_message
 
     # ── The hosted catalog selector ──────────────────────────────────
 
-    @pytest.mark.skipif(not _API_KEY, reason="hosted leg: a stored method needs the platform catalog and PIPELEX_API_KEY")
-    def test_a_method_id_resolves_through_the_catalog(self) -> None:
-        async def _by_id() -> tuple[PipeIOResponse, PreparedInputs]:
+    @pytest.mark.skipif(
+        not _API_KEY or not _METHOD_ID,
+        reason="hosted leg: set PIPELEX_API_KEY and PIPELEX_E2E_METHOD_ID, a method stored in that key's organization",
+    )
+    def test_a_stored_method_id_resolves_through_the_catalog(self) -> None:
+        async def _by_id() -> tuple[PipeIOResponse, dict[str, Any], PreparedInputs]:
             async with _client() as client:
-                method = await client.create_method(MethodWriteInput(name=f"sdk-python-e2e-pipe-io-{time.time_ns()}", mthds=_ENTRY_BUNDLE))
-                try:
-                    report = await client.pipe_io(PipeIORequest(method_id=method.method_id, include_files=True))
-                    prepared = await client.prepare_inputs(method_id=method.method_id, inputs={"doc": _DOCUMENT_URL, "note": "hi"})
-                finally:
-                    await client.delete_method(method.method_id)
-            return report, prepared
+                report = await client.pipe_io(PipeIORequest(method_id=_METHOD_ID, all_pipes=True, include_files=True))
+                assert isinstance(report, PipeIOValidReport)
+                assert report.pipe_ref is not None, "the stored method must declare an entry pipe"
+                file_fields = [field.name for field in report.input_form[report.pipe_ref].fields if isinstance(field, (DocumentField, ImageField))]
+                assert file_fields, "the stored method's entry pipe must take a Document or an Image"
+                # One byte string at every file position: preparation uploads it once and rewrites each.
+                inputs: dict[str, Any] = dict.fromkeys(file_fields, _PDF_BYTES)
+                prepared = await client.prepare_inputs(method_id=_METHOD_ID, inputs=inputs)
+            return report, inputs, prepared
 
-        report, prepared = asyncio.run(_by_id())
+        report, inputs, prepared = asyncio.run(_by_id())
 
         assert isinstance(report, PipeIOValidReport)
-        assert report.pipe_ref == "smoke_pipe_io.echo"
-        assert report.files is not None
-        assert [item.content for item in report.files] == [_ENTRY_BUNDLE]
-        assert prepared.inputs == {"doc": {"url": _DOCUMENT_URL}, "note": "hi"}
+        assert report.pipe_ref == report.default_pipe_ref
+        assert set(report.pipe_io_contracts) == set(report.input_form) == set(report.output_form)
+        # The stored files come back under their stored names.
+        assert report.files
+        assert all(item.source for item in report.files)
+        assert len(prepared.uploads) == 1
+        uploaded = prepared.uploads[0].uri
+        assert uploaded.startswith("pipelex-storage://")
+        assert prepared.inputs == {name: {"url": uploaded} for name in inputs}

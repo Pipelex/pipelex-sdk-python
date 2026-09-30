@@ -248,9 +248,12 @@ class PipeIORequest(CrateToolingRequest):
 
     `pipe_ref` names the pipe to describe by its qualified ref (`domain.pipe_code`) and is sent
     as given. Omitted, the server's selection chain decides: a fetched package manifest's
-    `main_pipe`, else the closure's single `main_pipe` declaration — and a chain that finds none,
-    or several, is a request-shape `422` unless `all_pipes` is set. The server resolves a bare
-    ref across domains today; `prepare_inputs` refuses one before sending it.
+    `main_pipe`, else the closure's single `main_pipe` declaration. A refused selection is a `422`
+    carrying the runner's entry-lookup `error_type` (pipelex-api >= 0.33.1): `EntryPipeNotFoundError`
+    for an unknown ref or a chain that finds no entry pipe, `EntryPipeAmbiguousError` for an
+    ambiguous bare code or a chain that finds several; under `all_pipes` a chain that finds none or
+    several is not refused. The server resolves a bare ref across domains today; `prepare_inputs`
+    refuses one before sending it.
 
     `all_pipes` describes every pipe the closure loads instead of the selected one, and never
     refuses for want of an entry pipe. `include_files` echoes the resolved closure's `.mthds`

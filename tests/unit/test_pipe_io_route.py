@@ -163,8 +163,9 @@ class TestPipeIORoute:
     def test_a_no_verdict_answer_raises_api_response_error(
         self, mocker: MockerFixture, status: int, body: dict[str, object], error_type: str | None
     ) -> None:
-        """A refused selection is a request-shape `422`, never an `is_valid: false` verdict; the route
-        itself does not translate it, so the runner's `error_type` stays readable on the error.
+        """A refused selection is a `422` typed by the runner's entry-lookup `error_type`, never an
+        `is_valid: false` verdict; the route itself does not translate it, so the `error_type` stays
+        readable on the error and tells it apart from a request-shape `422`.
         """
         client = self._client()
         self._mock_send(mocker, client, _response(status, json_body=body))
