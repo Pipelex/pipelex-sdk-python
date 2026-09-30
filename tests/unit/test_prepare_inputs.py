@@ -258,6 +258,21 @@ class TestPrepareInputs:
         assert str(exc_info.value) == 'Cannot prepare inputs: `pipe_ref` must be qualified (`domain.pipe_code`), got the bare "main".'
         assert client.pipe_io_calls == []
 
+    @pytest.mark.parametrize("pipe_ref", ["deps->legal.summarize", "deps->summarize"])
+    def test_a_dependency_package_pipe_ref_is_refused_before_any_request(self, pipe_ref: str) -> None:
+        # The alias names a dependency package's pipe, and the route loads no address-based
+        # dependency. Checked before the bare rule, so `deps->summarize` is named for what it is.
+        client = _image_client()
+
+        with pytest.raises(InputPreparationError) as exc_info:
+            asyncio.run(prepare_inputs(client, files=_FILES, pipe_ref=pipe_ref, inputs={}))
+
+        assert str(exc_info.value) == (
+            f'Cannot prepare inputs: `pipe_ref` "{pipe_ref}" names a dependency package\'s pipe. '
+            "Preparation covers the method's own pipes: name one as `domain.pipe_code`."
+        )
+        assert client.pipe_io_calls == []
+
     @pytest.mark.parametrize(
         ("body", "detail"),
         [

@@ -305,16 +305,28 @@ def _resolve_selector(
 
 
 def _checked_pipe_ref(pipe_ref: object) -> str | None:
-    """The caller's `pipe_ref`, normalized — `None` when absent, refused when bare or not a string.
+    """The caller's `pipe_ref`, normalized — `None` when absent, refused when it names a dependency
+    package's pipe, when bare, or when not a string. Both refusals are raised before any request, in
+    the order `@pipelex/sdk`'s `normalizePipeRef` checks them, with the same wording.
 
-    Qualified-only is this helper's contract: the descriptor is keyed by qualified refs, and a
-    searched `pipe_code` is a run-route affordance preparation does not grow. The route would
-    still resolve a bare code across domains today — the pipe-selector rule that refuses one
-    server-side has not reached the runner's shared selection yet — so the refusal stays here,
-    raised before any request.
+    - An `alias->domain.pipe_code` ref is refused because the alias names a dependency package's
+      pipe, and preparation covers the method's own pipes: the crate routes do not load an
+      address-based dependency at all. The run route takes such a ref; preparation refuses it, and
+      that asymmetry is deliberate.
+    - A bare `pipe_code` is refused because a request names a pipe by its qualified ref. The route
+      will refuse it too once the runner's shared selection enforces that rule; until then it would
+      resolve a bare code across domains, and preparation does not lean on that fallback.
     """
     requested = _caller_selector(pipe_ref, argument="pipe_ref")
-    if requested is not None and "." not in requested:
+    if requested is None:
+        return None
+    if "->" in requested:
+        msg = (
+            f'Cannot prepare inputs: `pipe_ref` "{requested}" names a dependency package\'s pipe. '
+            "Preparation covers the method's own pipes: name one as `domain.pipe_code`."
+        )
+        raise InputPreparationError(msg)
+    if "." not in requested:
         msg = f'Cannot prepare inputs: `pipe_ref` must be qualified (`domain.pipe_code`), got the bare "{requested}".'
         raise InputPreparationError(msg)
     return requested
@@ -384,7 +396,8 @@ async def prepare_inputs(
             selects the method's entry pipe — see "Pipe selection" in
             `docs/input-preparation.md`. A bare `pipe_code` is refused before any request:
             the descriptor is keyed by qualified refs, and search is a run-route affordance
-            this helper deliberately does not grow.
+            this helper deliberately does not grow. So is an `alias->domain.pipe_code` ref,
+            which names a dependency package's pipe rather than one of the method's own.
         inputs: The caller's inputs (variable name → value), compact or explicit-envelope
             per input.
 
@@ -395,7 +408,8 @@ async def prepare_inputs(
 
     Raises:
         InputPreparationError: No selector or several; a selector or `pipe_ref` that is not a
-            string; a bare `pipe_ref`; the closure did not resolve; the route refused the pipe
+            string; a bare `pipe_ref`, or one naming a dependency package's pipe
+            (`alias->domain.pipe_code`); the closure did not resolve; the route refused the pipe
             selection with the runner's entry-lookup `error_type` (pipelex-api >= 0.33.1) — an
             unknown `pipe_ref`, or no `pipe_ref` and a method declaring no single entry pipe —
             carrying the server's `detail`, with the `ApiResponseError` as its `__cause__`; or a
