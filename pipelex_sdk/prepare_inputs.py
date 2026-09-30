@@ -55,17 +55,15 @@ PIPELEX_STORAGE_SCHEME = "pipelex-storage://"
 _HTTP_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 # How `/v1/pipe-io` says it refused the pipe selection, which `_fetch_signature` turns into an
-# `InputPreparationError`: a `422` whose `error_type` is one of the engine's entry-lookup errors.
-# `EntryPipeNotFoundError` is an unknown `pipe_ref`, or no `pipe_ref` and a method declaring no
-# entry pipe; `EntryPipeAmbiguousError` is a code matching pipes in several domains, or several
-# `main_pipe` declarations. Every other `422` — a malformed body, a `method_ref` that does not
-# parse or fetch, a stored method with no source — is not a selection and stays the
-# `ApiResponseError` it is. The names are the runner's exception classes; they live here alone,
-# so a rename upstream is a one-line edit.
+# `InputPreparationError`: a `422` whose `error_type` is one of the engine's entry-lookup errors
+# (pipelex-api >= 0.33.1). `EntryPipeNotFoundError` is an unknown `pipe_ref`, a manifest
+# `main_pipe` the closure lacks, or no `pipe_ref` and no `main_pipe`; `EntryPipeAmbiguousError` is
+# a bare code matching pipes in several domains, or no `pipe_ref` and several `main_pipe`s. Every
+# other `422` — a malformed body, a `method_ref` that does not parse or fetch, a stored method with
+# no source — is not a selection and stays the `ApiResponseError` it is. The names are the
+# runner's exception classes; they live here alone, so a rename upstream is a one-line edit.
 _HTTP_UNPROCESSABLE_ENTITY = 422
 _PIPE_SELECTION_ERROR_TYPES: frozenset[str] = frozenset({"EntryPipeNotFoundError", "EntryPipeAmbiguousError"})
-# The problem-document member a selection refusal may carry its candidate qualified refs in.
-_CANDIDATES_MEMBER = "candidates"
 
 
 class PreparedInputs(BaseModel):
@@ -327,24 +325,6 @@ def _is_pipe_selection_refusal(exc: ApiResponseError) -> bool:
     return exc.status == _HTTP_UNPROCESSABLE_ENTITY and exc.error_type in _PIPE_SELECTION_ERROR_TYPES
 
 
-def _selection_refusal_reason(exc: ApiResponseError) -> str:
-    """The server's reason for a refused selection, with its candidates when the body lists them.
-
-    The reason is the problem's `detail`. A candidate list the body carries as its own member is
-    appended unless the detail already names every candidate, as the engine's ambiguity message
-    does, so the refs are never repeated. Read defensively: a member that is not a list of
-    strings is ignored rather than trusted.
-    """
-    reason = exc.server_message or exc.title or exc.response_body or exc.status_text
-    raw_candidates: object = exc.problem.get(_CANDIDATES_MEMBER) if exc.problem is not None else None
-    if not isinstance(raw_candidates, list):
-        return reason
-    candidates = [candidate for candidate in cast("list[object]", raw_candidates) if isinstance(candidate, str)]
-    if not candidates or all(candidate in reason for candidate in candidates):
-        return reason
-    return f"{reason} Candidates: {', '.join(candidates)}."
-
-
 async def _fetch_signature(client: _PrepareClient, *, request: PipeIORequest) -> PipeIOValidReport:
     """Ask `pipe_io` for the selected pipe's signature and hand back the valid report.
 
@@ -361,16 +341,17 @@ async def _fetch_signature(client: _PrepareClient, *, request: PipeIORequest) ->
 
     A refused selection — a `422` whose `error_type` is an entry-lookup error (see
     `_PIPE_SELECTION_ERROR_TYPES`) — becomes an `InputPreparationError` carrying the server's
-    reason and its candidates, with the `ApiResponseError` kept as its `__cause__` for a caller
-    who needs the whole problem document. Every other non-2xx propagates as the
-    `ApiResponseError` it is.
+    `detail`, which names the candidates where there are any, with the `ApiResponseError` kept as
+    its `__cause__` for a caller who needs the whole problem document. Every other non-2xx
+    propagates as the `ApiResponseError` it is.
     """
     try:
         response = await client.pipe_io(request)
     except ApiResponseError as exc:
         if not _is_pipe_selection_refusal(exc):
             raise
-        msg = f"Cannot prepare inputs: the pipe could not be selected — {_selection_refusal_reason(exc)}"
+        reason = exc.server_message or exc.title or exc.response_body or exc.status_text
+        msg = f"Cannot prepare inputs: the pipe could not be selected — {reason}"
         raise InputPreparationError(msg) from exc
 
     if isinstance(response, CrateInvalidReport):
@@ -415,12 +396,12 @@ async def prepare_inputs(
     Raises:
         InputPreparationError: No selector or several; a selector or `pipe_ref` that is not a
             string; a bare `pipe_ref`; the closure did not resolve; the route refused the pipe
-            selection with the runner's entry-lookup `error_type` — an unknown `pipe_ref`, or
-            no `pipe_ref` and a method declaring no single entry pipe — carrying the server's
-            reason, with the `ApiResponseError` as its `__cause__`; or a value at a file
-            position is unusable. HTTP(S) URLs and
-            existing `pipelex-storage://` URIs pass through unchanged, and every failure is
-            raised BEFORE any run is created.
+            selection with the runner's entry-lookup `error_type` (pipelex-api >= 0.33.1) — an
+            unknown `pipe_ref`, or no `pipe_ref` and a method declaring no single entry pipe —
+            carrying the server's `detail`, with the `ApiResponseError` as its `__cause__`; or a
+            value at a file position is unusable. HTTP(S) URLs and existing
+            `pipelex-storage://` URIs pass through unchanged, and every failure is raised
+            BEFORE any run is created.
         ApiResponseError: Any other no-verdict condition from `/v1/pipe-io` — an unknown or
             foreign-org `method_id` or no package at a `method_ref` address (`404`), a
             `method_ref` that does not parse or fetch or a stored method with no source

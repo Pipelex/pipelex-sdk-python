@@ -89,8 +89,27 @@ output = "Text"
 template = "$topic"
 """
 
+
+def _entry_domain_bundle(domain: str) -> str:
+    """One domain declaring `run` as its `main_pipe`: two of them make the entry pipe ambiguous."""
+    return f"""domain = "{domain}"
+main_pipe = "run"
+
+[pipe.run]
+type = "PipeCompose"
+description = "Echo a note"
+inputs = {{ note = "Text" }}
+output = "Text"
+template = "$note"
+"""
+
+
 _ENTRY_FILES = [MthdsFileItem(content=_ENTRY_BUNDLE, source="smoke_pipe_io.mthds")]
 _NO_ENTRY_FILES = [MthdsFileItem(content=_NO_ENTRY_BUNDLE, source="smoke_pipe_io_open.mthds")]
+_SEVERAL_ENTRY_FILES = [
+    MthdsFileItem(content=_entry_domain_bundle("smoke_pipe_io_alpha"), source="alpha.mthds"),
+    MthdsFileItem(content=_entry_domain_bundle("smoke_pipe_io_beta"), source="beta.mthds"),
+]
 
 
 def _client() -> PipelexAPIClient:
@@ -184,20 +203,23 @@ class TestPipeIOLive:
         assert prepared.uploads == []
 
     @pytest.mark.parametrize(
-        ("files", "pipe_ref"),
+        ("files", "pipe_ref", "named"),
         [
-            (_ENTRY_FILES, "smoke_pipe_io.absent"),
-            (_NO_ENTRY_FILES, None),
+            (_ENTRY_FILES, "smoke_pipe_io.absent", "smoke_pipe_io.absent"),
+            (_NO_ENTRY_FILES, None, "main_pipe"),
+            (_SEVERAL_ENTRY_FILES, None, "smoke_pipe_io_alpha.run, smoke_pipe_io_beta.run"),
         ],
     )
-    def test_prepare_inputs_maps_a_refused_selection(self, files: list[MthdsFileItem], pipe_ref: str | None) -> None:
-        # Needs the runner to type the refusal with its entry-lookup `error_type`.
+    def test_prepare_inputs_maps_a_refused_selection(self, files: list[MthdsFileItem], pipe_ref: str | None, named: str) -> None:
+        # Needs the runner to type the refusal with its entry-lookup `error_type` (pipelex-api >= 0.33.1);
+        # the server's `detail` names what was refused, the candidates included.
         async def _prepare() -> PreparedInputs:
             async with _client() as client:
                 return await client.prepare_inputs(files=files, pipe_ref=pipe_ref, inputs={})
 
-        with pytest.raises(InputPreparationError, match="the pipe could not be selected"):
+        with pytest.raises(InputPreparationError, match="the pipe could not be selected") as exc_info:
             asyncio.run(_prepare())
+        assert named in str(exc_info.value)
 
     # ── The hosted catalog selector ──────────────────────────────────
 

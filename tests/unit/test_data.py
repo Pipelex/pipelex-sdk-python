@@ -143,27 +143,32 @@ class PipeIOBodies:
         ],
         "message": "1 validation error",
     }
-    #: The selection refusal the pipe-selector design asks for: the runner's entry-lookup error class
-    #: as `error_type`. The runner at `b4bafb8` still answers `error_type: ValidationError` here.
+    #: The selection refusals, as a local `pipelex-api` at `db9daa4` (the v0.33.1 fix) answered them on
+    #: 2026-09-30, less the per-request `request_id` and with the not-found `detail` shortened: the
+    #: runner's entry-lookup error class is the `error_type`, and the candidates, where there are any,
+    #: are named in `detail` alone.
     UNKNOWN_PIPE_REFUSAL: ClassVar[dict[str, Any]] = {
         "type": "https://docs.pipelex.com/latest/errors/entry-pipe-not-found-error/",
         "title": "Entry pipe not found",
         "status": 422,
         "detail": "Pipe 'smoke.absent' not found in the submitted closure.",
+        "instance": "/v1/pipe-io",
         "error_type": "EntryPipeNotFoundError",
         "error_domain": "input",
-        "retryable": False,
-        "instance": "/v1/pipe-io",
+        "user_action": {
+            "kind": "change_input",
+            "detail": "Check the pipe code for typos and make sure the bundle in scope for this operation declares it.",
+        },
     }
     AMBIGUOUS_PIPE_REFUSAL: ClassVar[dict[str, Any]] = {
         "type": "https://docs.pipelex.com/latest/errors/entry-pipe-ambiguous-error/",
         "title": "Entry pipe ambiguous",
         "status": 422,
         "detail": "No `pipe_ref` was given and the closure declares several `main_pipe`s (alpha.run, beta.run) — name the pipe explicitly.",
+        "instance": "/v1/pipe-io",
         "error_type": "EntryPipeAmbiguousError",
         "error_domain": "input",
-        "retryable": False,
-        "instance": "/v1/pipe-io",
+        "user_action": {"kind": "change_input", "detail": "Send a `pipe_ref` naming one of the declared `main_pipe`s."},
     }
     #: A `422` that is not a selection: the request-shape refusal the runner renders for a malformed body.
     REQUEST_SHAPE_REFUSAL: ClassVar[dict[str, Any]] = {

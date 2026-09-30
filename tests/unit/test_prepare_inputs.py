@@ -280,25 +280,6 @@ class TestPrepareInputs:
         assert exc_info.value.__cause__ is refusal
         assert client.upload_calls == []
 
-    def test_a_candidate_list_the_body_carries_is_named(self) -> None:
-        body = {**PipeIOBodies.UNKNOWN_PIPE_REFUSAL, "candidates": ["smoke.echo", "smoke.draft", 7]}
-        client = _FakePrepareClient(pipe_io_error=_api_error(422, body))
-
-        with pytest.raises(InputPreparationError) as exc_info:
-            asyncio.run(prepare_inputs(client, files=_FILES, pipe_ref="smoke.absent", inputs={}))
-
-        # A non-string member is dropped rather than trusted.
-        assert str(exc_info.value).endswith("not found in the submitted closure. Candidates: smoke.echo, smoke.draft.")
-
-    def test_candidates_the_detail_already_names_are_not_repeated(self) -> None:
-        body = {**PipeIOBodies.AMBIGUOUS_PIPE_REFUSAL, "candidates": ["alpha.run", "beta.run"]}
-        client = _FakePrepareClient(pipe_io_error=_api_error(422, body))
-
-        with pytest.raises(InputPreparationError) as exc_info:
-            asyncio.run(prepare_inputs(client, files=_FILES, inputs={}))
-
-        assert "Candidates:" not in str(exc_info.value)
-
     @pytest.mark.parametrize(
         ("status", "body"),
         [
