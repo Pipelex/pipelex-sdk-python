@@ -8,7 +8,7 @@
 
 ### Changed
 
-- **`prepare_inputs` reads its signature from `POST /v1/pipe-io`, which selects the pipe (Breaking)**: it needs an API that serves the route and raises `ApiResponseError` against one that does not. The pipe is the server's choice — your `pipe_ref`, else a package manifest's `main_pipe`, else the closure's single `main_pipe` declaration — so a method declaring no entry pipe or several now needs `pipe_ref` even when it has a single pipe, and a package naming its entry pipe in its manifest alone no longer does. A refused selection raises `InputPreparationError` with the server's reason, and the route runs no dry run, so a method whose dry run fails still prepares.
+- **`prepare_inputs` reads its signature from `POST /v1/pipe-io`, which selects the pipe (Breaking)**: it needs an API that serves the route and raises `ApiResponseError` against one that does not. The pipe is the server's choice — your `pipe_ref`, else a package manifest's `main_pipe`, else the closure's single `main_pipe` declaration — so a method declaring no entry pipe or several now needs `pipe_ref` even when it has a single pipe, and a package naming its entry pipe in its manifest alone no longer does. A selection the API refuses with the runner's entry-lookup `error_type` raises `InputPreparationError` with the server's reason. The route runs no dry run, so a method whose dry run fails still prepares, but it refuses an address-based cross-package dependency that `validate` loaded, so a closure carrying one no longer prepares.
 
 ## [v0.14.0] - 2026-09-27
 

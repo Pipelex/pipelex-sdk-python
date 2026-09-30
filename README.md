@@ -79,7 +79,7 @@ report = await client.validate(method_id="mt_123")
 from pipelex_sdk.crate_models import PipeIORequest, PipeIOValidReport
 
 report = await client.pipe_io(PipeIORequest(method_ref="github.com/Pipelex/methods/documents@v0.1.0"))
-if isinstance(report, PipeIOValidReport):
+if isinstance(report, PipeIOValidReport) and report.pipe_ref is not None:
     descriptor = report.input_form[report.pipe_ref]
     print([field.name for field in descriptor.fields], report.is_runnable)
 ```

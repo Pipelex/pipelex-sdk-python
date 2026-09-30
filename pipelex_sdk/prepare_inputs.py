@@ -415,9 +415,10 @@ async def prepare_inputs(
     Raises:
         InputPreparationError: No selector or several; a selector or `pipe_ref` that is not a
             string; a bare `pipe_ref`; the closure did not resolve; the route refused the pipe
-            selection — an unknown `pipe_ref`, or no `pipe_ref` and a method declaring no
-            single entry pipe — carrying the server's reason, with the `ApiResponseError` as
-            its `__cause__`; or a value at a file position is unusable. HTTP(S) URLs and
+            selection with the runner's entry-lookup `error_type` — an unknown `pipe_ref`, or
+            no `pipe_ref` and a method declaring no single entry pipe — carrying the server's
+            reason, with the `ApiResponseError` as its `__cause__`; or a value at a file
+            position is unusable. HTTP(S) URLs and
             existing `pipelex-storage://` URIs pass through unchanged, and every failure is
             raised BEFORE any run is created.
         ApiResponseError: Any other no-verdict condition from `/v1/pipe-io` — an unknown or
