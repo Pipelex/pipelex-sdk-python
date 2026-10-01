@@ -1,6 +1,6 @@
 # pipelex-sdk
 
-> **This code is moving to [`Pipelex/pipelex-sdk`](https://github.com/Pipelex/pipelex-sdk)**, one repository for both Pipelex SDKs, the starter templates and the method-app templates, where `pipelex-sdk` will live under `python/`. Version 0.16.0 is the last release made from this repository, and new work waits for the move rather than starting here.
+> **This code is moving to `Pipelex/pipelex-sdk`**, one repository for both Pipelex SDKs, the starter templates and the method-app templates, where `pipelex-sdk` will live under `python/`. Version 0.16.0 is the last release made from this repository, and new work waits for the move rather than starting here.
 
 The Python client for the [Pipelex](https://www.pipelex.com) hosted API.
 

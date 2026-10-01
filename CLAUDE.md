@@ -1,5 +1,7 @@
 # pipelex-sdk-python
 
+> **This repository is frozen for its move into `Pipelex/pipelex-sdk`** (epic L-261001-a2fd94, plan in the workspace root's `wip/sdk-monorepo/plan.md`). Open no new branch here and claim no ledger item this repository owns: those items are re-owned to the new repository when the import lands, and the work happens there.
+
 This file guides Claude Code when working in this repo. It is self-contained: the repo overview below, then the Python coding standards (mirroring `../mthds-python/CLAUDE.md`, the relevant standard for this package). The workspace-root `CLAUDE.md` and `.claude/rules/python-standards.md` also apply.
 
 ## What this repo is
