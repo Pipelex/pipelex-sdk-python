@@ -42,7 +42,9 @@ pytestmark = pytest.mark.skipif(
     reason="live leg: set PIPELEX_E2E_BASE_URL and PIPELEX_API_KEY to run it",
 )
 
-#: One domain, one main pipe, a Document input beside the Text it echoes — no inference.
+#: One domain, one main pipe, a Document input beside the Text it echoes — no inference. The template
+#: must read every declared input, or the bundle is refused (`extraneous_input_variable`); the empty
+#: `{% if doc %}` block reads `doc` without rendering it, so the output stays the note alone.
 _PASS_THROUGH_BUNDLE = """domain = "smoke_artifacts"
 main_pipe = "echo_note"
 
@@ -51,7 +53,7 @@ type = "PipeCompose"
 description = "Echo the note beside a document, with no inference"
 inputs = { doc = "Document", note = "Text" }
 output = "Text"
-template = "$note"
+template = "{% if doc %}{% endif %}$note"
 """
 
 #: A minimal PDF with a nonce of its own, so a swapped file could not pass. Nothing in the run reads it.
