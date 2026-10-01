@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture, MockType
 
     from pipelex_sdk.client import PipelexAPIClient
-    from pipelex_sdk.product_models import MethodSummary, PipelineRun
+    from pipelex_sdk.product_models import MethodSummary, RunHistoryItem
     from tests.unit.conftest import ResponseBuilder, SendPatcher
 
 
@@ -30,7 +30,7 @@ def _method(method_id: str) -> dict[str, Any]:
 
 
 def _run(run_id: str) -> dict[str, Any]:
-    return {"pipeline_run_id": run_id, "method_id": "m1", "pipe_code": "p", "status": "RUNNING", "created_at": "t"}
+    return {"pipeline_run_id": run_id, "pipe_code": "p", "status": "RUNNING", "created_at": "t"}
 
 
 def _cursors_sent(send: MockType) -> list[str | None]:
@@ -48,7 +48,7 @@ async def _drain_methods(client: PipelexAPIClient, **kwargs: Any) -> list[Method
     return [summary async for summary in client.iterate_methods(**kwargs)]
 
 
-async def _drain_runs(client: PipelexAPIClient, method_id: str) -> list[PipelineRun]:
+async def _drain_runs(client: PipelexAPIClient, method_id: str) -> list[RunHistoryItem]:
     return [pipeline_run async for pipeline_run in client.iterate_runs(method_id)]
 
 

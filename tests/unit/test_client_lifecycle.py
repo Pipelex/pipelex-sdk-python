@@ -19,6 +19,7 @@ from pipelex_sdk.errors import (
 )
 from pipelex_sdk.runs import (
     PollInfo,
+    RunArtifact,
     RunResultCompleted,
     RunResultFailed,
     RunResultRunning,
@@ -336,6 +337,108 @@ class TestClientLifecycle:
         assert isinstance(state, RunResultCompleted)
         assert state.result.main_stuff == []
 
+    # ── get_run_result artifact selection ────────────────────────
+
+    @pytest.mark.parametrize(
+        ("artifacts", "expected_query"),
+        [
+            pytest.param([RunArtifact.MAIN_STUFF], "artifacts=main_stuff", id="one"),
+            pytest.param(
+                [RunArtifact.TOKENS_USAGES, RunArtifact.MAIN_STUFF, RunArtifact.GRAPH_SPEC],
+                "artifacts=graph_spec,main_stuff,tokens_usages",
+                id="declaration_order",
+            ),
+            pytest.param([RunArtifact.MAIN_STUFF, RunArtifact.MAIN_STUFF], "artifacts=main_stuff", id="deduplicated"),
+            pytest.param(list(RunArtifact), "artifacts=" + ",".join(RunArtifact), id="all_named"),
+        ],
+    )
+    def test_get_run_result_sends_the_selection_as_one_comma_separated_param(
+        self, mocker: MockerFixture, artifacts: list[RunArtifact], expected_query: str
+    ) -> None:
+        """A selection is one `artifacts` param, in declaration order, each name once, commas unescaped."""
+        client = self._client()
+        body: dict[str, object] = {"pipeline_run_id": "run_1", "main_stuff": {"text": "hi"}}
+        send_mock = mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=body)))
+
+        asyncio.run(client.get_run_result("run_1", artifacts=artifacts))
+        assert send_mock.call_args.args[1] == f"{_BASE_URL}/v1/runs/run_1/results?{expected_query}"
+
+    def test_get_run_result_without_a_selection_sends_no_query(self, mocker: MockerFixture) -> None:
+        """No selection reads everything, exactly as before: the URL carries no `artifacts` param."""
+        client = self._client()
+        body: dict[str, object] = {"pipeline_run_id": "run_1", "main_stuff": {"text": "hi"}}
+        send_mock = mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=body)))
+
+        state = asyncio.run(client.get_run_result("run_1"))
+        assert send_mock.call_args.args[1] == f"{_BASE_URL}/v1/runs/run_1/results"
+        assert isinstance(state, RunResultCompleted)
+        assert state.result.carries(RunArtifact.MAIN_STUFF) is True
+
+    def test_get_run_result_refuses_an_empty_selection_before_sending(self, mocker: MockerFixture) -> None:
+        """An empty selection names nothing; it is refused client-side and no request is made."""
+        client = self._client()
+        send_mock = mocker.patch.object(client, "_send", mocker.AsyncMock())
+
+        with pytest.raises(PipelineRequestError, match="at least one RunArtifact"):
+            asyncio.run(client.get_run_result("run_1", artifacts=[]))
+        send_mock.assert_not_called()
+
+    def test_get_run_result_selection_without_main_stuff_does_not_require_one(self, mocker: MockerFixture) -> None:
+        """A selection that leaves `main_stuff` out reads a body without it, and that is the answer, not a fault."""
+        client = self._client()
+        body: dict[str, object] = {"pipeline_run_id": "run_1", "graph_spec": {"nodes": []}, "output_form": None}
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=body)))
+
+        state = asyncio.run(client.get_run_result("run_1", artifacts=[RunArtifact.GRAPH_SPEC, RunArtifact.OUTPUT_FORM]))
+        assert isinstance(state, RunResultCompleted)
+        result = state.result
+        assert result.graph_spec == {"nodes": []}
+        assert result.main_stuff is None
+        assert result.carries(RunArtifact.GRAPH_SPEC) is True
+        assert result.carries(RunArtifact.OUTPUT_FORM) is True
+        assert result.output_form is None
+        assert result.carries(RunArtifact.MAIN_STUFF) is False
+        assert result.carries(RunArtifact.WORKING_MEMORY) is False
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"pipeline_run_id": "run_1"}, id="main_stuff_key_omitted"),
+            pytest.param({"pipeline_run_id": "run_1", "main_stuff": None}, id="main_stuff_null"),
+        ],
+    )
+    def test_get_run_result_selection_naming_main_stuff_still_requires_one(self, mocker: MockerFixture, body: dict[str, object]) -> None:
+        """A selection that asks for `main_stuff` keeps the invariant: none delivered is `MissingMainStuffError`."""
+        client = self._client()
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=body)))
+
+        with pytest.raises(MissingMainStuffError) as exc_info:
+            asyncio.run(client.get_run_result("run_1", artifacts=[RunArtifact.MAIN_STUFF, RunArtifact.TOKENS_USAGES]))
+        assert exc_info.value.run_id == "run_1"
+
+    def test_get_run_result_carries_the_usage_pair_only_when_both_fields_came(self, mocker: MockerFixture) -> None:
+        """`TOKENS_USAGES` names the envelope: it is carried when the body holds both of its fields."""
+        client = self._client()
+        body: dict[str, object] = {"pipeline_run_id": "run_1", "main_stuff": {"text": "hi"}, "tokens_usages": None, "usage_assembly_error": None}
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(200, json=body)))
+
+        state = asyncio.run(client.get_run_result("run_1", artifacts=[RunArtifact.MAIN_STUFF, RunArtifact.TOKENS_USAGES]))
+        assert isinstance(state, RunResultCompleted)
+        assert state.result.carries(RunArtifact.TOKENS_USAGES) is True
+        assert state.result.tokens_usages is None
+        partial = RunResults.model_validate({"pipeline_run_id": "run_1", "tokens_usages": []})
+        assert partial.carries(RunArtifact.TOKENS_USAGES) is False
+
+    def test_get_run_result_with_a_selection_maps_a_202_to_running(self, mocker: MockerFixture) -> None:
+        """The in-flight body names the selected fields as null; the client still reads it as running."""
+        client = self._client()
+        body: dict[str, object] = {"pipeline_run_id": "run_1", "main_stuff": None}
+        mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=_response(202, json=body, headers={"Retry-After": "4"})))
+
+        state = asyncio.run(client.get_run_result("run_1", artifacts=[RunArtifact.MAIN_STUFF]))
+        assert isinstance(state, RunResultRunning)
+        assert state.retry_after_seconds == 4
+
     def test_get_run_result_completed_parses_usage_pair(self, mocker: MockerFixture) -> None:
         """A 200 carrying the hosted usage pair validates the relayed records into
         `TokensUsageRecord`s; a body without them (older platform / pre-artifact run) defaults both
@@ -551,6 +654,50 @@ class TestClientLifecycle:
         assert returned.main_stuff == {"answer": "42"}
         assert len(polls) == 1
         assert polls[0].attempt == 1
+
+    def test_wait_for_result_threads_the_selection_to_every_poll(self, mocker: MockerFixture) -> None:
+        """Every results read of the loop carries the caller's selection."""
+        client = self._client()
+        result = RunResults(pipeline_run_id="run_1", main_stuff={"answer": "42"})
+        get_mock = mocker.patch.object(
+            client,
+            "get_run_result",
+            mocker.AsyncMock(
+                side_effect=[
+                    RunResultRunning(pipeline_run_id="run_1", retry_after_seconds=0),
+                    RunResultCompleted(pipeline_run_id="run_1", result=result),
+                ]
+            ),
+        )
+        mocker.patch("pipelex_sdk.client.asyncio.sleep", mocker.AsyncMock())
+
+        asyncio.run(client.wait_for_result("run_1", WaitForResultOptions(interval_seconds=0.0), artifacts=[RunArtifact.MAIN_STUFF]))
+        assert [call.kwargs["artifacts"] for call in get_mock.call_args_list] == [[RunArtifact.MAIN_STUFF], [RunArtifact.MAIN_STUFF]]
+
+    def test_wait_for_result_refuses_an_empty_selection_before_polling(self, mocker: MockerFixture) -> None:
+        """An empty selection fails at once rather than after a poll."""
+        client = self._client()
+        get_mock = mocker.patch.object(client, "get_run_result", mocker.AsyncMock())
+
+        with pytest.raises(PipelineRequestError):
+            asyncio.run(client.wait_for_result("run_1", artifacts=[]))
+        get_mock.assert_not_called()
+
+    def test_start_and_wait_threads_the_selection_to_the_wait(self, mocker: MockerFixture) -> None:
+        """On the hosted path the selection reaches `wait_for_result`; an empty one never starts a run."""
+        client = self._client()
+        mocker.patch.object(client, "_supports_run_lifecycle", mocker.AsyncMock(return_value=True))
+        start_mock = mocker.patch.object(client, "start", mocker.AsyncMock(return_value=mocker.Mock(pipeline_run_id="run_1")))
+        result = RunResults(pipeline_run_id="run_1", main_stuff={"answer": "42"})
+        wait_mock = mocker.patch.object(client, "wait_for_result", mocker.AsyncMock(return_value=result))
+
+        returned = asyncio.run(client.start_and_wait(pipe_code="p", artifacts=[RunArtifact.MAIN_STUFF]))
+        assert returned is result
+        assert wait_mock.call_args.kwargs["artifacts"] == [RunArtifact.MAIN_STUFF]
+
+        with pytest.raises(PipelineRequestError):
+            asyncio.run(client.start_and_wait(pipe_code="p", artifacts=[]))
+        assert start_mock.call_count == 1
 
     def test_wait_for_result_raises_run_failed(self, mocker: MockerFixture) -> None:
         """A terminal non-COMPLETED state raises RunFailedError carrying the typed status."""

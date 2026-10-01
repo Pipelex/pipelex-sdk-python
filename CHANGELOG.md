@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Reading only some of a run's artifacts**: `get_run_result`, `wait_for_result` and `start_and_wait` take `artifacts=`, a sequence of the new `RunArtifact` enum, sent as one comma-separated `?artifacts=` parameter so the hosted API reads and re-signs only those artifacts; `None` still reads them all, and an empty selection raises `PipelineRequestError` before any request. `RunResults.carries(artifact)` tells an artifact the read did not ask for (absent) from one it asked for that was never written (`None`), and `download_artifacts` by `run_id` now asks only for the artifact its scope walks. See `docs/run-results.md`.
+
+### Changed
+
+- **Run-list rows are `RunHistoryItem` (Breaking)**: `list_runs` and `iterate_runs` yield `RunHistoryItem` rows carrying only `pipeline_run_id`, `status`, `created_at`, `finished_at`, `pipe_code` and `error`, which is all the hosted API now sends on `GET /v1/runs`; read `org_id`, `created_by_user_id`, `method_id`, `workflow_id` and `result_url` from `get_run_detail` instead. `PipelineRun` stays as the whole record and the base of `RunDetail`.
+- **`RunResults.main_stuff` is optional (Breaking)**: it defaults to `None` so a selection without `MAIN_STUFF` parses; a read that asks for the main stuff (no selection, or one naming it) still raises `MissingMainStuffError` when a completed run delivers none.
+
+### Removed
+
+- **`PipeStatus` and `PipelineRun.pipe_statuses` (Breaking)**: the hosted API never sent a per-pipe status map on a run record, so the field and its enum are gone.
+
 ## [v0.14.0] - 2026-09-27
 
 ### Changed

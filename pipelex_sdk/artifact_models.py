@@ -15,6 +15,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from pipelex_sdk._pydantic_utils import empty_list_factory_of
+from pipelex_sdk.runs import RunArtifact
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -58,6 +59,15 @@ class ArtifactScope(StrEnum):
                 return "main_stuff"
             case ArtifactScope.WORKING_MEMORY:
                 return "working_memory"
+
+    @property
+    def run_artifact(self) -> RunArtifact:
+        """The one result artifact this scope needs, so a download by run id reads nothing else."""
+        match self:
+            case ArtifactScope.MAIN_STUFF:
+                return RunArtifact.MAIN_STUFF
+            case ArtifactScope.WORKING_MEMORY:
+                return RunArtifact.WORKING_MEMORY
 
 
 class ArtifactItemError(BaseModel):
