@@ -1,0 +1,46 @@
+pipelex_sdk/client.py
+  s_19015810651d9c::t_9c15915c2173b6 1610-1626
+  s_19015810651d9c::t_d0ccd6dca0818c 85,94,109,799,809-818,820-821,824-825,827,829-830,847-850,852-853,859-865,873,875-876,888,941,961-964,969-970,997,1390-1392,1410
+CHANGELOG.md
+  s_19015810651d9c::t_349156cfb5c9d4 3-17
+README.md
+  s_19015810651d9c::t_0082fe38717c6c 168,199
+docs/architecture.md
+  s_19015810651d9c::t_c1df4dbeefdc32 124-125,228,253,257,296
+docs/artifact-download.md
+  s_19015810651d9c::t_6e5b772bd7d081 100
+docs/run-results.md
+  s_19015810651d9c::t_9f34ae6bcb37a2 21,35,48-65,82
+pipelex_sdk/artifact_models.py
+  s_19015810651d9c::t_93eeb7f1b76eed 18,63-71
+pipelex_sdk/artifacts.py
+  s_19015810651d9c::t_bd503edb28287f 68,157,788,846-852
+pipelex_sdk/product_models.py
+  s_19015810651d9c::t_b7435532ffc5fa 15,597-598,600-619,623,668
+pipelex_sdk/runs.py
+  s_19015810651d9c::t_0dd4bc1abcc958 34,102-139,262-276,283-291,368-377
+tests/unit/test_artifacts.py
+  s_19015810651d9c::t_9602440ca01157 52,55,91,100,102,750,761-777
+tests/unit/test_client_lifecycle.py
+  s_19015810651d9c::t_fec97b0edefaa4 22,340-441,658-701
+tests/unit/test_client_paging.py
+  s_19015810651d9c::t_171ee5cd3450ea 24,33,51
+tests/unit/test_client_product.py
+  s_19015810651d9c::t_11c8ae6bc14aa5 27,463-464,470-471,479-484,486
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a21e2a31827b305d7815cf4bfeab24855550b7a7",
+  "prompts": {},
+  "sessions": {
+    "s_19015810651d9c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7c8fe5d-9da1-4ed6-80d4-812084259a9f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
