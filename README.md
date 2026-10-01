@@ -1,5 +1,7 @@
 # pipelex-sdk
 
+> **This code is moving to `Pipelex/pipelex-sdk`**, one repository for both Pipelex SDKs, the starter templates and the method-app templates, where `pipelex-sdk` will live under `python/`. Version 0.16.0 is the last release made from this repository, and new work waits for the move rather than starting here.
+
 The Python client for the [Pipelex](https://www.pipelex.com) hosted API.
 
 `pipelex-sdk` is the Python counterpart of [`@pipelex/sdk`](https://www.npmjs.com/package/@pipelex/sdk), exactly as [`mthds`](https://pypi.org/project/mthds/) (the `mthds-python` package) is the Python counterpart of the `mthds` npm package. It is the **hosted superset**: the five normative MTHDS Protocol routes (inherited from `mthds`) **plus** the durable run lifecycle **plus** the Pipelex product surface (methods, organizations, billing, API keys, onboarding, storage, run records).
