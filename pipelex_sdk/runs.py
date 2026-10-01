@@ -31,7 +31,7 @@ follows the shape, it does not define it.
 Wire contract mirrors `pipelex-platform`:
     POST /v1/start                           -> RunResultStart   (start, 202)
     GET  /v1/runs/{pipeline_run_id}/status   -> RunRead          (status, self-healing)
-    GET  /v1/runs/{pipeline_run_id}/results  -> 202 / 200 / 409  (results)
+    GET  /v1/runs/{pipeline_run_id}/results  -> 202 / 200 / 409  (results; `?artifacts=` narrows the 200)
 """
 
 from __future__ import annotations
@@ -97,6 +97,44 @@ class RunStatus(StrEnum):
                 | RunStatus.TIMED_OUT
             ):
                 return False
+
+
+# ── Result artifacts ────────────────────────────────────────────────
+
+
+class RunArtifact(StrEnum):
+    """One result artifact the results read can be asked for, named by the response field it fills.
+
+    `get_run_result(run_id, artifacts=[...])` sends the selection as `?artifacts=a,b`, and the
+    platform then reads, re-signs and returns only those artifacts: a field that was not asked for
+    is ABSENT from the body, where a field that was asked for but never written is `null`.
+    `TOKENS_USAGES` names the usage envelope, so asking for it fills `usage_assembly_error` too.
+    Mirrors the platform's own `RunArtifact`.
+    """
+
+    GRAPH_SPEC = "graph_spec"
+    PIPE_IO_CONTRACTS = "pipe_io_contracts"
+    INPUT_FORM = "input_form"
+    OUTPUT_FORM = "output_form"
+    MAIN_STUFF = "main_stuff"
+    WORKING_MEMORY = "working_memory"
+    TOKENS_USAGES = "tokens_usages"
+
+    @property
+    def results_fields(self) -> tuple[str, ...]:
+        """The `RunResults` fields this artifact fills on the hosted results read."""
+        match self:
+            case RunArtifact.TOKENS_USAGES:
+                return ("tokens_usages", "usage_assembly_error")
+            case (
+                RunArtifact.GRAPH_SPEC
+                | RunArtifact.PIPE_IO_CONTRACTS
+                | RunArtifact.INPUT_FORM
+                | RunArtifact.OUTPUT_FORM
+                | RunArtifact.MAIN_STUFF
+                | RunArtifact.WORKING_MEMORY
+            ):
+                return (self,)
 
 
 # ── Responses ───────────────────────────────────────────────────────
@@ -221,34 +259,36 @@ class TokensUsageRecord(BaseModel):
 class RunResults(BaseModel):
     """Result artifacts for a completed run — `GET /v1/runs/{pipeline_run_id}/results`.
 
-    `main_stuff` is the resolved main output content and is ALWAYS present for a
-    completed run (the pipelex >= 0.37 main-stuff invariant): on the hosted path
-    it is the `main_stuff.json` S3 artifact relayed verbatim; on the bare-runner
-    blocking path the SDK resolves it from the returned working memory via the
-    run's `main_stuff_name`, so both paths deliver the same content shape.
-    Consumers read `main_stuff` directly — no shape-guessing. A completed run that
-    cannot deliver a main stuff raises `MissingMainStuffError`. Extension-open
-    (`extra="allow"`): any other server artifact the SDK does not name is preserved
-    on `model_extra` rather than dropped.
+    `main_stuff` is the resolved main output content, and a completed run read in full ALWAYS
+    carries one (the pipelex >= 0.37 main-stuff invariant): on the hosted path it is the
+    `main_stuff.json` S3 artifact relayed verbatim; on the bare-runner blocking path the SDK resolves
+    it from the returned working memory via the run's `main_stuff_name`, so both paths deliver the
+    same content shape. A completed run that cannot deliver a main stuff it was asked for raises
+    `MissingMainStuffError`. Extension-open (`extra="allow"`): any other server artifact the SDK
+    does not name is preserved on `model_extra` rather than dropped.
 
-    Every field but the first two is optional, and two readings of an optional field
-    are distinct on purpose. A key the hosted body did not carry is not in
-    `model_fields_set` and reads `None`; a key relayed as `null` is in the set and
-    reads `None` too. That is how a reader tells "the platform relayed no such key"
-    from "the platform relayed null", where the JS twin reads `undefined` against
-    `null`. The blocking path always answers for every field, so each is set there.
+    Every field but `pipeline_run_id` is optional, and two readings of an optional field are
+    distinct on purpose. A key the hosted body did not carry is not in `model_fields_set` and reads
+    `None`; a key relayed as `null` is in the set and reads `None` too. With an artifact selection
+    (`get_run_result(run_id, artifacts=[...])`) that is exactly "not requested" against "requested
+    but never written": the platform leaves an unselected artifact out of the body and relays a
+    selected-but-unwritten one as `null`. `carries(artifact)` asks the question by artifact rather
+    than by field name. The blocking path always answers for every field, so each is set there.
     Every field is walked on `docs/run-results.md`.
     """
 
     model_config = ConfigDict(extra="allow")
 
     pipeline_run_id: str
-    #: The resolved main output content — always present for a completed run. Typed `Any` because the
-    #: content is polymorphic (a structured output is an object of the concept's fields, a multiple
-    #: output the `{"items": [...]}` envelope the runtime's `ListContent` serialises to, a native is
-    #: wrapped too — `{"text": ...}`, `{"number": ...}`) and may be a valid empty value (an empty
-    #: `items`, an empty `text`); it is never absent for a completed run.
-    main_stuff: Any
+    #: The resolved main output content — never `None` on a completed run whose read asked for it (no
+    #: selection, or one naming `RunArtifact.MAIN_STUFF`): the client raises `MissingMainStuffError`
+    #: rather than hand back a result without it. Absent (not in `model_fields_set`, reading `None`)
+    #: only when a selection left it out. Typed `Any` because the content is polymorphic (a
+    #: structured output is an object of the concept's fields, a multiple output the
+    #: `{"items": [...]}` envelope the runtime's `ListContent` serialises to, a native is wrapped
+    #: too — `{"text": ...}`, `{"number": ...}`) and may be a valid empty value (an empty `items`,
+    #: an empty `text`).
+    main_stuff: Any = None
     #: The executed graph — the same document a local run writes as `graphspec.json`: `meta.mode`
     #: `"live"`, one node per pipe with its status, its timings and its own usage. It reaches the
     #: client on both paths: the hosted path relays the `graphspec.json` artifact verbatim, and on
@@ -324,6 +364,16 @@ class RunResults(BaseModel):
     #: separates "usage broke" from "usage was off" / "pre-artifact run" — all three leave
     #: `tokens_usages` as `None`, so a caller that cares must branch on this, not on the list.
     usage_assembly_error: str | None = None
+
+    def carries(self, artifact: RunArtifact) -> bool:
+        """Whether the results body carried `artifact` at all, whatever its value.
+
+        `False` means the read did not ask for it (a selection that left it out), so its field reads
+        `None` without saying anything about the run. `True` with a `None` value means the artifact
+        was asked for and the platform relayed `null`: it was never written. Always `True` on the
+        blocking path, which answers for every field.
+        """
+        return all(field_name in self.model_fields_set for field_name in artifact.results_fields)
 
 
 # ── Single-shot result lookup outcome (discriminated on `state`) ─────

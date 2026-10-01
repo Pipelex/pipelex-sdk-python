@@ -24,6 +24,7 @@ from pipelex_sdk.product_models import (
     OnboardingRole,
     OnboardingSubmission,
     OrgRole,
+    RunHistoryItem,
     UpdateRunInput,
     UploadInput,
 )
@@ -459,15 +460,15 @@ class TestClientProduct:
             f"{_BASE_URL}/v1/runs?method_id=m1&created_from=2026-08-01T00%3A00%3A00%2B00%3A00&created_to=&limit=10&cursor=c1"
         )
 
-    def test_run_row_parses_with_null_method_id_and_pipe_code(self, mocker: MockerFixture) -> None:
-        """An ad-hoc run belongs to no stored method, and a `main_pipe` run names no pipe."""
+    def test_run_row_parses_the_history_fields_with_a_null_pipe_code(self, mocker: MockerFixture) -> None:
+        """A history row is exactly the history fields; a `main_pipe` run names no pipe."""
         client = self._client()
         row = {
             "pipeline_run_id": "r1",
-            "method_id": None,
             "pipe_code": None,
             "status": "FAILED",
-            "created_at": "t",
+            "created_at": "2026-10-01T10:00:00Z",
+            "finished_at": "2026-10-01T10:00:05Z",
             "error": {"message": "boom", "error_type": "PipeExecutionError"},
         }
         self._mock_send(mocker, client, _response(200, json_body={"items": [row], "next_cursor": None}))
@@ -475,8 +476,14 @@ class TestClientProduct:
         result = asyncio.run(client.list_runs("m1"))
 
         pipeline_run = result.items[0]
-        assert pipeline_run.method_id is None
+        assert isinstance(pipeline_run, RunHistoryItem)
+        assert set(RunHistoryItem.model_fields) == {"pipeline_run_id", "status", "created_at", "finished_at", "pipe_code", "error"}
+        assert pipeline_run.pipeline_run_id == "r1"
+        assert pipeline_run.status == RunStatus.FAILED
+        assert pipeline_run.created_at == "2026-10-01T10:00:00Z"
+        assert pipeline_run.finished_at == "2026-10-01T10:00:05Z"
         assert pipeline_run.pipe_code is None
+        assert pipeline_run.model_extra == {}
         assert pipeline_run.error is not None
         assert pipeline_run.error.message == "boom"
         assert pipeline_run.error.error_type == "PipeExecutionError"

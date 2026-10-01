@@ -49,10 +49,10 @@ from pipelex_sdk.errors import (
     RunStillRunningError,
     ScopeUnavailableError,
 )
-from pipelex_sdk.runs import RunResultCompleted, RunResultFailed, RunResultRunning, RunResults, RunStatus
+from pipelex_sdk.runs import RunArtifact, RunResultCompleted, RunResultFailed, RunResultRunning, RunResults, RunStatus
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Sequence
     from pathlib import Path
 
     from pytest_mock import MockerFixture
@@ -88,6 +88,7 @@ class _FakeClient:
         self._run_result = run_result
         self.resolve_calls: list[list[str]] = []
         self.run_result_calls: list[str] = []
+        self.run_result_selections: list[list[RunArtifact] | None] = []
 
     async def resolve_storage_urls_bulk(self, uris: list[str]) -> BulkResolvedStorageUrls:
         self.resolve_calls.append(list(uris))
@@ -96,8 +97,9 @@ class _FakeClient:
             raise AssertionError(msg)
         return self._resolve(list(uris))
 
-    async def get_run_result(self, run_id: str) -> RunResultState:
+    async def get_run_result(self, run_id: str, *, artifacts: Sequence[RunArtifact] | None = None) -> RunResultState:
         self.run_result_calls.append(run_id)
+        self.run_result_selections.append(None if artifacts is None else list(artifacts))
         if self._run_result is None:
             msg = "this test did not script a run result"
             raise AssertionError(msg)
@@ -745,6 +747,7 @@ class TestArtifacts:
         verdict = asyncio.run(download_artifacts(client, dir_path=target, run_id=_RUN_ID))
 
         assert client.run_result_calls == [_RUN_ID]
+        assert client.run_result_selections == [[RunArtifact.MAIN_STUFF]]
         assert client.resolve_calls == [[_URI_PNG, _URI_PDF]]
         assert verdict.all_saved is True
         assert [artifact.uri for artifact in verdict.artifacts] == [_URI_PNG, _URI_PDF]
@@ -754,6 +757,23 @@ class TestArtifacts:
         assert verdict.saved_paths == [str(target / "items-0.png"), str(target / "items-1.pdf")]
         assert (target / "items-0.png").read_bytes() == _PNG_BYTES
         assert (target / "items-1.pdf").read_bytes() == _PDF_BYTES
+
+    def test_reads_by_run_id_asks_only_for_the_working_memory_it_walks(self, mocker: MockerFixture, tmp_path: Path) -> None:
+        """A working-memory download reads that one artifact, so a result without a main stuff is no fault."""
+        working_memory = {"root": {"doc": {"concept": "native.Document", "content": _content(_URI_PDF)}}, "aliases": {}}
+        results = RunResults.model_validate({"pipeline_run_id": _RUN_ID, "working_memory": working_memory})
+        client = _FakeClient(
+            resolve=_resolver(_resolved(_URI_PDF)),
+            run_result=RunResultCompleted(pipeline_run_id=_RUN_ID, result=results),
+        )
+        _patch_storage(mocker, _serving(_PDF_BYTES))
+        options = DownloadArtifactsOptions(scope=ArtifactScope.WORKING_MEMORY)
+        verdict = asyncio.run(download_artifacts(client, dir_path=tmp_path / "out", run_id=_RUN_ID, options=options))
+
+        assert client.run_result_selections == [[RunArtifact.WORKING_MEMORY]]
+        assert verdict.scope == ArtifactScope.WORKING_MEMORY
+        assert verdict.all_saved is True
+        assert [artifact.uri for artifact in verdict.artifacts] == [_URI_PDF]
 
     def test_takes_results_in_hand_without_re_reading_and_creates_the_directory(self, mocker: MockerFixture, tmp_path: Path) -> None:
         client = _FakeClient(resolve=_resolver(_resolved(_URI_PDF)))

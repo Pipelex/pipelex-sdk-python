@@ -5,7 +5,7 @@ The envelope lives here because these are the routes that still use it. `MthdsFi
 `CrateRequestBase` and `CrateInvalidReport` used to sit in a `build_models` module beside the
 `/v1/build/inputs` wire models; those went when `prepare_inputs` moved its signature source to
 the input-form descriptor and this SDK stopped calling `/v1/build/*` (workspace campaign
-`wip/build-retirement/`). Nothing about the envelope changed in the move.
+L-260829-848001). Nothing about the envelope changed in the move.
 
 `/v1/resolve` emits the normalized library crate, `/v1/codegen` projects that crate into stamped
 typed artifacts plus their lock. Both are Pipelex API extensions (NOT MTHDS Protocol routes) over
