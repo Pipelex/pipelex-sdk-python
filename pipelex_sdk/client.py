@@ -82,10 +82,10 @@ from pipelex_sdk.product_models import (
     MethodSummary,
     PipelexApiKeyCreated,
     PipelexApiKeyList,
-    PipelineRun,
     PlanView,
     ResolvedStorageUrl,
     RunDetail,
+    RunHistoryItem,
     RunPage,
     SubscriptionResponse,
     UploadedFile,
@@ -94,6 +94,7 @@ from pipelex_sdk.product_models import (
 from pipelex_sdk.runs import (
     PipelexRunResultStart,
     PollInfo,
+    RunArtifact,
     RunRead,
     RunResultCompleted,
     RunResultFailed,
@@ -108,7 +109,7 @@ from pipelex_sdk.user_agent import AppInfo, build_user_agent
 from pipelex_sdk.validation_models import PipelexValidationResultAdapter, ValidationErrorItem
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
@@ -798,7 +799,7 @@ class PipelexAPIClient(MthdsAPIClient):
             run = run.model_copy(update={"retry_after_seconds": retry_after})
         return run
 
-    async def get_run_result(self, run_id: str) -> RunResultState:
+    async def get_run_result(self, run_id: str, *, artifacts: Sequence[RunArtifact] | None = None) -> RunResultState:
         """Single-shot result lookup — `GET /v1/runs/{run_id}/results`.
 
         Maps the platform's poll semantics to a discriminated union:
@@ -808,12 +809,28 @@ class PipelexAPIClient(MthdsAPIClient):
         - HTTP 409 → `failed` (terminal non-`COMPLETED`), carrying the problem's `detail` as `message`,
           its `run_status` member as `status` and its `error` member, the run's stored report, typed
 
+        Args:
+            run_id: The run to read.
+            artifacts: Which result artifacts to read, sent as one comma-separated `?artifacts=`
+                parameter. `None` (the default) reads them all. With a selection the platform
+                reads, re-signs and returns only those: an artifact left out is absent from the
+                result (`RunResults.carries` answers `False`), one asked for but never written is
+                `None`. A history row that shows a run's output asks for `[RunArtifact.MAIN_STUFF]`
+                alone instead of paying for the graph and the forms. The main-stuff check below
+                applies only when `main_stuff` was asked for.
+
         Raises:
+            PipelineRequestError: If `artifacts` is an empty selection, which names nothing to read.
+            MissingMainStuffError: If a completed run asked for its main stuff delivers none.
             RunLifecycleUnavailableError: If the lifecycle routes are absent (a bare runner).
             ApiUnreachableError: If the host cannot be reached (DNS / connect / TLS / timeout).
-            ApiResponseError: For a genuine run-not-found 404 or any other non-2xx response.
+            ApiResponseError: For a genuine run-not-found 404 or any other non-2xx response
+                (an artifact name the platform does not know is its `400`).
         """
+        selection = _artifact_selection(artifacts)
         endpoint = f"{_RUNS}/{quote(run_id, safe='')}/results"
+        if selection is not None:
+            endpoint = f"{endpoint}?{urlencode({'artifacts': ','.join(selection)}, safe=',')}"
         url = self._url(endpoint)
         response = await self._send_or_unreachable("GET", url, content=None, request_timeout=_POLL_REQUEST_TIMEOUT_SECONDS)
         status_code = response.status_code
@@ -830,18 +847,25 @@ class PipelexAPIClient(MthdsAPIClient):
         self._raise_if_lifecycle_unavailable(status=response.status_code, body=response.text, url=url)
         if not response.is_success:
             self._raise_api_response_error(method="GET", endpoint=endpoint, response=response)
-        # Inspect the decoded payload before validating: `main_stuff` is a required field on `RunResults`,
-        # so a `200` that omits the key would raise a raw Pydantic error instead of the typed
-        # `MissingMainStuffError`. `.get(...) is None` covers both the missing-key and explicit-null cases
-        # for the same un-deliverable-output condition (a present-but-falsy main stuff — `[]`, `0` — stays).
+        # A completed run asked for its main stuff must deliver one. `.get(...) is None` covers both the
+        # missing-key and explicit-null cases for the same un-deliverable-output condition (a
+        # present-but-falsy main stuff — `[]`, `0` — stays). A selection that left `main_stuff` out
+        # asked for none, so its absence there is the answer, not a fault.
         payload = response.json()
-        if isinstance(payload, dict) and cast("dict[str, Any]", payload).get("main_stuff") is None:
+        wants_main_stuff = selection is None or RunArtifact.MAIN_STUFF in selection
+        if wants_main_stuff and isinstance(payload, dict) and cast("dict[str, Any]", payload).get("main_stuff") is None:
             msg = f"Completed run '{run_id}' returned no main stuff — a completed run always delivers a main stuff."
             raise MissingMainStuffError(msg, run_id=run_id)
         result = RunResults.model_validate(payload)
         return RunResultCompleted(pipeline_run_id=run_id, result=result)
 
-    async def wait_for_result(self, run_id: str, options: WaitForResultOptions | None = None) -> RunResults:
+    async def wait_for_result(
+        self,
+        run_id: str,
+        options: WaitForResultOptions | None = None,
+        *,
+        artifacts: Sequence[RunArtifact] | None = None,
+    ) -> RunResults:
         """Poll a run to a terminal state and return its result.
 
         Resolves on `COMPLETED`, raises `RunFailedError` on any other terminal status — carrying the
@@ -849,7 +873,10 @@ class PipelexAPIClient(MthdsAPIClient):
         `RunTimeoutError` if `timeout_seconds` elapses first (the run keeps executing server-side —
         resume later by `run_id`). Honors the server's `Retry-After`. Async-native: cancelling the
         awaiting task raises `asyncio.CancelledError` out of this loop, leaving the run resumable.
+        `artifacts` narrows every results read of the loop, exactly as on `get_run_result`.
         """
+        # Refused before the first poll, so an empty selection never waits out a timeout to fail.
+        _artifact_selection(artifacts)
         opts = options or WaitForResultOptions()
         started_at = monotonic()
         attempt = 0
@@ -861,7 +888,7 @@ class PipelexAPIClient(MthdsAPIClient):
                 raise RunTimeoutError(_timeout_message(run_id, opts.timeout_seconds), run_id=run_id, timeout_seconds=opts.timeout_seconds)
 
             try:
-                state = await asyncio.wait_for(self.get_run_result(run_id), timeout=remaining)
+                state = await asyncio.wait_for(self.get_run_result(run_id, artifacts=artifacts), timeout=remaining)
             except TimeoutError as exc:
                 raise RunTimeoutError(_timeout_message(run_id, opts.timeout_seconds), run_id=run_id, timeout_seconds=opts.timeout_seconds) from exc
 
@@ -914,6 +941,7 @@ class PipelexAPIClient(MthdsAPIClient):
         *,
         method_ref: str | None = None,
         method_id: str | None = None,
+        artifacts: Sequence[RunArtifact] | None = None,
     ) -> RunResults:
         """Start a run and wait for its result — the whole lifecycle in one call, self-healing
         across hosted and bare runners.
@@ -933,10 +961,16 @@ class PipelexAPIClient(MthdsAPIClient):
         blocking fallback, and dropping `method_id` there would turn a server-side 422 that
         names the key into a silently different run.
 
+        `artifacts` narrows the hosted results read, as on `get_run_result`. The blocking path
+        ignores it: the execute response already holds every artifact, so there is nothing to save
+        by narrowing it, and the result it returns answers for every field.
+
         Raises:
             RunFailedError: If the run reaches a terminal status other than COMPLETED.
             RunTimeoutError: If the poll budget elapses (the run keeps executing — resume by id).
         """
+        # Refused before anything starts, so an empty selection never costs a run.
+        _artifact_selection(artifacts)
         if await self._supports_run_lifecycle():
             try:
                 started = await self.start(
@@ -963,7 +997,7 @@ class PipelexAPIClient(MthdsAPIClient):
                     method_ref=method_ref,
                     method_id=method_id,
                 )
-            return await self.wait_for_result(started.pipeline_run_id, options=wait_options)
+            return await self.wait_for_result(started.pipeline_run_id, options=wait_options, artifacts=artifacts)
 
         return await self._execute_blocking(
             pipe_code=pipe_code,
@@ -1388,7 +1422,9 @@ class PipelexAPIClient(MthdsAPIClient):
             cursor: The `next_cursor` of the previous page, passed back opaquely.
 
         Returns:
-            A `RunPage` of `PipelineRun` rows. For the whole history, prefer `iterate_runs`.
+            A `RunPage` of `RunHistoryItem` rows — what a history row shows, nothing more. Open
+            one run with `get_run_detail` for the whole record. For the whole history, prefer
+            `iterate_runs`.
 
         Raises:
             ApiResponseError: On any non-2xx. Note that every `/v1/runs*` product route sits
@@ -1406,7 +1442,7 @@ class PipelexAPIClient(MthdsAPIClient):
         created_from: str | None = None,
         created_to: str | None = None,
         limit: int | None = None,
-    ) -> AsyncIterator[PipelineRun]:
+    ) -> AsyncIterator[RunHistoryItem]:
         """Yield every run of a method, following the cursors — `GET /v1/runs`.
 
         The same loop as `iterate_methods` with one deliberate difference: an **empty page ends
@@ -1604,6 +1640,23 @@ def _product_query(params: dict[str, str | int | None]) -> str:
     if not kept:
         return ""
     return "?" + urlencode(kept)
+
+
+def _artifact_selection(artifacts: Sequence[RunArtifact] | None) -> tuple[RunArtifact, ...] | None:
+    """Normalise a results-read selection: `None` reads everything, anything else is deduplicated
+    into the enum's declaration order, so the same selection always builds the same query.
+
+    An empty selection names nothing to read; the platform refuses it with a `400`, and it is
+    refused here first, before any request, with the request-shape error the client already raises
+    for an empty `validate_files`.
+    """
+    if artifacts is None:
+        return None
+    requested = set(artifacts)
+    if not requested:
+        msg = "An artifact selection must name at least one RunArtifact; pass artifacts=None to read them all."
+        raise PipelineRequestError(msg)
+    return tuple(artifact for artifact in RunArtifact if artifact in requested)
 
 
 def _is_gateway_timeout(exc: ApiResponseError | httpx.TimeoutException, elapsed_seconds: float) -> bool:

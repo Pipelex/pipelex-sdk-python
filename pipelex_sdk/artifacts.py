@@ -65,7 +65,7 @@ from pipelex_sdk.errors import (
     RunStillRunningError,
     ScopeUnavailableError,
 )
-from pipelex_sdk.runs import RunResultCompleted, RunResultFailed, RunResultRunning, RunResults
+from pipelex_sdk.runs import RunArtifact, RunResultCompleted, RunResultFailed, RunResultRunning, RunResults
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Sequence
@@ -154,7 +154,7 @@ class BulkResolveClient(Protocol):
 class ArtifactCapableClient(BulkResolveClient, Protocol):
     """What `download_artifacts` needs on top: the single-shot result lookup, for the `run_id` arm."""
 
-    async def get_run_result(self, run_id: str) -> RunResultState: ...
+    async def get_run_result(self, run_id: str, *, artifacts: Sequence[RunArtifact] | None = None) -> RunResultState: ...
 
 
 # ── locate_artifacts / collect_artifacts ─────────────────────────────
@@ -785,7 +785,7 @@ async def download_artifacts(
     if bool(run_id) == (results is not None):
         msg = "download_artifacts takes exactly one of `run_id` (the results are re-read) or `results` (a RunResults in hand)."
         raise ArtifactOperationError(msg)
-    read_results = results if results is not None else await _read_completed_results(client, cast("str", run_id))
+    read_results = results if results is not None else await _read_completed_results(client, cast("str", run_id), scope)
     walked = _scope_value(read_results, scope)
 
     # The walk's own record names the files; `locations` is what the verdict reports.
@@ -843,9 +843,13 @@ async def download_artifacts(
     return verdict
 
 
-async def _read_completed_results(client: ArtifactCapableClient, run_id: str) -> RunResults:
-    """Read a run's results by id, turning a run that has not completed into its typed error."""
-    state = await client.get_run_result(run_id)
+async def _read_completed_results(client: ArtifactCapableClient, run_id: str, scope: ArtifactScope) -> RunResults:
+    """Read a run's results by id, turning a run that has not completed into its typed error.
+
+    Asks for the scope's one artifact only, so a download never pays for the graph, the forms or
+    the usage it does not walk.
+    """
+    state = await client.get_run_result(run_id, artifacts=[scope.run_artifact])
     if isinstance(state, RunResultRunning):
         retry = state.retry_after_seconds
         hint = f" — retry in {retry}s." if retry is not None else "."

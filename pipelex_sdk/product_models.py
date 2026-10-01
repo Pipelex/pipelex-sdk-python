@@ -12,7 +12,7 @@ rejected — the SDK never has to ship just to read a newly-added field. Input
 models name exactly what the routes accept.
 
 These are Pipelex-branded (the hosted product surface), so they live in this SDK,
-not in `mthds`. `PipelineRun.status` reuses the run-lifecycle `RunStatus`.
+not in `mthds`. `RunHistoryItem.status` and `PipelineRun.status` reuse the run-lifecycle `RunStatus`.
 """
 
 from __future__ import annotations
@@ -594,18 +594,33 @@ class UploadedFile(BaseModel):
 # detail read, and the admin-update route.
 
 
-class PipeStatus(StrEnum):
-    """Per-pipe progress marker surfaced in a run's `pipe_statuses` map."""
+class RunHistoryItem(BaseModel):
+    """One row of a method's run list — `GET /v1/runs?method_id=…`.
 
-    SCHEDULED = "scheduled"
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    SKIPPED = "skipped"
+    What a run-history row shows, and nothing else: which run, its status, when it started and
+    finished, which pipe it ran and, for a failed run, why. The rest of a run record — its
+    organization, its creator, its method (the caller just named it), its workflow id, its result
+    prefix — is either already known to the caller or only meaningful once a run is opened, which
+    `get_run_detail` serves.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    pipeline_run_id: str
+    status: RunStatus
+    created_at: str
+    finished_at: str | None = None
+    pipe_code: str | None = None
+    """The pipe that ran, when it was named. A run that let the bundle's `main_pipe` decide
+    has none to report, so the platform serves this as null."""
+
+    error: LenientRunErrorReport = None
+    """The run's stored report, kept on the row so opening a failed run from history shows why
+    without another read. `None` on every run that did not fail."""
 
 
 class PipelineRun(BaseModel):
-    """One run record in a method's run list — `GET /v1/runs?method_id=…`."""
+    """A whole run record — the base of `RunDetail`, the shape `GET /v1/runs/{id}` serves."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -624,7 +639,6 @@ class PipelineRun(BaseModel):
     status: RunStatus
     result_url: str | None = None
     error: LenientRunErrorReport = None
-    pipe_statuses: dict[str, PipeStatus] | None = None
     created_at: str
     finished_at: str | None = None
 
@@ -651,7 +665,7 @@ class RunPage(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    items: list[PipelineRun]
+    items: list[RunHistoryItem]
     next_cursor: str | None = None
 
 
