@@ -6,8 +6,9 @@ declared kind (`document` / `image`), assets are uploaded and rewritten to `pipe
 in `url`, http(s)/storage references pass through, dedup keys on source identity, and the call
 is copy-on-write.
 
-The fake client returns a canned `PipelexValidationReport` from `validate` and records the call,
-so the request shape is asserted and not just the outcome; one wiring test drives the real client.
+The fake client returns a canned `/v1/pipe-io` answer from `pipe_io` and records the request, so the
+request shape is asserted and not just the outcome; the wiring tests drive the real client, including
+the typed selection refusal it must parse off the wire.
 """
 
 import asyncio
@@ -33,11 +34,11 @@ from mthds.protocol.pipe_io_contracts import PresenceMarker
 from pytest_mock import MockerFixture
 
 from pipelex_sdk.client import PipelexAPIClient
-from pipelex_sdk.crate_models import MthdsFileItem
+from pipelex_sdk.crate_models import CrateInvalidReport, MthdsFileItem, PipeIORequest, PipeIOResponse, PipeIOValidReport
 from pipelex_sdk.errors import ApiResponseError, InputPreparationError, RejectedAssetError
 from pipelex_sdk.prepare_inputs import prepare_inputs
 from pipelex_sdk.product_models import UploadedFile, UploadInput
-from pipelex_sdk.validation_models import PipelexInvalidReport, PipelexValidationReport, PipelexValidationResult
+from tests.unit.test_data import PipeIOBodies
 
 _BASE_URL = "http://localhost:8081"
 _FILES = [MthdsFileItem(content='domain = "demo"')]
@@ -58,51 +59,51 @@ def _form(*fields: InputFormField, pipe_ref: str = _PIPE_REF) -> dict[str, PipeI
     return {pipe_ref: PipeInputFormDescriptor(fields=list(fields))}
 
 
-def _report(
-    input_form: dict[str, PipeInputFormDescriptor] | None,
-    *,
-    bundle_blueprint: dict[str, Any] | None = None,
-    default_pipe_ref: str | None = None,
-) -> PipelexValidationReport:
-    return PipelexValidationReport(
+def _report(input_form: dict[str, PipeInputFormDescriptor], *, pipe_ref: str | None = _PIPE_REF) -> PipeIOValidReport:
+    """A single-pipe valid answer: the route resolved `pipe_ref` and keyed the descriptor by it."""
+    return PipeIOValidReport(
         is_valid=True,
-        bundle_blueprint=bundle_blueprint if bundle_blueprint is not None else {},
-        default_pipe_ref=default_pipe_ref,
+        pipe_ref=pipe_ref,
+        pipe_io_contracts={},
         input_form=input_form,
+        output_form={},
+        default_pipe_ref=pipe_ref,
+        pending_signatures=[],
+        is_runnable=True,
     )
 
 
-class _FakePrepareClient:
-    """Fake client: `validate` returns the given report and records the call; `upload` counts calls."""
+def _api_error(status: int, body: dict[str, Any]) -> ApiResponseError:
+    """The `ApiResponseError` the real client raises for this answer, built through its own error seam."""
+    client = PipelexAPIClient(api_key="test-token", base_url=_BASE_URL)
+    response = httpx.Response(status, json=body, request=httpx.Request("POST", f"{_BASE_URL}/v1/pipe-io"))
+    with pytest.raises(ApiResponseError) as exc_info:
+        client._raise_api_response_error(method="POST", endpoint="pipe-io", response=response)
+    return exc_info.value
 
-    def __init__(self, result: PipelexValidationResult, *, upload_error: Exception | None = None) -> None:
+
+class _FakePrepareClient:
+    """Fake client: `pipe_io` returns the given answer (or raises) and records the request; `upload` counts calls."""
+
+    def __init__(
+        self,
+        result: PipeIOResponse | None = None,
+        *,
+        pipe_io_error: ApiResponseError | None = None,
+        upload_error: Exception | None = None,
+    ) -> None:
         self._result = result
+        self._pipe_io_error = pipe_io_error
         self._upload_error = upload_error
         self.upload_calls: list[UploadInput] = []
-        self.validate_calls: list[dict[str, Any]] = []
+        self.pipe_io_calls: list[PipeIORequest] = []
         self._counter = 0
 
-    async def validate(
-        self,
-        mthds_contents: list[str] | None = None,
-        allow_signatures: bool = False,
-        mthds_sources: list[str] | None = None,
-        render: list[str] | None = None,
-        views: list[str] | None = None,
-        *,
-        method_ref: str | None = None,
-        method_id: str | None = None,
-    ) -> PipelexValidationResult:
-        self.validate_calls.append(
-            {
-                "mthds_contents": mthds_contents,
-                "allow_signatures": allow_signatures,
-                "mthds_sources": mthds_sources,
-                "views": views,
-                "method_ref": method_ref,
-                "method_id": method_id,
-            }
-        )
+    async def pipe_io(self, request: PipeIORequest) -> PipeIOResponse:
+        self.pipe_io_calls.append(request)
+        if self._pipe_io_error is not None:
+            raise self._pipe_io_error
+        assert self._result is not None
         return self._result
 
     async def upload(self, upload_input: UploadInput) -> UploadedFile:
@@ -120,45 +121,40 @@ def _image_client(name: str = "photo", **upload_error: Any) -> _FakePrepareClien
 class TestPrepareInputs:
     # ── The signature call ────────────────────────────────────────────────
 
-    def test_asks_validate_for_the_input_form_view(self) -> None:
+    def test_asks_pipe_io_for_the_pipe_the_route_selects(self) -> None:
         client = _image_client()
 
         asyncio.run(prepare_inputs(client, files=_FILES, inputs={}))
 
-        call = client.validate_calls[0]
-        assert call["views"] == ["input_form"]
-        assert call["allow_signatures"] is True
-        assert call["mthds_contents"] == ['domain = "demo"']
-        # No file names a source, so none is synthesized — the server never sees a
-        # length-mismatched `mthds_sources` array.
-        assert call["mthds_sources"] is None
+        # One call, one pipe, no echo: the route selects the pipe when none is named.
+        assert client.pipe_io_calls == [PipeIORequest(files=_FILES)]
+        request = client.pipe_io_calls[0]
+        assert request.pipe_ref is None
+        assert request.all_pipes is False
+        assert request.include_files is False
 
-    def test_labels_every_content_once_any_file_names_a_source(self) -> None:
+    def test_passes_the_files_through_as_given(self) -> None:
+        # The route takes the crate envelope, so each file keeps its own `source` — none is synthesized.
         client = _image_client()
         files = [MthdsFileItem(content="a"), MthdsFileItem(content="b", source="b.mthds")]
 
         asyncio.run(prepare_inputs(client, files=files, inputs={}))
 
-        assert client.validate_calls[0]["mthds_sources"] == ["inline://file-1.mthds", "b.mthds"]
+        assert client.pipe_io_calls[0].files == files
 
     def test_method_ref_is_a_server_side_pass_through(self) -> None:
         client = _image_client()
 
         asyncio.run(prepare_inputs(client, method_ref="github.com/Pipelex/methods/documents", inputs={}))
 
-        call = client.validate_calls[0]
-        assert call["method_ref"] == "github.com/Pipelex/methods/documents"
-        assert call["mthds_contents"] is None
-        assert call["views"] == ["input_form"]
+        assert client.pipe_io_calls == [PipeIORequest(method_ref="github.com/Pipelex/methods/documents")]
 
     def test_method_id_is_a_server_side_pass_through(self) -> None:
         client = _image_client()
 
         asyncio.run(prepare_inputs(client, method_id="mt_abc123", inputs={}))
 
-        call = client.validate_calls[0]
-        assert call["method_id"] == "mt_abc123"
-        assert call["mthds_contents"] is None
+        assert client.pipe_io_calls == [PipeIORequest(method_id="mt_abc123")]
 
     # ── The three selectors ───────────────────────────────────────────────
 
@@ -167,7 +163,7 @@ class TestPrepareInputs:
 
         with pytest.raises(InputPreparationError, match="no method selector"):
             asyncio.run(prepare_inputs(client, inputs={"photo": bytes([1])}))
-        assert client.validate_calls == []
+        assert client.pipe_io_calls == []
         assert client.upload_calls == []
 
     @pytest.mark.parametrize(
@@ -183,7 +179,7 @@ class TestPrepareInputs:
 
         with pytest.raises(InputPreparationError, match="exactly one method selector"):
             asyncio.run(prepare_inputs(client, inputs={}, **kwargs))
-        assert client.validate_calls == []
+        assert client.pipe_io_calls == []
 
     def test_empty_selectors_are_absent_beside_a_real_one(self) -> None:
         # `files=[]` and a blank `method_id` select nothing, so they may sit beside a real
@@ -192,7 +188,7 @@ class TestPrepareInputs:
 
         asyncio.run(prepare_inputs(client, files=[], method_ref="github.com/o/r", method_id="   ", inputs={}))
 
-        assert client.validate_calls[0]["method_ref"] == "github.com/o/r"
+        assert client.pipe_io_calls == [PipeIORequest(method_ref="github.com/o/r")]
 
     def test_only_empty_selectors_is_no_selector(self) -> None:
         client = _image_client()
@@ -217,90 +213,125 @@ class TestPrepareInputs:
             asyncio.run(prepare_inputs(client, files=_FILES, inputs={}, **kwargs))
 
         assert str(exc_info.value) == f"Cannot prepare inputs: `{argument}` must be a string, got {type_name}."
-        assert client.validate_calls == []
+        assert client.pipe_io_calls == []
         assert client.upload_calls == []
 
     def test_a_non_string_pipe_ref_is_refused_rather_than_silently_defaulted(self) -> None:
-        # Read as absent, it would be absorbed by the single-declared-pipe default: the pipe
-        # the caller named would vanish without a word. Refused on the pre-request boundary.
+        # Read as absent, it would let the route select the default pipe: the pipe the caller
+        # named would vanish without a word. Refused on the pre-request boundary.
         client = _image_client()
 
         with pytest.raises(InputPreparationError) as exc_info:
             asyncio.run(prepare_inputs(client, files=_FILES, pipe_ref=cast("str", 123), inputs={}))
 
         assert str(exc_info.value) == "Cannot prepare inputs: `pipe_ref` must be a string, got int."
-        assert client.validate_calls == []
+        assert client.pipe_io_calls == []
 
-    # ── Pipe selection ────────────────────────────────────────────────────
+    # ── Pipe selection: the route's ───────────────────────────────────────
 
-    def test_uses_the_single_declared_pipe_when_no_ref_is_given(self) -> None:
+    def test_reads_the_descriptor_of_the_pipe_the_route_resolved(self) -> None:
+        # No `pipe_ref`: the route's chain picks `demo.second`, and the walk follows its
+        # descriptor, which declares `photo` as an image.
+        client = _FakePrepareClient(_report(_form(ImageField(name="photo", **_required()), pipe_ref="demo.second"), pipe_ref="demo.second"))
+
+        prepared = asyncio.run(prepare_inputs(client, files=_FILES, inputs={"photo": bytes([1])}))
+
+        assert prepared.inputs == {"photo": {"url": "pipelex-storage://user/assets/1.bin"}}
+
+    def test_an_explicit_pipe_ref_is_sent_to_the_route(self) -> None:
+        client = _FakePrepareClient(_report(_form(ImageField(name="photo", **_required()), pipe_ref="demo.second"), pipe_ref="demo.second"))
+
+        prepared = asyncio.run(prepare_inputs(client, files=_FILES, pipe_ref=" demo.second ", inputs={"photo": bytes([1])}))
+
+        # Trimmed on the way out, like every caller-supplied selector.
+        assert client.pipe_io_calls == [PipeIORequest(files=_FILES, pipe_ref="demo.second")]
+        assert prepared.inputs == {"photo": {"url": "pipelex-storage://user/assets/1.bin"}}
+
+    def test_a_bare_pipe_ref_is_refused_before_any_request(self) -> None:
+        # The runner would still resolve a bare code across domains; preparation is
+        # qualified-only, so it refuses before spending the round-trip.
         client = _image_client()
 
-        prepared = asyncio.run(prepare_inputs(client, files=_FILES, inputs={"photo": bytes([1])}))
-
-        assert prepared.inputs == {"photo": {"url": "pipelex-storage://user/assets/1.bin"}}
-
-    def test_typed_default_pipe_ref_outranks_the_blueprint(self) -> None:
-        input_form = {
-            "demo.first": PipeInputFormDescriptor(fields=[TextField(name="photo", **_required())]),
-            "demo.second": PipeInputFormDescriptor(fields=[ImageField(name="photo", **_required())]),
-        }
-        client = _FakePrepareClient(_report(input_form, bundle_blueprint={"domain": "demo", "main_pipe": "first"}, default_pipe_ref="demo.second"))
-
-        prepared = asyncio.run(prepare_inputs(client, files=_FILES, inputs={"photo": bytes([1])}))
-
-        # `demo.second` declares `photo` as an image; `demo.first` declares it as text.
-        assert prepared.inputs == {"photo": {"url": "pipelex-storage://user/assets/1.bin"}}
-
-    def test_falls_back_to_the_blueprint_main_pipe_qualified_by_its_domain(self) -> None:
-        input_form = {
-            "demo.first": PipeInputFormDescriptor(fields=[ImageField(name="photo", **_required())]),
-            "demo.second": PipeInputFormDescriptor(fields=[TextField(name="photo", **_required())]),
-        }
-        client = _FakePrepareClient(_report(input_form, bundle_blueprint={"domain": "demo", "main_pipe": "first"}))
-
-        prepared = asyncio.run(prepare_inputs(client, files=_FILES, inputs={"photo": bytes([1])}))
-
-        assert prepared.inputs == {"photo": {"url": "pipelex-storage://user/assets/1.bin"}}
-
-    def test_explicit_pipe_ref_wins(self) -> None:
-        input_form = {
-            "demo.first": PipeInputFormDescriptor(fields=[TextField(name="photo", **_required())]),
-            "demo.second": PipeInputFormDescriptor(fields=[ImageField(name="photo", **_required())]),
-        }
-        client = _FakePrepareClient(_report(input_form, default_pipe_ref="demo.first"))
-
-        prepared = asyncio.run(prepare_inputs(client, files=_FILES, pipe_ref="demo.second", inputs={"photo": bytes([1])}))
-
-        assert prepared.inputs == {"photo": {"url": "pipelex-storage://user/assets/1.bin"}}
-
-    def test_bare_pipe_ref_is_refused_naming_the_qualified_candidates(self) -> None:
-        client = _image_client()
-
-        with pytest.raises(InputPreparationError, match="must be qualified") as exc_info:
+        with pytest.raises(InputPreparationError) as exc_info:
             asyncio.run(prepare_inputs(client, files=_FILES, pipe_ref="main", inputs={}))
-        assert _PIPE_REF in str(exc_info.value)
 
-    def test_unknown_pipe_ref_is_refused_naming_the_candidates(self) -> None:
+        assert str(exc_info.value) == 'Cannot prepare inputs: `pipe_ref` must be qualified (`domain.pipe_code`), got the bare "main".'
+        assert client.pipe_io_calls == []
+
+    @pytest.mark.parametrize("pipe_ref", ["deps->legal.summarize", "deps->summarize"])
+    def test_a_dependency_package_pipe_ref_is_refused_before_any_request(self, pipe_ref: str) -> None:
+        # The alias names a dependency package's pipe, and the route loads no address-based
+        # dependency. Checked before the bare rule, so `deps->summarize` is named for what it is.
         client = _image_client()
 
-        with pytest.raises(InputPreparationError, match="declares no pipe") as exc_info:
-            asyncio.run(prepare_inputs(client, files=_FILES, pipe_ref="demo.absent", inputs={}))
-        assert _PIPE_REF in str(exc_info.value)
+        with pytest.raises(InputPreparationError) as exc_info:
+            asyncio.run(prepare_inputs(client, files=_FILES, pipe_ref=pipe_ref, inputs={}))
 
-    def test_several_pipes_and_no_default_is_an_honest_refusal(self) -> None:
-        # The manifest-only `main_pipe` gap: a fetched package may name its entry pipe in
-        # METHODS.toml alone, which the report never carries. The error lists the candidates
-        # so the caller's fix is one line.
-        input_form = {
-            "demo.first": PipeInputFormDescriptor(fields=[]),
-            "demo.second": PipeInputFormDescriptor(fields=[]),
-        }
-        client = _FakePrepareClient(_report(input_form))
+        assert str(exc_info.value) == (
+            f'Cannot prepare inputs: `pipe_ref` "{pipe_ref}" names a dependency package\'s pipe. '
+            "Preparation covers the method's own pipes: name one as `domain.pipe_code`."
+        )
+        assert client.pipe_io_calls == []
 
-        with pytest.raises(InputPreparationError, match="no single default pipe") as exc_info:
-            asyncio.run(prepare_inputs(client, method_ref="github.com/Pipelex/methods/documents", inputs={}))
-        assert "demo.first, demo.second" in str(exc_info.value)
+    @pytest.mark.parametrize(
+        ("body", "detail"),
+        [
+            (PipeIOBodies.UNKNOWN_PIPE_REFUSAL, "Pipe 'smoke.absent' not found in the submitted closure."),
+            (
+                PipeIOBodies.AMBIGUOUS_PIPE_REFUSAL,
+                "No `pipe_ref` was given and the closure declares several `main_pipe`s (alpha.run, beta.run) — name the pipe explicitly.",
+            ),
+        ],
+    )
+    def test_a_refused_selection_is_an_input_preparation_error(self, body: dict[str, Any], detail: str) -> None:
+        refusal = _api_error(422, body)
+        client = _FakePrepareClient(pipe_io_error=refusal)
+
+        with pytest.raises(InputPreparationError) as exc_info:
+            asyncio.run(prepare_inputs(client, files=_FILES, inputs={"photo": bytes([1])}))
+
+        assert str(exc_info.value) == f"Cannot prepare inputs: the pipe could not be selected — {detail}"
+        # The whole problem document stays reachable for a caller who needs it.
+        assert exc_info.value.__cause__ is refusal
+        assert client.upload_calls == []
+
+    @pytest.mark.parametrize(
+        ("status", "body"),
+        [
+            (422, PipeIOBodies.REQUEST_SHAPE_REFUSAL),
+            (422, {**PipeIOBodies.UNKNOWN_PIPE_REFUSAL, "error_type": "MethodRefFetchError"}),
+            (404, {"detail": "Unknown method", "code": "not_found"}),
+            (500, {"detail": "PipeIOContractError", "error_type": "PipeIOContractError"}),
+        ],
+    )
+    def test_every_other_error_is_left_as_it_is(self, status: int, body: dict[str, Any]) -> None:
+        # Only the entry-lookup errors are a selection; a `422` of any other type is not.
+        error = _api_error(status, body)
+        client = _FakePrepareClient(pipe_io_error=error)
+
+        with pytest.raises(ApiResponseError) as exc_info:
+            asyncio.run(prepare_inputs(client, method_id="mt_1", inputs={}))
+
+        assert exc_info.value is error
+
+    @pytest.mark.parametrize(
+        ("input_form", "pipe_ref"),
+        [
+            ({}, _PIPE_REF),
+            (_form(ImageField(name="photo", **_required()), pipe_ref="demo.other"), _PIPE_REF),
+            (_form(ImageField(name="photo", **_required())), None),
+        ],
+    )
+    def test_an_answer_without_the_selected_descriptor_is_an_error_not_a_silent_no_op(
+        self, input_form: dict[str, PipeInputFormDescriptor], pipe_ref: str | None
+    ) -> None:
+        # Never a silent degrade to "no uploads": without the descriptor there is no signature
+        # to prepare against, and the caller's local path would travel to the runner verbatim.
+        client = _FakePrepareClient(_report(input_form, pipe_ref=pipe_ref))
+
+        with pytest.raises(InputPreparationError, match="carries no input-form descriptor for the selected pipe"):
+            asyncio.run(prepare_inputs(client, files=_FILES, inputs={"photo": bytes([1])}))
+        assert client.upload_calls == []
 
     # ── The descriptor-guided walk ────────────────────────────────────────
 
@@ -555,20 +586,16 @@ class TestPrepareInputs:
         assert client.upload_calls == []
 
     def test_raises_when_the_signature_does_not_resolve(self) -> None:
-        invalid = PipelexInvalidReport(is_valid=False, message="closure did not validate", validation_errors=[])
+        invalid = CrateInvalidReport.model_validate(PipeIOBodies.INVALID)
         client = _FakePrepareClient(invalid)
 
-        with pytest.raises(InputPreparationError, match="the method signature did not resolve"):
+        with pytest.raises(InputPreparationError) as exc_info:
             asyncio.run(prepare_inputs(client, files=_FILES, inputs={"photo": bytes([1])}))
 
-    def test_a_report_without_the_descriptor_is_an_error_not_a_silent_no_op(self) -> None:
-        # Never a silent degrade to "no uploads": without the descriptor there is no signature
-        # to prepare against, and the caller's local path would travel to the runner verbatim.
-        client = _FakePrepareClient(_report(None))
-
-        with pytest.raises(InputPreparationError, match="carries no `input_form` descriptor"):
-            asyncio.run(prepare_inputs(client, files=_FILES, inputs={"photo": bytes([1])}))
-        assert client.upload_calls == []
+        assert (
+            str(exc_info.value)
+            == "Cannot prepare inputs: the method signature did not resolve — Input 'doc' is declared but never read by the template."
+        )
 
     def test_surfaces_rejected_asset_before_returning(self) -> None:
         error = ApiResponseError(
@@ -583,11 +610,6 @@ class TestPrepareInputs:
 
     def test_wires_through_the_real_client(self, mocker: MockerFixture) -> None:
         client = PipelexAPIClient(api_key="test-token", base_url=_BASE_URL)
-        validate_body = {
-            "is_valid": True,
-            "bundle_blueprint": {},
-            "input_form": {_PIPE_REF: {"fields": [{"kind": "image", "name": "photo", "required": True, "presence": "plain", "gating": True}]}},
-        }
         upload_body = {"uri": "pipelex-storage://user/assets/1.bin", "filename": "upload.bin"}
         request = httpx.Request("POST", f"{_BASE_URL}/x")
         send = mocker.patch.object(
@@ -595,32 +617,64 @@ class TestPrepareInputs:
             "_send",
             mocker.AsyncMock(
                 side_effect=[
-                    httpx.Response(200, json=validate_body, request=request),
+                    httpx.Response(200, json=PipeIOBodies.VALID, request=request),
                     httpx.Response(200, json=upload_body, request=request),
                 ]
             ),
         )
 
-        prepared = asyncio.run(client.prepare_inputs(files=_FILES, inputs={"photo": bytes([1, 2, 3])}))
+        prepared = asyncio.run(
+            client.prepare_inputs(
+                files=[MthdsFileItem(content='domain = "smoke"', source="smoke.mthds")],
+                inputs={"doc": bytes([1, 2, 3]), "note": "hi", "dossier": {"title": "t"}},
+            )
+        )
 
-        assert prepared.inputs == {"photo": {"url": "pipelex-storage://user/assets/1.bin"}}
+        assert prepared.inputs == {"doc": {"url": "pipelex-storage://user/assets/1.bin"}, "note": "hi", "dossier": {"title": "t"}}
         assert len(prepared.uploads) == 1
-        assert send.await_args_list[0].args[1] == f"{_BASE_URL}/v1/validate"
+        first_call = send.await_args_list[0]
+        assert first_call.args[1] == f"{_BASE_URL}/v1/pipe-io"
+        assert json.loads(first_call.kwargs["content"]) == {
+            "files": [{"content": 'domain = "smoke"', "source": "smoke.mthds"}],
+            "all_pipes": False,
+            "include_files": False,
+        }
+        assert first_call.kwargs["request_timeout"] == 30.0
 
     def test_wires_a_method_ref_through_the_real_client(self, mocker: MockerFixture) -> None:
         client = PipelexAPIClient(api_key="test-token", base_url=_BASE_URL)
-        validate_body = {
-            "is_valid": True,
-            "bundle_blueprint": {},
-            "input_form": {_PIPE_REF: {"fields": [{"kind": "text", "name": "question", "required": True, "presence": "plain", "gating": True}]}},
-        }
         request = httpx.Request("POST", f"{_BASE_URL}/x")
-        send = mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=httpx.Response(200, json=validate_body, request=request)))
+        send = mocker.patch.object(client, "_send", mocker.AsyncMock(return_value=httpx.Response(200, json=PipeIOBodies.VALID, request=request)))
 
-        asyncio.run(client.prepare_inputs(method_ref="github.com/o/r", inputs={"question": "hi"}))
+        asyncio.run(client.prepare_inputs(method_ref="github.com/o/r", pipe_ref="smoke.echo", inputs={"note": "hi"}))
 
-        body = json.loads(send.await_args_list[0].kwargs["content"])
-        assert body["method_ref"] == "github.com/o/r"
-        assert body["views"] == ["input_form"]
-        assert body["allow_signatures"] is True
-        assert "mthds_contents" not in body
+        call = send.await_args_list[0]
+        assert json.loads(call.kwargs["content"]) == {
+            "method_ref": "github.com/o/r",
+            "pipe_ref": "smoke.echo",
+            "all_pipes": False,
+            "include_files": False,
+        }
+        # The server may clone the repository before it answers.
+        assert call.kwargs["request_timeout"] == 180.0
+
+    def test_wires_a_refused_selection_off_the_wire(self, mocker: MockerFixture) -> None:
+        # The mapping reads `error_type` off the problem document the real client parses.
+        client = PipelexAPIClient(api_key="test-token", base_url=_BASE_URL)
+        request = httpx.Request("POST", f"{_BASE_URL}/v1/pipe-io")
+        mocker.patch.object(
+            client,
+            "_send",
+            mocker.AsyncMock(
+                return_value=httpx.Response(
+                    422, json=PipeIOBodies.UNKNOWN_PIPE_REFUSAL, headers={"content-type": "application/problem+json"}, request=request
+                )
+            ),
+        )
+
+        with pytest.raises(InputPreparationError, match="the pipe could not be selected") as exc_info:
+            asyncio.run(client.prepare_inputs(files=_FILES, pipe_ref="smoke.absent", inputs={}))
+
+        cause = exc_info.value.__cause__
+        assert isinstance(cause, ApiResponseError)
+        assert cause.error_type == "EntryPipeNotFoundError"

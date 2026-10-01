@@ -307,13 +307,14 @@ class PipelexValidationReport(ValidationReport):
     here could only be a copy free to drift from the runtime that emits it."""
 
     default_pipe_ref: str | None = None
-    """The qualified `pipe_ref` a caller gets by omitting the pipe selector, or `None` when the
-    closure declares none or several.
+    """The qualified `pipe_ref` a selector-less run would execute, or `None` when the closure
+    declares no `main_pipe` (or a fetched manifest's `main_pipe` resolves to no pipe).
 
     Manifest-aware for a fetched package, which is what makes it outrank a `bundle_blueprint` read:
     a published package may name its entry pipe in `METHODS.toml` alone, and the blueprint never
     carries a manifest. Optional and read leniently — a runner that predates the field simply sends
-    nothing, so a consumer falls back (`prepare_inputs` reads the blueprint's `main_pipe` next)."""
+    nothing. It is the run default, and not `pipe_io`'s field of the same name, which states `None`
+    where several domains declare a `main_pipe` rather than naming the first."""
 
     pipe_io_contracts: PipeIOContracts = Field(default_factory=dict)
     """The per-pipe I/O contracts, typed by importing the standard's own client models.

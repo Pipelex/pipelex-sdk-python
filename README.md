@@ -71,6 +71,21 @@ report = await client.validate(method_ref="github.com/Pipelex/methods/documents@
 report = await client.validate(method_id="mt_123")
 ```
 
+### Read a method's inputs and outputs
+
+`pipe_io()` returns a method's pipe I/O contracts, input form and output form in one call, without validating it (no dry run). The server selects the pipe — your `pipe_ref`, else the package manifest's `main_pipe`, else the closure's single `main_pipe` declaration — and the three artifacts are the standard's own models from `mthds.protocol`:
+
+```python
+from pipelex_sdk.crate_models import PipeIORequest, PipeIOValidReport
+
+report = await client.pipe_io(PipeIORequest(method_ref="github.com/Pipelex/methods/documents@v0.1.0"))
+if isinstance(report, PipeIOValidReport) and report.pipe_ref is not None:
+    descriptor = report.input_form[report.pipe_ref]
+    print([field.name for field in descriptor.fields], report.is_runnable)
+```
+
+`all_pipes=True` keys the three maps by every pipe instead, and `include_files=True` echoes the closure's `.mthds` files. `prepare_inputs` reads its signature from this route, so it needs an API that serves `POST /v1/pipe-io`.
+
 ### Generate typed code into your project
 
 `codegen()` projects a method into stamped typed artifacts plus their `codegen.lock`, and `write_codegen_tree` writes that response to disk verbatim, so the tree is byte-identical to a local `pipelex codegen types` run and no `pipelex` install is needed:
@@ -169,7 +184,7 @@ Branch on `error_domain` (`input`, `config`, `runtime`), `type_uri` and `retryab
 
 ### API errors: branch on `type_uri` and `error_domain`, not the HTTP status
 
-Every `/v1` route raises a typed `ApiResponseError` on a non-2xx answer, carrying the members of the RFC 9457 problem document: the protocol routes (`execute`, `start`, `validate`, `models`, `version`), the run status and results reads, and the product routes — the account, methods, organization, billing, API-key, onboarding, storage and upload methods, `codegen` and `resolve`, and the run records (`list_runs`, `iterate_runs`, `get_run_detail`, `update_run`). It is `mthds`'s own `ApiResponseError` narrowed, so `except mthds.runners.api.exceptions.ApiResponseError` catches it too; `health` raises `PipelineRequestError`, and `docs/architecture.md` lists the error regimes. The branch fields are `type_uri`, the problem's `type`, a stable URI naming the error class that every problem carries, and `error_domain`, the coarse class (`input` means the caller can fix it, `config` that a configuration change is needed, `runtime` that execution failed). `error_domain` is carried only by the problems the runner renders — a run route's refusal, and those of `codegen` and `resolve`, which the hosted API relays from the runner — and is `None` on the platform's own problems, such as those of the account, billing and API-key routes, which name their class by `type_uri` alone:
+Every `/v1` route raises a typed `ApiResponseError` on a non-2xx answer, carrying the members of the RFC 9457 problem document: the protocol routes (`execute`, `start`, `validate`, `models`, `version`), the run status and results reads, and the product routes — the account, methods, organization, billing, API-key, onboarding, storage and upload methods, `codegen`, `resolve` and `pipe_io`, and the run records (`list_runs`, `iterate_runs`, `get_run_detail`, `update_run`). It is `mthds`'s own `ApiResponseError` narrowed, so `except mthds.runners.api.exceptions.ApiResponseError` catches it too; `health` raises `PipelineRequestError`, and `docs/architecture.md` lists the error regimes. The branch fields are `type_uri`, the problem's `type`, a stable URI naming the error class that every problem carries, and `error_domain`, the coarse class (`input` means the caller can fix it, `config` that a configuration change is needed, `runtime` that execution failed). `error_domain` is carried only by the problems the runner renders — a run route's refusal, and those of `codegen`, `resolve` and `pipe_io`, which the hosted API relays from the runner — and is `None` on the platform's own problems, such as those of the account, billing and API-key routes, which name their class by `type_uri` alone:
 
 ```python
 from pipelex_sdk.errors import ApiResponseError
@@ -198,12 +213,13 @@ There is no barrel import — package `__init__.py` files stay empty. Import eac
 - **Error reports** — `from pipelex_sdk.error_models import RunErrorReport, UserAction, ProviderErrorMetadata, MigrationErrorBlock, FieldError`
 - **Product wire models** — `from pipelex_sdk.product_models import UserProfile, MethodData, MethodWriteInput, Membership, MembershipsResponse, SubscriptionResponse, PlanView, InvoiceView, OnboardingSubmission, UploadInput, UploadedFile, RunHistoryItem, RunDetail, ...`, with the catalog-source readers beside them: `method_source_to_contents` turns a fetched `MethodData.mthds` into the `mthds_contents` a run or a validate takes, and `MethodFile` / `parse_method_files` / `serialize_method_files` are the codec for a method's custom PipeFunc `python`.
 - **Validation verdict types** — `from pipelex_sdk.validation_models import PipelexValidationResult, PipelexValidationReport, PipelexInvalidReport, ValidationErrorItem, SuggestedFix, VALIDATION_VIEW_INPUT_FORM, ...`
+- **Crate routes** — `from pipelex_sdk.crate_models import ResolveRequest, CodegenRequest, PipeIORequest, PipeIOValidReport, CrateInvalidReport, MthdsFileItem, ...`, the requests and the two 200 arms of `resolve`, `codegen` and `pipe_io`
 - **Codegen tree** — `from pipelex_sdk.codegen_writer import write_codegen_tree, CodegenTreeWriteReport` to write one, `from pipelex_sdk.codegen_check import run_codegen_check, CodegenCheckReport, CodegenDrift, DriftCategory` to verify one, with the format primitives in `pipelex_sdk.codegen_lock` (`CodegenLock`, `parse_lock`, `load_lock`, `validate_artifact_path`, ...) and `pipelex_sdk.codegen_stamp` (`STAMPABLE_SUFFIXES`, `is_stampable_artifact_path`, `compute_content_hash`, `parse_stamped`, ...)
 - **Typed errors** — `from pipelex_sdk.errors import ApiResponseError, ApiUnreachableError, PipelineExecuteTimeoutError, PagingNotTerminatingError, RunFailedError, RunTimeoutError, RunLifecycleUnavailableError, RunStillRunningError, CodegenError, CodegenLockError, ...`
 - **Version** — `from pipelex_sdk.version import __version__`
 - **Client identification** — `from pipelex_sdk.user_agent import AppInfo, build_user_agent, is_token`
 - **Protocol surface** (the MTHDS standard's wire types) comes from the `mthds` dependency — e.g. `from mthds.protocol.exceptions import PipelineRequestError`, `from mthds.protocol.models import ValidationResult` (the neutral verdict union that `PipelexValidationResult` narrows).
-- **Input-form descriptors and pipe I/O contracts** come from `mthds` too, because they are the standard's artifacts and this SDK only carries them: `from mthds.protocol.input_form import InputForm, InputFormField, ListField, TextField, ...` and `from mthds.protocol.pipe_io_contracts import PipeIOContracts, PipeInputContract, PresenceMarker, IOMultiplicity, ...`. `PipelexValidationReport.input_form` and `.pipe_io_contracts` are typed with them, so a node narrows on its `kind` and a slot's presence and multiplicity read as enums — but `pipelex_sdk` does not re-export the vocabulary, and importing it from here is the one supported path.
+- **Input-form descriptors and pipe I/O contracts** come from `mthds` too, because they are the standard's artifacts and this SDK only carries them: `from mthds.protocol.input_form import InputForm, InputFormField, ListField, TextField, ...` and `from mthds.protocol.pipe_io_contracts import PipeIOContracts, PipeInputContract, PresenceMarker, IOMultiplicity, ...`. `PipelexValidationReport.input_form` and `.pipe_io_contracts` are typed with them, as are the three maps of `PipeIOValidReport` (with `mthds.protocol.output_form.OutputForm`), so a node narrows on its `kind` and a slot's presence and multiplicity read as enums — but `pipelex_sdk` does not re-export the vocabulary, and importing it from here is the one supported path.
 
 ## Development
 

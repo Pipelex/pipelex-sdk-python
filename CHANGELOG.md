@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`pipe_io()`, a method's inputs and outputs in one call**: `PipelexAPIClient.pipe_io(PipeIORequest(...))` calls `POST /v1/pipe-io` and returns, with no dry run, the selected pipe's `pipe_io_contracts`, `input_form` and `output_form` typed from `mthds.protocol`, beside the resolved `pipe_ref`, the method's `default_pipe_ref`, `pending_signatures` and `is_runnable` (`PipeIOValidReport`, or the `CrateInvalidReport` verdict). It takes `files`, `method_ref` or `method_id` like `resolve`, plus `pipe_ref`, `all_pipes` (every pipe instead of one) and `include_files` (echo the closure's `.mthds` files); a refused selection raises `ApiResponseError`.
+
+### Changed
+
+- **`prepare_inputs` reads its signature from `POST /v1/pipe-io`, which selects the pipe (Breaking)**: it needs an API that serves the route and raises `ApiResponseError` against one that does not. The pipe is the server's choice — your `pipe_ref`, else a package manifest's `main_pipe`, else the closure's single `main_pipe` declaration — so a method declaring no entry pipe or several now needs `pipe_ref` even when it has a single pipe, and a package naming its entry pipe in its manifest alone no longer does. A `pipe_ref` naming a dependency package's pipe (`alias->domain.pipe_code`) is refused before any request, as a bare one already was. A selection the API refuses with the runner's entry-lookup `error_type` (`pipelex-api` v0.33.1 and later) raises `InputPreparationError` with the server's reason. The route runs no dry run, so a method whose dry run fails still prepares, but it refuses an address-based cross-package dependency that `validate` loaded, so a closure carrying one no longer prepares.
+
 ## [v0.15.0] - 2026-10-01
 
 ### Added

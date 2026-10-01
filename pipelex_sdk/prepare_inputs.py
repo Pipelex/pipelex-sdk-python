@@ -4,14 +4,14 @@ interprets the caller's inputs top-down against it, uploads the file-bearing val
 returns rewritten inputs (canonical content carrying `pipelex-storage://` in `url`) plus one
 upload record per prepared asset. Python counterpart of `pipelex-sdk-js`'s `prepareInputs`.
 
-The signature comes from ONE `POST /v1/validate` asking for `views: ["input_form"]`, and the
-walk is discriminated on each descriptor node's declared `kind` — never on the shape of a
-value. That is the whole point: the previous source, the explicit inputs template, marked a
-file position by rendering a `{"url": …}` dict, which is a side effect of a field being NAMED
-`url` rather than of its concept being an Image or a Document. Two positions were misread as a
-result — an OPTIONAL nested file field, which the required-only template never rendered, was
-left un-uploaded and its local path travelled to the runner as a literal string; and a text
-field merely named `url` was read from disk and uploaded. The descriptor states the resolved
+The signature comes from ONE `POST /v1/pipe-io`, which selects the pipe server-side and returns
+its input-form descriptor with no dry run, and the walk is discriminated on each descriptor
+node's declared `kind` — never on the shape of a value. That is the whole point: the previous
+source, the explicit inputs template, marked a file position by rendering a `{"url": …}` dict,
+which is a side effect of a field being NAMED `url` rather than of its concept being an Image or
+a Document. Two positions were misread as a result — an OPTIONAL nested file field, which the
+required-only template never rendered, was left un-uploaded and its local path travelled to the
+runner as a literal string; and a text field merely named `url` was read from disk and uploaded. The descriptor states the resolved
 kind at every depth and includes optional fields, so both are gone.
 
 See `docs/input-preparation.md`. The design of record is shared with `@pipelex/sdk` and
@@ -33,7 +33,6 @@ from mthds.protocol.input_form import (
     DocumentItem,
     EnumItem,
     ImageItem,
-    InputForm,
     InputFormItem,
     ListItem,
     NumberItem,
@@ -44,16 +43,27 @@ from mthds.protocol.input_form import (
 )
 from pydantic import BaseModel
 
-from pipelex_sdk.errors import InputPreparationError
+from pipelex_sdk.crate_models import CrateInvalidReport, PipeIORequest, PipeIOValidReport
+from pipelex_sdk.errors import ApiResponseError, InputPreparationError
 from pipelex_sdk.upload import UploadRecord, UploadSource, upload_file
-from pipelex_sdk.validation_models import VALIDATION_VIEW_INPUT_FORM, PipelexInvalidReport, PipelexValidationReport, PipelexValidationResult
 
 if TYPE_CHECKING:
-    from pipelex_sdk.crate_models import MthdsFileItem
+    from pipelex_sdk.crate_models import MthdsFileItem, PipeIOResponse
     from pipelex_sdk.product_models import UploadedFile, UploadInput
 
 PIPELEX_STORAGE_SCHEME = "pipelex-storage://"
 _HTTP_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+# How `/v1/pipe-io` says it refused the pipe selection, which `_fetch_signature` turns into an
+# `InputPreparationError`: a `422` whose `error_type` is one of the engine's entry-lookup errors
+# (pipelex-api >= 0.33.1). `EntryPipeNotFoundError` is an unknown `pipe_ref`, a manifest
+# `main_pipe` the closure lacks, or no `pipe_ref` and no `main_pipe`; `EntryPipeAmbiguousError` is
+# a bare code matching pipes in several domains, or no `pipe_ref` and several `main_pipe`s. Every
+# other `422` — a malformed body, a `method_ref` that does not parse or fetch, a stored method with
+# no source — is not a selection and stays the `ApiResponseError` it is. The names are the
+# runner's exception classes; they live here alone, so a rename upstream is a one-line edit.
+_HTTP_UNPROCESSABLE_ENTITY = 422
+_PIPE_SELECTION_ERROR_TYPES: frozenset[str] = frozenset({"EntryPipeNotFoundError", "EntryPipeAmbiguousError"})
 
 
 class PreparedInputs(BaseModel):
@@ -69,24 +79,14 @@ class PreparedInputs(BaseModel):
 
 
 class _PrepareClient(Protocol):
-    """The client surface `prepare_inputs` needs: raw `upload` plus `validate` as the
-    signature source. Typed as `PipelexAPIClient.validate`'s own signature so the client
-    satisfies it structurally.
+    """The client surface `prepare_inputs` needs: raw `upload` plus `pipe_io` as the
+    signature source. Typed as `PipelexAPIClient`'s own signatures so the client satisfies it
+    structurally.
     """
 
     async def upload(self, upload_input: UploadInput) -> UploadedFile: ...
 
-    async def validate(
-        self,
-        mthds_contents: list[str] | None = None,
-        allow_signatures: bool = False,
-        mthds_sources: list[str] | None = None,
-        render: list[str] | None = None,
-        views: list[str] | None = None,
-        *,
-        method_ref: str | None = None,
-        method_id: str | None = None,
-    ) -> PipelexValidationResult: ...
+    async def pipe_io(self, request: PipeIORequest) -> PipeIOResponse: ...
 
 
 class _PrepareContext:
@@ -99,36 +99,24 @@ class _PrepareContext:
         self.dedup: dict[UploadSource, str] = {}
 
 
-def _non_empty_string(value: object) -> str | None:
-    """A trimmed non-empty string, or `None` — the "empty is absent" rule.
+def _caller_selector(value: object, *, argument: str) -> str | None:
+    """A caller-supplied selector, trimmed — `None` when absent, refused when not a string.
 
-    Lenient on purpose, because what it reads is OPAQUE server payload — `bundle_blueprint`,
-    whose schema is the runtime's, not ours — where a shape that does not match is genuinely
-    an absent value to fall through on. A CALLER-supplied selector goes through
-    `_caller_selector` instead, which refuses a non-string rather than reading it as absent.
+    The "empty is absent" rule, plus a boundary check. Coercing a non-string to `None` here
+    would read `method_ref=123` as an absent selector and let it fall through to another one —
+    defeating the exactly-one check this whole surface rests on — and would let a non-string
+    `pipe_ref` silently take the default pipe instead of the one the caller named. Both are
+    caller mistakes, and a caller mistake owes an `InputPreparationError` raised before any
+    request.
 
     Deliberately local rather than reusing `client.py`'s `_normalized_selector`: that helper
     is private to the client boundary and raises `PipelineRequestError`, where every failure
     of this module owes an `InputPreparationError`.
     """
-    if not isinstance(value, str):
+    if value is None:
         return None
-    trimmed = value.strip()
-    return trimmed or None
-
-
-def _caller_selector(value: object, *, argument: str) -> str | None:
-    """A caller-supplied selector, trimmed — `None` when absent, refused when not a string.
-
-    The "empty is absent" rule of `_non_empty_string`, plus the boundary check that helper
-    must not make. Coercing a non-string to `None` here would read `method_ref=123` as an
-    absent selector and let it fall through to another one — defeating the exactly-one check
-    this whole surface rests on — and would let a non-string `pipe_ref` silently take the
-    default pipe instead of the one the caller named. Both are caller mistakes, and a caller
-    mistake owes an `InputPreparationError` raised before any request.
-    """
-    if value is None or isinstance(value, str):
-        return _non_empty_string(value)
+    if isinstance(value, str):
+        return value.strip() or None
     msg = f"Cannot prepare inputs: `{argument}` must be a string, got {type(value).__name__}."
     raise InputPreparationError(msg)
 
@@ -285,8 +273,8 @@ def _resolve_selector(
     options' rule and the `CrateRequestBase` normalizers, so an empty selector may sit beside
     a real one without tripping the XOR. A non-string `method_ref` / `method_id` is NOT absent
     but refused, so a mistyped selector cannot slip past the XOR as a silent `None`. The check
-    lives here because this module is what composes the `validate` call, and it runs BEFORE
-    any request.
+    lives here, rather than in `PipeIORequest`'s own validator, so that it raises the
+    `InputPreparationError` this module owes, and it runs BEFORE any request.
     """
     selected_files = files or None
     selected_method_ref = _caller_selector(method_ref, argument="method_ref")
@@ -316,102 +304,73 @@ def _resolve_selector(
     return selected_files, selected_method_ref, selected_method_id
 
 
-async def _fetch_signature(
-    client: _PrepareClient,
-    *,
-    files: list[MthdsFileItem] | None,
-    method_ref: str | None,
-    method_id: str | None,
-) -> PipelexValidationReport:
-    """Ask `validate` for the signature, whatever the selector, and hand back the valid report.
+def _checked_pipe_ref(pipe_ref: object) -> str | None:
+    """The caller's `pipe_ref`, normalized — `None` when absent, refused when it names a dependency
+    package's pipe, when bare, or when not a string. Both refusals are raised before any request, in
+    the order `@pipelex/sdk`'s `normalizePipeRef` checks them, with the same wording.
 
-    `allow_signatures=True` on purpose: preparation needs a pipe's DECLARED inputs, and a
-    bundle mid-authoring with an unresolved signature elsewhere must not be refused inputs for
-    a pipe whose inputs are declared — whether the bundle runs is the run's verdict, not
+    - An `alias->domain.pipe_code` ref is refused because the alias names a dependency package's
+      pipe, and preparation covers the method's own pipes: the crate routes do not load an
+      address-based dependency at all. The run route takes such a ref; preparation refuses it, and
+      that asymmetry is deliberate.
+    - A bare `pipe_code` is refused because a request names a pipe by its qualified ref. The route
+      will refuse it too once the runner's shared selection enforces that rule; until then it would
+      resolve a bare code across domains, and preparation does not lean on that fallback.
+    """
+    requested = _caller_selector(pipe_ref, argument="pipe_ref")
+    if requested is None:
+        return None
+    if "->" in requested:
+        msg = (
+            f'Cannot prepare inputs: `pipe_ref` "{requested}" names a dependency package\'s pipe. '
+            "Preparation covers the method's own pipes: name one as `domain.pipe_code`."
+        )
+        raise InputPreparationError(msg)
+    if "." not in requested:
+        msg = f'Cannot prepare inputs: `pipe_ref` must be qualified (`domain.pipe_code`), got the bare "{requested}".'
+        raise InputPreparationError(msg)
+    return requested
+
+
+def _is_pipe_selection_refusal(exc: ApiResponseError) -> bool:
+    """Whether a `/v1/pipe-io` error is the route refusing the pipe selection, and nothing else."""
+    return exc.status == _HTTP_UNPROCESSABLE_ENTITY and exc.error_type in _PIPE_SELECTION_ERROR_TYPES
+
+
+async def _fetch_signature(client: _PrepareClient, *, request: PipeIORequest) -> PipeIOValidReport:
+    """Ask `pipe_io` for the selected pipe's signature and hand back the valid report.
+
+    The route selects the pipe — the request's `pipe_ref`, else a fetched package manifest's
+    `main_pipe`, else the closure's single `main_pipe` declaration — so this module keeps no
+    selection chain of its own, and a package that names its entry pipe in its manifest alone
+    is selected like any other.
+
+    The route runs no dry run. Preparation needs a pipe's DECLARED inputs, which static
+    validation settles, so a pending signature elsewhere in the method does not refuse inputs
+    to a pipe whose inputs are declared — whether the method runs is the run's verdict, not
     preparation's. An `is_valid: false` arm still means the closure does not load, which IS a
     preparation failure.
 
-    No timeout override for a `method_ref`: `validate` already rides the 20-minute blocking
-    ceiling, and the internal 3-minute fetch budget exists to RAISE the ~30s poll-ceiling
-    routes, not to lower this one.
+    A refused selection — a `422` whose `error_type` is an entry-lookup error (see
+    `_PIPE_SELECTION_ERROR_TYPES`) — becomes an `InputPreparationError` carrying the server's
+    `detail`, which names the candidates where there are any, with the `ApiResponseError` kept as
+    its `__cause__` for a caller who needs the whole problem document. Every other non-2xx
+    propagates as the `ApiResponseError` it is.
     """
-    views = [VALIDATION_VIEW_INPUT_FORM]
-    result: PipelexValidationResult
-    if files is not None:
-        contents = [file_item.content for file_item in files]
-        # `validate_files`' rule: label every content once any file names a source, so the
-        # server never sees a length-mismatched `mthds_sources` array.
-        sources: list[str] | None
-        if any(file_item.source is not None for file_item in files):
-            sources = [file_item.source or f"inline://file-{index + 1}.mthds" for index, file_item in enumerate(files)]
-        else:
-            sources = None
-        result = await client.validate(contents, True, sources, None, views)
-    else:
-        result = await client.validate(None, True, None, None, views, method_ref=method_ref, method_id=method_id)
+    try:
+        response = await client.pipe_io(request)
+    except ApiResponseError as exc:
+        if not _is_pipe_selection_refusal(exc):
+            raise
+        reason = exc.server_message or exc.title or exc.response_body or exc.status_text
+        msg = f"Cannot prepare inputs: the pipe could not be selected — {reason}"
+        raise InputPreparationError(msg) from exc
 
-    if isinstance(result, PipelexInvalidReport):
-        first = result.validation_errors[0].message if result.validation_errors else result.message
+    if isinstance(response, CrateInvalidReport):
+        first = response.validation_errors[0].message if response.validation_errors else response.message
         msg = f"Cannot prepare inputs: the method signature did not resolve — {first}"
         raise InputPreparationError(msg)
-    return result
-
-
-def _blueprint_main_pipe_ref(blueprint: dict[str, Any]) -> str | None:
-    """The bundle blueprint's declared `main_pipe`, qualified by its `domain` when authored bare.
-
-    Every read is defensive: `bundle_blueprint` is carried opaquely by this SDK on purpose —
-    its schema is the runtime's, not ours — so a shape that does not match falls through
-    rather than raising.
-    """
-    main_pipe = _non_empty_string(blueprint.get("main_pipe"))
-    if main_pipe is None:
-        return None
-    if "." in main_pipe:
-        return main_pipe
-    domain = _non_empty_string(blueprint.get("domain"))
-    return f"{domain}.{main_pipe}" if domain is not None else None
-
-
-def _select_pipe_ref(report: PipelexValidationReport, input_form: InputForm, requested: str | None) -> str:
-    """Pick the pipe whose descriptor guides the walk.
-
-    `validate` has no pipe selector — its report describes every pipe, keyed by qualified
-    `pipe_ref` — so the choice is made here, in the order `docs/input-preparation.md`
-    documents: an explicit qualified `pipe_ref`, then the report's typed resolved default,
-    then the bundle's declared `main_pipe`, then the single pipe, else an error naming the
-    candidates.
-    """
-    refs = list(input_form)
-    candidates = ", ".join(refs) if refs else "(none — the closure declares no pipes)"
-
-    if requested is not None:
-        if "." not in requested:
-            msg = (
-                "Cannot prepare inputs: `pipe_ref` must be qualified (`domain.pipe_code`), got the bare "
-                f'"{requested}". The method declares: {candidates}.'
-            )
-            raise InputPreparationError(msg)
-        if requested not in input_form:
-            msg = f'Cannot prepare inputs: the method declares no pipe "{requested}". It declares: {candidates}.'
-            raise InputPreparationError(msg)
-        return requested
-
-    # The typed resolved default, when the runner serves it (manifest-aware for a `method_ref`
-    # package, which is why it outranks the blueprint read below).
-    typed_default = _non_empty_string(report.default_pipe_ref)
-    if typed_default is not None and typed_default in input_form:
-        return typed_default
-
-    blueprint_default = _blueprint_main_pipe_ref(report.bundle_blueprint)
-    if blueprint_default is not None and blueprint_default in input_form:
-        return blueprint_default
-
-    if len(refs) == 1:
-        return refs[0]
-
-    msg = f"Cannot prepare inputs: the method declares no single default pipe, so `pipe_ref` is required. It declares: {candidates}."
-    raise InputPreparationError(msg)
+    return response
 
 
 async def prepare_inputs(
@@ -427,16 +386,18 @@ async def prepare_inputs(
     file-bearing positions and return copy-on-write rewritten inputs plus upload records.
 
     Args:
-        client: The client supplying `upload` and `validate`.
+        client: The client supplying `upload` and `pipe_io`.
         files: The method closure inline. Exactly one of `files` / `method_ref` / `method_id`.
         method_ref: A published method's address —
             `github.com/<owner>/<repo>[/<selector>][@<tag>]` — resolved by the runner.
         method_id: A stored method's hosted catalog id (`mt_…`), resolved by the platform.
             A pure pass-through: nothing is expanded client-side.
-        pipe_ref: The target pipe as a QUALIFIED `domain.pipe_code`. Omit it to default —
-            see "Pipe selection" in `docs/input-preparation.md`. A bare `pipe_code` is
-            refused: the descriptor is keyed by qualified refs, and search is a run-route
-            affordance this helper deliberately does not grow.
+        pipe_ref: The target pipe as a QUALIFIED `domain.pipe_code`. Omit it and the route
+            selects the method's entry pipe — see "Pipe selection" in
+            `docs/input-preparation.md`. A bare `pipe_code` is refused before any request:
+            the descriptor is keyed by qualified refs, and search is a run-route affordance
+            this helper deliberately does not grow. So is an `alias->domain.pipe_code` ref,
+            which names a dependency package's pipe rather than one of the method's own.
         inputs: The caller's inputs (variable name → value), compact or explicit-envelope
             per input.
 
@@ -446,35 +407,37 @@ async def prepare_inputs(
         per uploaded asset.
 
     Raises:
-        InputPreparationError: No selector or several; a selector that is not a string; the
-            closure did not resolve; the report carries no descriptor; the pipe could not be
-            selected; or a value at a file position is unusable. HTTP(S) URLs and existing
+        InputPreparationError: No selector or several; a selector or `pipe_ref` that is not a
+            string; a bare `pipe_ref`, or one naming a dependency package's pipe
+            (`alias->domain.pipe_code`); the closure did not resolve; the route refused the pipe
+            selection with the runner's entry-lookup `error_type` (pipelex-api >= 0.33.1) — an
+            unknown `pipe_ref`, or no `pipe_ref` and a method declaring no single entry pipe —
+            carrying the server's `detail`, with the `ApiResponseError` as its `__cause__`; or a
+            value at a file position is unusable. HTTP(S) URLs and existing
             `pipelex-storage://` URIs pass through unchanged, and every failure is raised
             BEFORE any run is created.
-        ApiResponseError: A no-verdict condition from `/v1/validate` — a malformed
-            selector, an unknown or foreign-org `method_id` (`404`), a stored method with no
-            source, a fetch failure at the address. `validate` is 200-diagnostic, so only a
-            failure to produce any verdict arrives here, as the typed error every route raises.
+        ApiResponseError: Any other no-verdict condition from `/v1/pipe-io` — an unknown or
+            foreign-org `method_id` or no package at a `method_ref` address (`404`), a
+            `method_ref` that does not parse or fetch or a stored method with no source
+            (`422`), a registry-form `method_ref` (`501`), auth, a server fault, or an API that
+            does not serve the route at all.
     """
     selected_files, selected_method_ref, selected_method_id = _resolve_selector(files=files, method_ref=method_ref, method_id=method_id)
-    # Normalized here rather than at its use below, so a mistyped `pipe_ref` is refused on the
-    # same pre-request boundary as a mistyped selector — before the `validate` round-trip.
-    requested_pipe_ref = _caller_selector(pipe_ref, argument="pipe_ref")
-    report = await _fetch_signature(client, files=selected_files, method_ref=selected_method_ref, method_id=selected_method_id)
+    # Checked here rather than after the round-trip, so a mistyped or bare `pipe_ref` is refused
+    # on the same pre-request boundary as a mistyped selector.
+    requested_pipe_ref = _checked_pipe_ref(pipe_ref)
+    request = PipeIORequest(files=selected_files, method_ref=selected_method_ref, method_id=selected_method_id, pipe_ref=requested_pipe_ref)
+    report = await _fetch_signature(client, request=request)
 
-    input_form = report.input_form
-    if input_form is None:
-        # Never a silent degrade to "no uploads": without the descriptor there is no
-        # signature to prepare against.
-        msg = (
-            "Cannot prepare inputs: the validate report carries no `input_form` descriptor — the signature "
-            'preparation reads. The descriptor rides `views: ["input_form"]` on pipelex-api >= 0.18.0; '
-            "point the client at a runner that serves it."
-        )
+    selected_pipe_ref = report.pipe_ref
+    descriptor = report.input_form.get(selected_pipe_ref) if selected_pipe_ref is not None else None
+    if descriptor is None:
+        # The route promises the selected pipe's descriptor on every single-pipe valid answer.
+        # Never a silent degrade to "no uploads": without it there is no signature to prepare
+        # against, and the caller's local paths would travel to the runner verbatim.
+        msg = f"Cannot prepare inputs: the pipe-io answer carries no input-form descriptor for the selected pipe ({selected_pipe_ref!r})."
         raise InputPreparationError(msg)
-
-    selected_pipe_ref = _select_pipe_ref(report, input_form, requested_pipe_ref)
-    declared = {field.name: field for field in input_form[selected_pipe_ref].fields}
+    declared = {field.name: field for field in descriptor.fields}
 
     ctx = _PrepareContext(client)
     rewritten = dict(inputs)

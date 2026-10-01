@@ -1,9 +1,10 @@
-"""The crate routes — `resolve` and `codegen` — and their three-form closure selector.
+"""The crate routes — `resolve` and `codegen` — and the three-form closure selector the family shares.
 
 Ports the relevant slice of `pipelex-sdk-js/tests/crate-routes.test.ts`: verb + path + body,
 the 200-verdict discipline (branch on `is_valid`), the strict three-way XOR at request
 construction, the hosted `method_id` pass-through, and the fetch-sized budget a
-`method_ref` closure gets (the server may have to clone before it answers).
+`method_ref` closure gets (the server may have to clone before it answers). `pipe_io` has its own
+module, `test_pipe_io_route.py`; its request joins the XOR cases here, which pin the whole family.
 """
 
 import asyncio
@@ -15,7 +16,15 @@ from pydantic import ValidationError
 from pytest_mock import MockerFixture, MockType
 
 from pipelex_sdk.client import PipelexAPIClient
-from pipelex_sdk.crate_models import CodegenRequest, CodegenValidReport, CrateInvalidReport, MthdsFileItem, ResolveRequest, ResolveValidReport
+from pipelex_sdk.crate_models import (
+    CodegenRequest,
+    CodegenValidReport,
+    CrateInvalidReport,
+    MthdsFileItem,
+    PipeIORequest,
+    ResolveRequest,
+    ResolveValidReport,
+)
 from pipelex_sdk.errors import ApiResponseError
 
 _BASE_URL = "http://localhost:8081"
@@ -135,6 +144,8 @@ class TestCrateRoutes:
             ResolveRequest.model_validate(kwargs)
         with pytest.raises(ValidationError, match="exactly one"):
             CodegenRequest.model_validate({**kwargs, "target": "python-pydantic"})
+        with pytest.raises(ValidationError, match="exactly one"):
+            PipeIORequest.model_validate({**kwargs, "pipe_ref": "demo.main"})
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -156,6 +167,8 @@ class TestCrateRoutes:
             ResolveRequest.model_validate(kwargs)
         with pytest.raises(ValidationError, match="exactly one"):
             CodegenRequest.model_validate({**kwargs, "target": "python-pydantic"})
+        with pytest.raises(ValidationError, match="exactly one"):
+            PipeIORequest.model_validate({**kwargs, "pipe_ref": "demo.main"})
 
     def test_empty_selector_beside_a_real_one_is_simply_absent(self, mocker: MockerFixture) -> None:
         """An empty selector beside a real one is absent, not a conflict — exactly-one
@@ -164,6 +177,9 @@ class TestCrateRoutes:
         request = ResolveRequest(files=[MthdsFileItem(content="x")], method_ref="", method_id="  ")
         assert request.method_ref is None
         assert request.method_id is None
+        pipe_io_request = PipeIORequest(method_ref=" ", method_id="mt_1", files=[])
+        assert pipe_io_request.files is None
+        assert pipe_io_request.method_ref is None
 
         client = self._client()
         send = self._mock_send(mocker, client, _response(200, json_body=_RESOLVE_VALID))
