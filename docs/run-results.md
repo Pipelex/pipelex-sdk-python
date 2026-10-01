@@ -18,7 +18,7 @@ print(results.main_stuff, summarize_usage(results).total_cost_usd)
 | field | type | hosted (durable) path | bare-runner (blocking) path |
 |---|---|---|---|
 | `pipeline_run_id` | `str` | the run store's id | the runner's own id for the call |
-| `main_stuff` | `Any` | the `main_stuff.json` artifact | resolved out of the returned working memory |
+| `main_stuff` | `Any` | the `main_stuff.json` artifact (absent when a selection leaves it out) | resolved out of the returned working memory |
 | `graph_spec` | `Any` | the `graphspec.json` artifact | lifted off `pipe_output` |
 | `graph_assembly_error` | `str \| None` | absent until the platform relays it | lifted off `pipe_output` |
 | `pipe_io_contracts` | `PipeIOContracts \| None` | the `pipe_io_contracts.json` artifact | lifted off `pipe_output` |
@@ -32,7 +32,7 @@ print(results.main_stuff, summarize_usage(results).total_cost_usd)
 
 ## `None` versus absent — the reading this page relies on
 
-Every field but the first two is optional, and two readings of an optional field are distinct on purpose. The JS SDK reads a key the hosted body did not carry as `undefined` and a key relayed as `null` as `null`. Python has one `None`, so the SDK keeps the distinction where pydantic keeps it: in `model_fields_set`. A key the hosted body did not carry is not in the set and reads `None`; a key relayed as `null` is in the set and reads `None` too.
+Every field but `pipeline_run_id` is optional, and two readings of an optional field are distinct on purpose. The JS SDK reads a key the hosted body did not carry as `undefined` and a key relayed as `null` as `null`. Python has one `None`, so the SDK keeps the distinction where pydantic keeps it: in `model_fields_set`. A key the hosted body did not carry is not in the set and reads `None`; a key relayed as `null` is in the set and reads `None` too.
 
 ```python
 results = await client.wait_for_result(run_id)
@@ -44,6 +44,24 @@ elif results.graph_assembly_error is None:
 ```
 
 That distinction matters on the hosted path only. On the blocking path the SDK lifts every field off the runner's output and passes each one explicitly, so every field is set there whether or not the runner carried the key — the blocking path always answers, exactly as the JS twin writes `null` for each. Most consumers never need the set: a check of `is None` is the right branch for "is there a value", and `model_fields_set` is for the one question it answers, whether the wire said anything at all.
+
+## Reading only some artifacts
+
+A hosted results read fetches every artifact from the run store and re-signs every link inside them, which is wasted work for a caller that wants one of them, such as a run history showing each run's output. `get_run_result`, `wait_for_result` and `start_and_wait` take `artifacts=`, a sequence of `RunArtifact` (`pipelex_sdk/runs.py`): `GRAPH_SPEC`, `PIPE_IO_CONTRACTS`, `INPUT_FORM`, `OUTPUT_FORM`, `MAIN_STUFF`, `WORKING_MEMORY` and `TOKENS_USAGES`, each named after the field it fills. The client sends the selection as one comma-separated `?artifacts=` parameter, deduplicated and in that declaration order, and the platform then reads, re-signs and returns only those. `TOKENS_USAGES` names the usage envelope, so it fills `usage_assembly_error` too. `None`, the default, reads everything, exactly as a read without the parameter always has; an empty selection names nothing and is refused before any request with `PipelineRequestError` (the platform would answer it with a `400`, as it does an unknown name).
+
+```python
+from pipelex_sdk.runs import RunArtifact, RunResultCompleted
+
+state = await client.get_run_result(run_id, artifacts=[RunArtifact.MAIN_STUFF])
+if isinstance(state, RunResultCompleted):
+    print(state.result.main_stuff)  # graph_spec, the forms, the memory and the usage were never read
+```
+
+**Not requested against requested but not written.** The platform leaves an unselected artifact out of the body and relays a selected one that was never written as `null`, which is the distinction the next section describes, read per artifact: `results.carries(RunArtifact.GRAPH_SPEC)` is `False` when the read did not ask for the graph, and `True` with `results.graph_spec is None` when it asked and the run store has none. `carries` checks every field the artifact fills, so `TOKENS_USAGES` is carried only when both `tokens_usages` and `usage_assembly_error` came back.
+
+**The main-stuff check follows the selection.** A completed run read with no selection, or with one naming `MAIN_STUFF`, must deliver a main stuff, and `MissingMainStuffError` is raised when it does not. A selection that leaves `MAIN_STUFF` out asked for none, so `results.main_stuff` reads `None`, `carries(RunArtifact.MAIN_STUFF)` is `False`, and nothing is raised.
+
+**The blocking path ignores the selection.** `start_and_wait` against a bare runner gets every artifact in the one execute response, so narrowing would save nothing; it returns the full result, every field set, whatever was asked for. `download_artifacts` by `run_id` asks for the one artifact its scope walks, `main_stuff` or `working_memory`, and nothing else.
 
 ## `pipeline_run_id` — the durable handle
 
@@ -61,7 +79,7 @@ Against a bare runner the id identifies the call the runner just answered, but t
 
 ## `main_stuff` — the output
 
-`main_stuff` is the resolved content of the run's main output and is always present for a completed run. On the hosted path it is the `main_stuff.json` artifact; on the blocking path the SDK resolves it out of the returned working memory through the response's `main_stuff_name`. Both deliver the same content shape, so there is no shape-guessing and no path-dependent branch to write. A completed run that cannot deliver one raises `MissingMainStuffError` rather than handing back a half-filled result.
+`main_stuff` is the resolved content of the run's main output and is always present for a completed run read in full, or read with a selection that names it (a selection that leaves it out reads it as `None`, [above](#reading-only-some-artifacts)). On the hosted path it is the `main_stuff.json` artifact; on the blocking path the SDK resolves it out of the returned working memory through the response's `main_stuff_name`. Both deliver the same content shape, so there is no shape-guessing and no path-dependent branch to write. A completed run that cannot deliver one raises `MissingMainStuffError` rather than handing back a half-filled result.
 
 It is typed `Any` because the content is polymorphic: a structured output arrives as a dict of the concept's fields, and a multiple output as the envelope `{"items": [...]}` that the runtime's `ListContent` serialises to. Every content type serialises to an object, natives included — a text output is `{"text": "…"}` and a number `{"number": 0}` — so a guard written for a bare `""` or `0` never fires, and an empty multiple output is `{"items": []}` rather than `[]`. Narrow it where you read it, ideally through the types generated for the method rather than a hand-written cast.
 
